@@ -52,7 +52,7 @@ SpaceCategory = Literal[
 
 
 class SheetStats(BaseModel):
-    paths: int = 0
+    paths: int | None = None
     words: int = 0
     layers: int = 0
     dim_tokens: int = 0
@@ -430,6 +430,8 @@ class JobStatus(BaseModel):
     progress: float = 0.0
     message: str = ""
     error: str | None = None
+    sheets_done: list[dict[str, Any]] = Field(default_factory=list)
+    totals: dict[str, Any] = Field(default_factory=dict)
 
 
 class SheetPatch(BaseModel):

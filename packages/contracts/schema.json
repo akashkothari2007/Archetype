@@ -235,6 +235,12 @@
           "default": "Warm minimal",
           "title": "Style",
           "type": "string"
+        },
+        "prompt": {
+          "default": "",
+          "maxLength": 4000,
+          "title": "Prompt",
+          "type": "string"
         }
       },
       "title": "DesignBrief",
@@ -245,7 +251,8 @@
         "floors",
         "rooms",
         "area",
-        "style"
+        "style",
+        "prompt"
       ]
     },
     "DesktopProject": {

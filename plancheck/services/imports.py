@@ -1,6 +1,7 @@
 """Real source adapters. Unsupported/ambiguous semantics remain explicit review items."""
 from __future__ import annotations
-import math,re,json,uuid
+import math,os,re,json,time,uuid
+from concurrent.futures import ThreadPoolExecutor,as_completed
 from pathlib import Path
 from shapely.geometry import LineString,Polygon,MultiPoint,Point
 from shapely.ops import unary_union,polygonize
@@ -18,6 +19,21 @@ AREA_MATCH_TOL = 0.08
 ASPECT_MATCH_TOL = 0.15
 GUESTROOM_AREA_MIN = 140.0
 GUESTROOM_AREA_MAX = 520.0
+MAX_ROOM_SQFT = 700.0
+NEST_ROOM_SQFT = 140.0
+TAG_SNAP_FT = 6.0
+UNDERSZ_MEDIAN_FRAC = 0.35
+EXTRACT_ROLES = frozenset({'floor_plan','unit_plan','schedule'})
+SKIP_LABELS = {
+    'elevation':'elevation — no plan geometry',
+    'section':'section — no plan geometry',
+    'detail':'detail — no room data',
+    'roof':'roof — no rooms',
+    'site':'site — no interior',
+    'slab_edge':'slab edge — no rooms',
+    'enlarged_plan':'enlarged — gated',
+    'unknown':'title did not parse',
+}
 
 def merge_buildings(a:Building,b:Building)->Building:
     result=a.model_copy(deep=True)
@@ -46,7 +62,7 @@ def _project_point(px,py,ax,ay,bx,by):
     qx,qy=ax+t_clamp*dx,ay+t_clamp*dy
     return t_clamp*length,math.hypot(px-qx,py-qy),length
 
-def from_segments(segments,floor_id,name,source:Source,thickness=DEFAULT_THICKNESS_FT,room_names=None,collapse=True):
+def from_segments(segments,floor_id,name,source:Source,thickness=DEFAULT_THICKNESS_FT,room_names=None,collapse=True,fixtures=None,max_room_sqft=None):
     b=Building(floors=[Floor(id=floor_id,name=name)])
     known={};edges=set()
     if collapse:
@@ -80,13 +96,21 @@ def from_segments(segments,floor_id,name,source:Source,thickness=DEFAULT_THICKNE
         bridged=[LineString(_extend_segment(start,end)) for start,end in usable]
         faces=[p for p in polygonize(unary_union(bridged)) if p.area>MIN_ROOM_AREA_FT2 and p.is_valid]
         wall_lines=[(w,LineString([(v.x,v.y) for v in [next(v for v in b.vertices if v.id==w.start_id),next(v for v in b.vertices if v.id==w.end_id)]])) for w in b.walls]
-        for i,p in enumerate(sorted(faces,key=lambda p:(p.centroid.x,p.centroid.y))):
-            label=None
-            for text,xy in room_names or []:
-                if p.covers(Point(xy)) and re.search(r'ROOM|BED|STUDIO|BATH|KITCHEN|CORRIDOR|LIVING|OFFICE|\b\d{3}\b',text,re.I):label=text;break
+        kept=[]
+        for p in sorted(faces,key=lambda p:(p.centroid.x,p.centroid.y)):
+            if max_room_sqft and p.area>max_room_sqft:
+                b.review.append(ReviewItem(id=f'{floor_id}-oversize-{len(b.review)}',kind='geometry',message=f'Rejected a {p.area:.0f} sqft face over {max_room_sqft:g} sqft; not a single room.',document_id=source.document_id,sheet_id=source.sheet_id))
+                continue
+            kept.append(p)
+        for i,p in enumerate(kept):
             area=p.area
-            category='bathroom' if label and re.search('BATH|WASHROOM',label,re.I) else 'circulation' if label and 'CORRIDOR' in label.upper() else 'guestroom' if (label and re.search('STUDIO|BEDROOM',label,re.I)) or GUESTROOM_AREA_MIN<=area<=GUESTROOM_AREA_MAX else 'other'
-            b.rooms.append(Room(id=f'{floor_id}-r{i}',floor_id=floor_id,name=label or f'Space {i+1}',category=category,polygon=list(p.exterior.coords)[:-1],wall_ids=[w.id for w,line in wall_lines if p.boundary.intersection(line).length>.02],confidence=.55,needs_review=True,source=source))
+            fallback='Unnamed' if room_names else f'Space {i+1}'
+            b.rooms.append(Room(id=f'{floor_id}-r{i}',floor_id=floor_id,name=fallback,category='guestroom' if GUESTROOM_AREA_MIN<=area<=GUESTROOM_AREA_MAX else 'other',polygon=list(p.exterior.coords)[:-1],wall_ids=[w.id for w,line in wall_lines if p.boundary.intersection(line).length>.02],confidence=.55,needs_review=True,source=source))
+        tag_inside=_apply_room_names(b.rooms,room_names)
+        nested=_inherit_nested_rooms(b.rooms,fixtures or [])
+        _drop_unlabelled_fragments(b)
+        _finalize_room_flags(b.rooms,tag_inside,nested)
+        assign_shared_type_refs(b)
     b.review.append(ReviewItem(id=f'{floor_id}-review',kind='geometry',message=f'{len(b.walls)} measured wall segments and {len(b.rooms)} enclosed faces recovered. Review room identity, wall centerlines/thickness, and structural classification before compliance checks.',document_id=source.document_id,sheet_id=source.sheet_id))
     return b
 
@@ -141,12 +165,237 @@ def _aspect(polygon)->float:
     short=min(width,depth);long=max(width,depth)
     return long/short if short>1e-6 else 0.0
 
+def _is_named(room:Room)->bool:
+    name=(room.name or '').strip()
+    return bool(name) and name not in {'Unnamed'} and not name.startswith('Space ')
+
+def _is_guestroom_label(text:str)->bool:
+    return bool(re.search(r'STUDIO|\bKING\b|\bQQ\b|\bQUEEN\b|SUITE|BEDROOM',text or '',re.I))
+
+def _normalise_name(name:str)->str:
+    text=re.sub(r'\s+',' ',(name or '').upper().strip())
+    return re.sub(r'\s+\d+$','',text).strip()
+
+def _room_area(room:Room)->float:
+    if not room.polygon or len(room.polygon)<3:return 0.0
+    try:return float(Polygon(room.polygon).area)
+    except Exception:return 0.0
+
+def _unname(room:Room)->None:
+    room.name='Unnamed'
+    room.category='other' if room.category=='guestroom' else room.category
+
+def _can_apply_label(room:Room,text:str)->bool:
+    area=_room_area(room)
+    if _is_guestroom_label(text) and area<GUESTROOM_AREA_MIN:return False
+    if _category_from_name(text)=='circulation' and area<80:return False
+    return True
+
+def _is_unit_parent(room:Room)->bool:
+    if room.category=='circulation':return False
+    if re.search(r'CORRIDOR|STAIR|LOBBY|SHAFT|ELEVATOR',room.name or '',re.I):return False
+    if room.category=='guestroom' or _is_guestroom_label(room.name):return True
+    return GUESTROOM_AREA_MIN<=_room_area(room)<=MAX_ROOM_SQFT
+
+def _nested_in_parent(child:Polygon,parent:Polygon,loose=False)->bool:
+    if not parent.is_valid or not child.is_valid:return False
+    dist=parent.distance(child)
+    hull=parent.convex_hull
+    if hull.contains(child) or hull.buffer(0.75).contains(child.centroid):return True
+    if parent.envelope.buffer(0.5).contains(child.centroid) and dist<=0.6:return True
+    if dist<=0.35:return True
+    return bool(loose and parent.buffer(8.0).contains(child.centroid))
+
+def _has_fixture(poly:Polygon,points)->bool:
+    return any(poly.buffer(0.75).covers(point) or poly.distance(point)<0.75 for point in points)
+
+def _pick_parent(poly:Polygon,area:float,named,loose:bool):
+    parent=None;parent_area=None
+    for other in named:
+        outer=Polygon(other.polygon)
+        if not outer.is_valid or outer.area<=area*1.2:continue
+        if not _nested_in_parent(poly,outer,loose=loose):continue
+        if parent is None or outer.area<parent_area:
+            parent=other;parent_area=outer.area
+    return parent
+
+def _inherit_nested_rooms(rooms,fixtures)->set[str]:
+    nested=set()
+    named=[room for room in rooms if _is_named(room) and _is_unit_parent(room)]
+    points=[Point(xy) for xy in fixtures or []]
+    children={}
+    for room in rooms:
+        if _is_named(room):continue
+        poly=Polygon(room.polygon)
+        area=poly.area
+        if area>=NEST_ROOM_SQFT or not poly.is_valid:continue
+        parent=_pick_parent(poly,area,named,loose=False) or _pick_parent(poly,area,named,loose=True)
+        if parent is None:continue
+        children.setdefault(parent.id,[]).append(room)
+    parents={room.id:room for room in named}
+    for parent_id,kids in children.items():
+        parent=parents[parent_id]
+        scored=[]
+        for kid in kids:
+            poly=Polygon(kid.polygon)
+            scored.append((_has_fixture(poly,points),poly.area,kid))
+        baths={kid.id for has_fx,_area,kid in scored if has_fx}
+        if not baths:
+            baths={max(scored,key=lambda item:item[1])[2].id}
+        for has_fx,area,kid in scored:
+            if kid.id in baths:
+                kid.name=f'{parent.name} Bath';kid.category='bathroom'
+            else:
+                kid.name=f'{parent.name} Closet';kid.category='storage'
+            nested.add(kid.id)
+    return nested
+
+def _drop_unlabelled_fragments(building:Building)->None:
+    if not any(_is_named(room) for room in building.rooms):return
+    kept=[]
+    source=building.rooms[0].source if building.rooms else Source()
+    for room in building.rooms:
+        area=_room_area(room)
+        if room.name=='Unnamed' and area<NEST_ROOM_SQFT:
+            building.review.append(ReviewItem(id=f'{room.id}-unlabelled',kind='geometry',message=f'Unlabelled {area:.0f} sqft face was not matched to a room tag.',document_id=source.document_id,sheet_id=source.sheet_id))
+            continue
+        kept.append(room)
+    building.rooms=kept
+
+def _reject_undersized_labels(rooms)->set[str]:
+    dropped=set()
+    groups={}
+    for room in rooms:
+        if not _is_named(room):continue
+        groups.setdefault(room.name,[]).append(room)
+    for name,group in groups.items():
+        areas=[_room_area(r) for r in group]
+        median=sorted(areas)[len(areas)//2]
+        for room,area in zip(group,areas):
+            if area<UNDERSZ_MEDIAN_FRAC*median or not _can_apply_label(room,name):
+                dropped.add(room.id);_unname(room)
+    return dropped
+
+def _apply_room_names(rooms,room_names,snap_ft:float=TAG_SNAP_FT)->set[str]:
+    tag_inside=set()
+    if not room_names or not rooms:return tag_inside
+    claimed=set()
+    assigned={}
+    for room in rooms:
+        polygon=Polygon(room.polygon)
+        inside=[]
+        for i,(text,xy) in enumerate(room_names):
+            point=Point(xy)
+            if polygon.covers(point):inside.append((point.distance(polygon.centroid),i,text))
+        if not inside:continue
+        _dist,index,text=min(inside)
+        if not _can_apply_label(room,text):continue
+        claimed.add(index);assigned[room.id]=index;tag_inside.add(room.id)
+        room.name=text
+        category=_category_from_name(text)
+        if category!='other' or room.category=='other':room.category=category
+    for room_id in _reject_undersized_labels(rooms):
+        tag_inside.discard(room_id)
+        index=assigned.pop(room_id,None)
+        if index is not None:claimed.discard(index)
+    for room in rooms:
+        if _is_named(room):continue
+        polygon=Polygon(room.polygon)
+        nearest=[]
+        for i,(text,xy) in enumerate(room_names):
+            if i in claimed:continue
+            dist=polygon.distance(Point(xy))
+            if dist<=snap_ft:nearest.append((dist,i,text))
+        if not nearest:continue
+        _dist,index,text=min(nearest)
+        if not _can_apply_label(room,text):continue
+        claimed.add(index);room.name=text
+        category=_category_from_name(text)
+        if category!='other' or room.category=='other':room.category=category
+    for room_id in _reject_undersized_labels(rooms):
+        tag_inside.discard(room_id)
+    return tag_inside
+
+def _plausible_area(category:str,area:float)->bool:
+    if category=='guestroom':return GUESTROOM_AREA_MIN<=area<=GUESTROOM_AREA_MAX
+    if category=='bathroom':return 20<=area<NEST_ROOM_SQFT
+    if category=='storage':return 20<=area<NEST_ROOM_SQFT
+    if category=='circulation':return 40<=area<=MAX_ROOM_SQFT
+    return MIN_ROOM_AREA_FT2<=area<=MAX_ROOM_SQFT
+
+def _finalize_room_flags(rooms,tag_inside,nested=None)->None:
+    nested=nested or set()
+    for room in rooms:
+        named=_is_named(room)
+        area=_room_area(room)
+        plausible=_plausible_area(room.category,area) if named else False
+        tagged=room.id in tag_inside
+        inherited=room.id in nested
+        if named and tagged and plausible:
+            room.confidence=0.85;room.needs_review=False
+        elif named and inherited and plausible:
+            room.confidence=0.8;room.needs_review=False
+        elif named and plausible and room.category in {'bathroom','storage','guestroom','circulation','service'} and area>=MIN_ROOM_AREA_FT2:
+            room.confidence=0.7;room.needs_review=False
+        else:
+            room.confidence=0.55;room.needs_review=True
+
+def assign_shared_type_refs(building:Building)->None:
+    groups={}
+    for room in building.rooms:
+        if not _is_named(room):continue
+        groups.setdefault(_normalise_name(room.name),[]).append(room)
+    counts={}
+    for key,group in groups.items():
+        category=next((r.category for r in group if r.category!='other'),group[0].category)
+        type_ref=_type_ref(key,category)
+        counts[type_ref]=len(group)
+        for room in group:
+            room.type_ref=type_ref
+            room.instance_count=len(group)
+            if room.category=='other':room.category=category
+    for entry in building.type_catalogue:
+        if entry.type_ref in counts:entry.instance_count=counts[entry.type_ref]
+
 def _category_from_name(name:str)->str:
-    text=name or ''
-    if re.search(r'BATH|WASHROOM',text,re.I):return 'bathroom'
-    if re.search(r'CORRIDOR',text,re.I):return 'circulation'
-    if re.search(r'STUDIO|BEDROOM|KING|QUEEN|SUITE|GUEST',text,re.I):return 'guestroom'
+    text=(name or '').upper()
+    if re.search(r'\bBATH\b|\bWC\b|WASHROOM',text):return 'bathroom'
+    if re.search(r'CORRIDOR|VESTIBULE|LOBBY',text):return 'circulation'
+    if re.search(r'STAIR|SHAFT|\bMECH\b',text):return 'service'
+    if re.search(r'CLOSET|STORAGE|LINEN',text):return 'storage'
+    if re.search(r'STUDIO|\bKING\b|\bQQ\b|\bQUEEN\b|SUITE|BEDROOM|GUEST',text):return 'guestroom'
     return 'other'
+
+def should_extract_sheet(sheet:Sheet)->bool:
+    if sheet.role=='enlarged_plan':return bool(get_settings().use_enlarged)
+    return bool(sheet.use and sheet.role in EXTRACT_ROLES)
+
+def skip_label(sheet:Sheet)->str:
+    if sheet.role=='enlarged_plan' and not get_settings().use_enlarged:return SKIP_LABELS['enlarged_plan']
+    return SKIP_LABELS.get(sheet.role,sheet.reason)
+
+def emit_progress(progress_path:str|None,event:dict)->None:
+    if not progress_path:return
+    line=(json.dumps(event)+'\n').encode()
+    fd=os.open(progress_path,os.O_APPEND|os.O_CREAT|os.O_WRONLY,0o644)
+    try:os.write(fd,line)
+    finally:os.close(fd)
+
+def sheet_card(sheet:Sheet,geom:SheetGeometry|None=None,extracted=False)->dict:
+    title=sheet.title or ''
+    return {
+        'sheet_id':sheet.sheet_id,'sheet_no':sheet.sheet_no or f'p.{sheet.page}','title':title,'role':sheet.role,
+        'page':sheet.page,'use':sheet.use,'extracted':extracted,
+        'reason':'' if extracted else skip_label(sheet),
+        'walls':len(geom.walls) if geom else 0,'rooms':len(geom.room_tags) if geom else 0,
+        'doors':len(geom.doors) if geom else 0,'windows':len(geom.windows) if geom else 0,
+        'thumb_url':f'sheets/{sheet.sheet_id}.thumb.png' if extracted else '',
+        'raster_url':f'sheets/{sheet.sheet_id}.raster.png' if extracted else '',
+        'geometry_url':f'sheets/{sheet.sheet_id}.json' if extracted else '',
+        'levels':list(sheet.levels or []),
+        'scale_pts_per_ft':sheet.scale_pts_per_ft,
+        'size_pt':list(geom.size_pt) if geom else None,
+    }
 
 def _type_ref(name:str,category:str)->str:
     slug=re.sub(r'[^a-z0-9]+','_', (name or 'type').lower())
@@ -202,7 +451,10 @@ def _extract_plan(geom:SheetGeometry,sheet:Sheet|None,source:Source,origin=(0.0,
     def point(p,x0=x0,y0=y0,scale=scale):return ((p[0]-x0)/scale,(p[1]-y0)/scale)
     fid=floor_id or f'{geom.sheet_id}-src'
     label=name or (sheet.title if sheet else geom.sheet_id)
-    building=from_segments(_convert_walls(geom,point,bbox,scale),fid,label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False)
+    role=sheet.role if sheet else 'floor_plan'
+    limit=MAX_ROOM_SQFT if role in {'floor_plan','unit_plan',None} else None
+    fixtures=[point(f.xy) for f in geom.fixtures if not bbox or _in_bbox(f.xy,bbox,pad=1)]
+    building=from_segments(_convert_walls(geom,point,bbox,scale),fid,label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False,fixtures=fixtures,max_room_sqft=limit)
     attach_openings(building,geom,point,source,bbox=bbox)
     return building
 
@@ -223,7 +475,7 @@ def _catalogue_from_unit_plan(geom:SheetGeometry,sheet:Sheet,source:Source)->Bui
         def point(p,x0=x0,y0=y0,scale=scale):return ((p[0]-x0)/scale,(p[1]-y0)/scale)
         name=region.get('name') or geom.sheet_id
         label=('Reference · ' if region.get('kind')=='unit' else '')+name
-        scratch=from_segments(_convert_walls(geom,point,bbox,scale),region['id'],label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False)
+        scratch=from_segments(_convert_walls(geom,point,bbox,scale),region['id'],label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False,fixtures=[point(f.xy) for f in geom.fixtures if _in_bbox(f.xy,bbox,pad=1)],max_room_sqft=MAX_ROOM_SQFT)
         if not scratch.rooms:
             result.review.extend(scratch.review);continue
         room=max(scratch.rooms,key=lambda r:Polygon(r.polygon).area)
@@ -296,6 +548,7 @@ def build_from_sheets(project:Project,geometries:list[SheetGeometry])->Building:
         for level in new_levels:
             result=merge_buildings(result,retarget_storey(scratch,f'level-{level}',_floor_name(level),(level-1)*STOREY_HEIGHT_FT))
     link_rooms_to_types(result)
+    assign_shared_type_refs(result)
     return result
 
 def import_dxf(path:Path,document_id:str)->Building:
@@ -339,32 +592,77 @@ def import_ifc(path:Path,document_id:str)->Building:
 
 def import_cad(path:Path,document_id:str)->Building:return import_dxf(path,document_id) if path.suffix.lower()=='.dxf' else import_ifc(path,document_id)
 
-def extract_standards(document:dict):
+def extract_standards(document:dict,progress_path:str|None=None):
     from plancheck.engines.extract_rules import run_real
+    emit_progress(progress_path,{'kind':'phase','phase':'standards','message':'Extracting rules from standards','progress':0.2})
+    started=time.perf_counter()
     project=Project(project_id='import',name='Import',created_at='')
-    rules=run_real(project,[Path(document['absolute_path'])]);return [dict(r.model_dump(),source_doc=document['id'],source_filename=document['name']) for r in rules.rules]
+    rules=run_real(project,[Path(document['absolute_path'])])
+    payload=[dict(r.model_dump(),source_doc=document['id'],source_filename=document['name']) for r in rules.rules]
+    print(f"[import] standards {time.perf_counter()-started:.2f}s rules={len(payload)}",flush=True)
+    emit_progress(progress_path,{'kind':'phase','phase':'standards','message':f'Extracted {len(payload)} rules','progress':0.9,'rules':len(payload)})
+    return payload
 
-def import_document(document:dict,project_dir:str)->dict:
-    path=Path(document['absolute_path']);did=document['id']
-    if path.suffix.lower() in ['.dxf','.ifc']:return import_cad(path,did).model_dump(mode='json')
-    import pymupdf
-    from plancheck.engines.classify import title_block_text,parse_title,parse_sheet_no,assign_role,parse_levels,sheet_title_field
-    from plancheck.core.scale import find_scale
-    from plancheck.services.pdf_extract import extract
-    from plancheck.core.settings import get_settings
-    sheets=[]
-    with pymupdf.open(path) as doc:
-        for index,page in enumerate(doc):
-            text=page.get_text();block=title_block_text(page);title=parse_title(block,text);no=parse_sheet_no(block) or parse_sheet_no(text);st,scale=find_scale(block)
-            if not scale:st,scale=find_scale(text)
-            role=assign_role(no,title,scale)
-            use=role in ['floor_plan','unit_plan'] or (role=='enlarged_plan' and get_settings().use_enlarged)
-            sheets.append(Sheet(sheet_id=f'{did}-p{index+1:03}',doc_id=did,page=index+1,sheet_no=no,title=title,role=role,scale_text=st,scale_pts_per_ft=scale,levels=parse_levels(sheet_title_field(block)) or parse_levels(title),use=use,reason='Selected plan geometry' if use else 'Retained source reference'))
-    selected=[s for s in sheets if s.use][:10];project=Project(project_id='import',name=path.stem,created_at='',sheets=sheets)
-    atomic_json(Path(project_dir)/'sources'/did/'sheets.json',{'sheets':[s.model_dump() for s in sheets]})
-    geometries=[]
-    for sheet in selected:
-        geom=extract(sheet,path,Path(project_dir)/'sheets'/f'{sheet.sheet_id}.raster.png');atomic_json(Path(project_dir)/'sheets'/f'{sheet.sheet_id}.json',geom.model_dump(mode='json'));geometries.append(geom)
-    result=build_from_sheets(project,geometries)
+def import_document(document:dict,project_dir:str,progress_path:str|None=None)->dict:
+    path=Path(document['absolute_path']);did=document['id'];root=Path(project_dir)
+    if path.suffix.lower() in ['.dxf','.ifc']:
+        started=time.perf_counter()
+        building=import_cad(path,did)
+        print(f"[import] cad {path.name} {time.perf_counter()-started:.2f}s",flush=True)
+        return {'building':building.model_dump(mode='json'),'sheets':[],'timings':{'total':time.perf_counter()-started}}
+    from plancheck.engines.classify import classify_document
+    from plancheck.services.pdf_extract import extract_cached,file_digest
+    total_t=time.perf_counter()
+    emit_progress(progress_path,{'kind':'phase','phase':'classify','message':f'Classifying pages in {path.name}','progress':0.02})
+    classify_t=time.perf_counter()
+    _document,sheets=classify_document(path,did)
+    print(f"[import] classify {path.name} {time.perf_counter()-classify_t:.2f}s ({len(sheets)} pages)",flush=True)
+    selected=[s for s in sheets if should_extract_sheet(s)]
+    cards=[sheet_card(s,extracted=False) for s in sheets]
+    emit_progress(progress_path,{'kind':'classified','sheets':cards,'progress':0.15,'message':f'Classifying {len(sheets)} pages'})
+    atomic_json(root/'sources'/did/'sheets.json',{'sheets':[s.model_dump() for s in sheets]})
+    digest=file_digest(path)
+    (root/'sheets').mkdir(parents=True,exist_ok=True)
+    geometries:dict[str,SheetGeometry]={}
+    workers=max(1,min(8,os.cpu_count() or 4,len(selected) or 1))
+
+    def extract_one(sheet:Sheet):
+        raster=root/'sheets'/f'{sheet.sheet_id}.raster.png'
+        started=time.perf_counter()
+        geom,cached=extract_cached(sheet,path,raster,digest)
+        atomic_json(root/'sheets'/f'{sheet.sheet_id}.json',geom.model_dump(mode='json'))
+        print(f"[import] extract p.{sheet.page} {sheet.sheet_no or ''} {time.perf_counter()-started:.2f}s walls={len(geom.walls)} cached={cached}",flush=True)
+        return sheet,geom,cached
+
+    extract_t=time.perf_counter()
+    if selected:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures={pool.submit(extract_one,sheet):sheet for sheet in selected}
+            done=0
+            for future in as_completed(futures):
+                sheet,geom,_cached=future.result()
+                geometries[sheet.sheet_id]=geom
+                done+=1
+                frac=0.15+0.65*done/max(1,len(selected))
+                label=f"{sheet.sheet_no or f'p.{sheet.page}'} · {sheet.title or sheet.role}"
+                emit_progress(progress_path,{'kind':'sheet','sheet':sheet_card(sheet,geom,extracted=True),'progress':frac,'message':f'Reading {label}'})
+    print(f"[import] extract {path.name} {time.perf_counter()-extract_t:.2f}s pages={len(selected)}",flush=True)
+    emit_progress(progress_path,{'kind':'phase','phase':'build','message':'Building rooms and openings','progress':0.82})
+    build_t=time.perf_counter()
+    project=Project(project_id='import',name=path.stem,created_at='',sheets=sheets)
+    ordered=[geometries[s.sheet_id] for s in selected if s.sheet_id in geometries]
+    result=build_from_sheets(project,ordered)
     if not selected:result.review.append(ReviewItem(id=did+'-reference',kind='reference',message='No recognized, scaled floor-plan sheet. Source PDF retained for review; no building geometry was invented.',document_id=did))
-    return result.model_dump(mode='json')
+    print(f"[import] build {path.name} {time.perf_counter()-build_t:.2f}s walls={len(result.walls)} rooms={len(result.rooms)}",flush=True)
+    rooms_by_sheet={}
+    for room in result.rooms:
+        rooms_by_sheet[room.source.sheet_id]=rooms_by_sheet.get(room.source.sheet_id,0)+1
+    final_cards=[]
+    for sheet in sheets:
+        geom=geometries.get(sheet.sheet_id)
+        card=sheet_card(sheet,geom,extracted=sheet.sheet_id in geometries)
+        if sheet.sheet_id in rooms_by_sheet:card['rooms']=rooms_by_sheet[sheet.sheet_id]
+        final_cards.append(card)
+    elapsed=time.perf_counter()-total_t
+    print(f"[import] total {path.name} {elapsed:.2f}s",flush=True)
+    return {'building':result.model_dump(mode='json'),'sheets':final_cards,'timings':{'total':elapsed,'pages':len(sheets),'extracted':len(selected)}}

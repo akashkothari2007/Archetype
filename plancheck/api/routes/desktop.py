@@ -2,11 +2,12 @@
 from __future__ import annotations
 import json,uuid,time,asyncio,shutil
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor,wait,FIRST_COMPLETED
 from fastapi import APIRouter,Body,UploadFile,File,Form,HTTPException,Query
 from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,Field
 from plancheck.core.building import Building,DesignBrief,CommandBatch,RevisionRequest,DesktopProject,BuildingPatch
+from plancheck.core.settings import get_settings
 from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json
 from plancheck.services.commands import apply_commands,validate_building
 from plancheck.services.compliance import check_building
@@ -35,7 +36,17 @@ def building_patch(before:DesktopProject,after:DesktopProject)->dict:
     return payload
 
 @router.get('/health')
-def health():return {'status':'ready','schema_version':2,'agent_provider':'mock','generation_provider':'demo'}
+def health():
+    settings=get_settings()
+    live=settings.agent_live()
+    return {
+        'status':'ready',
+        'schema_version':2,
+        'agent_provider':'baseten' if live else 'mock',
+        'generation_provider':settings.generation_provider,
+        'orchestrator_model':settings.orchestrator_slug() if live else None,
+        'subagent_model':settings.subagent_slug() if live else None,
+    }
 
 @router.get('/projects')
 def projects():return repo().list()
@@ -43,11 +54,13 @@ def projects():return repo().list()
 @router.post('/generate')
 def generate(brief:DesignBrief):
     def work(report):
-        from plancheck.mocks.generation import demo_home,demo_rules
-        for i,message in enumerate(['Reading your design brief','Arranging the two-storey demo layout','Connecting walls and openings','Preparing materials and fixtures','Validating editable geometry']):
-            report(phase=['analyzing','planning','working','working','validating'][i],progress=.1+i*.16,message=message);time.sleep(.32)
-        building=demo_home();report(phase='saving',progress=.94,message='Saving your editable project')
-        project=repo().create(brief.name,building,demo_rules(),brief)
+        from plancheck.generation import generate_from_brief
+        result=generate_from_brief(brief,report)
+        report(phase='saving',progress=.94,message='Saving your editable project')
+        project=repo().create(brief.name,result.building,result.rules,brief)
+        if result.program:
+            # Keep the interpretation of the prompt auditable next to the geometry.
+            atomic_json(repo().path(project.project_id)/'program.json',{'program':result.program,'layouts':result.layouts,'notes':result.notes,'llm_calls':result.llm_calls,'recovered_from':result.recovered_from})
         project=repo().commit(project.project_id,project.revision,recheck)
         return {'project_id':project.project_id}
     return {'job_id':jobs.submit(work,'Preparing your project')}
@@ -79,7 +92,7 @@ def agent(pid:str,body:ChatRequest):
     project=load(pid)
     if project.revision!=body.expected_revision:raise RevisionConflict('The project changed before the repair started')
     def work(report):
-        from plancheck.mocks.agent_provider import respond
+        from plancheck.services.agent import respond
         report(phase='analyzing',progress=.08,message='Reading the selected model and approved requirements');time.sleep(.3)
         report(phase='planning',progress=.18,message='Assigning bounded tasks to geometry workers');time.sleep(.3)
         result=respond(project.building,project.rules,body.message,body.context,body.selected_ids,report)
@@ -92,7 +105,7 @@ def agent(pid:str,body:ChatRequest):
 @router.post('/projects/{pid}/repairs/{run_id}/apply',response_model=DesktopProject)
 def apply_repair(pid:str,run_id:str,body:RevisionRequest):
     if not run_id.isalnum():raise ValueError('Invalid repair identifier')
-    proposal=json.loads((repo().path(pid)/'repairs'/f'{run_id}.json').read_text())
+    proposal=json.loads((repo().path(pid)/'repairs'/f'{run_id}.json').read_text(encoding='utf8'))
     if proposal['expected_revision']!=body.expected_revision:raise RevisionConflict('This preview is stale. Run the request again.')
     if not proposal['commands']:raise ValueError('This preview has no changes to apply')
     def update(s):
@@ -149,17 +162,105 @@ def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported buil
     if not documents:raise ValueError('Choose a folder containing PDF, DXF, or IFC files')
     def work(report):
         from plancheck.services.imports import import_document,merge_buildings,extract_standards
-        building=Building();rules=[]
-        for i,document in enumerate(documents):
-            report(progress=.04+.85*i/len(documents),phase='extracting',message=f"Reading {document['name']}")
+        from shapely.geometry import Polygon
+        started=time.perf_counter()
+        building=Building();rules=[];sheet_cards=[];progress_path=str(base/'_import_progress.jsonl')
+        Path(progress_path).write_text('')
+        cursor=0
+        sheets_done=[]
+        totals={'pages':0,'pages_read':0,'walls':0,'rooms':0,'doors':0,'windows':0,'skipped':0,'rules':0}
+
+        def upsert(card):
+            sid=card.get('sheet_id') or f"{card.get('sheet_no')}-{card.get('page')}"
+            for i,existing in enumerate(sheets_done):
+                if existing.get('sheet_id')==sid:
+                    sheets_done[i]=card;return
+            sheets_done.append(card)
+
+        def recompute():
+            totals['pages']=len(sheets_done) or totals['pages']
+            totals['pages_read']=sum(1 for s in sheets_done if s.get('extracted'))
+            totals['skipped']=sum(1 for s in sheets_done if not s.get('extracted'))
+            totals['walls']=sum(s.get('walls') or 0 for s in sheets_done if s.get('extracted'))
+            totals['rooms']=sum(s.get('rooms') or 0 for s in sheets_done if s.get('extracted'))
+            totals['doors']=sum(s.get('doors') or 0 for s in sheets_done if s.get('extracted'))
+            totals['windows']=sum(s.get('windows') or 0 for s in sheets_done if s.get('extracted'))
+
+        def drain(progress=None,phase=None,message=None):
+            nonlocal cursor
+            path=Path(progress_path)
+            if path.exists():
+                lines=path.read_text().splitlines()
+                for line in lines[cursor:]:
+                    if not line.strip():continue
+                    try:event=json.loads(line)
+                    except json.JSONDecodeError:continue
+                    if event.get('kind')=='classified':
+                        for card in event.get('sheets') or []:upsert(card)
+                        report(progress=event.get('progress',0.15),phase='classify',message=event.get('message') or 'Classifying pages',sheets_done=list(sheets_done),totals=dict(totals))
+                    elif event.get('kind')=='sheet':
+                        upsert(event.get('sheet') or {})
+                        recompute()
+                        report(progress=event.get('progress',0.5),phase='extracting',message=event.get('message') or 'Reading sheets',sheets_done=list(sheets_done),totals=dict(totals))
+                    elif event.get('kind')=='phase':
+                        if event.get('phase')=='standards' and event.get('rules') is not None:totals['rules']=event['rules']
+                        report(progress=event.get('progress',progress or 0.2),phase=event.get('phase') or phase or 'working',message=event.get('message') or message or '',sheets_done=list(sheets_done),totals=dict(totals))
+                cursor=len(lines)
+            if message:
+                recompute();report(progress=progress or 0,phase=phase or 'working',message=message,sheets_done=list(sheets_done),totals=dict(totals))
+
+        futures={}
+        for document in documents:
             if document['role']=='standards' and document['name'].lower().endswith('.pdf'):
-                rules.extend(_import_pool.submit(extract_standards,document).result())
+                futures[_import_pool.submit(extract_standards,document,progress_path)]=('standards',document)
             elif Path(document['name']).suffix.lower() in ['.pdf','.dxf','.ifc']:
-                result=_import_pool.submit(import_document,document,str(base)).result();building=merge_buildings(building,Building.model_validate(result))
-        report(progress=.95,phase='validating',message='Saving source geometry and review items')
+                futures[_import_pool.submit(import_document,document,str(base),progress_path)]=('drawing',document)
+        drain(progress=0.02,phase='classify',message='Classifying pages')
+        pending=set(futures)
+        while pending:
+            finished,pending=wait(pending,timeout=0.12,return_when=FIRST_COMPLETED)
+            drain()
+            for future in finished:
+                kind,_document=futures[future]
+                payload=future.result()
+                if kind=='standards':
+                    rules.extend(payload);totals['rules']=len(rules)
+                    drain(progress=0.88,phase='standards',message='Extracting rules from standards')
+                else:
+                    building=merge_buildings(building,Building.model_validate(payload.get('building',payload)))
+                    for card in payload.get('sheets') or []:upsert(card)
+                    recompute()
+                    drain(progress=0.9,phase='build',message='Building rooms and openings')
+        drain()
+        report(progress=.95,phase='saving',message='Saving',sheets_done=list(sheets_done),totals=dict(totals))
+        floors={f.id for f in building.floors}
+        for card in sheets_done:
+            ids=[]
+            for raw in card.get('levels') or []:
+                try:level=int(str(raw).strip())
+                except (TypeError,ValueError):continue
+                fid=f'level-{level}'
+                if fid in floors:ids.append(fid)
+            card['floor_ids']=ids
+        area=0.0
+        for room in building.rooms:
+            if room.polygon and len(room.polygon)>=3:
+                try:area+=abs(Polygon(room.polygon).area)
+                except Exception:pass
+        elapsed=time.perf_counter()-started
+        from plancheck.core.settings import get_settings
+        if get_settings().auto_approve:
+            for rule in rules:
+                if rule.get('supported'):
+                    rule['status']='approved'
+        totals.update({'rooms':len(building.rooms),'walls':len(building.walls),'doors':sum(1 for o in building.openings if o.kind=='door'),'windows':sum(1 for o in building.openings if o.kind=='window'),'pages_read':sum(1 for s in sheets_done if s.get('extracted'))})
         source_files=[{k:v for k,v in d.items() if k!='absolute_path'} for d in documents]
-        project=repo().create(name,building,rules,source='import',project_id=pid,source_files=source_files)
-        return {'project_id':pid,'review_count':len(building.review)}
+        summary={'name':name,'floors':len(building.floors),'rooms':len(building.rooms),'area_sqft':round(area),'doors':totals['doors'],'windows':totals['windows'],'walls':len(building.walls),'rules':len(rules),'violations':0,'elapsed_s':round(elapsed,2),'pages':totals['pages'],'pages_read':totals['pages_read']}
+        project=repo().create(name,building,rules,source='import',project_id=pid,source_files=source_files,sheets=sheets_done,import_meta=summary)
+        project=repo().commit(pid,project.revision,recheck)
+        summary['violations']=sum(1 for c in project.checks if c.get('status')=='fail')
+        print(f"[import] save {elapsed:.2f}s walls={len(building.walls)} rooms={len(building.rooms)}",flush=True)
+        return {'project_id':pid,'review_count':len(building.review),'summary':summary}
     return {'job_id':jobs.submit(work,'Importing your sources'),'project_id':pid}
 
 @router.get('/jobs/{jid}')

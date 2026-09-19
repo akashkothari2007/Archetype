@@ -21,7 +21,7 @@ def get_job(job_id):
         if job_id in _jobs:return _jobs[job_id].model_copy(deep=True)
         path=_path(job_id)
         if not path.exists():return None
-        job=JobStatus.model_validate_json(path.read_text())
+        job=JobStatus.model_validate_json(path.read_text(encoding='utf8'))
         if job.state in ['running','queued']:
             job.state='error';job.phase='interrupted';job.error='The application restarted before this job finished.';job.message='Interrupted — run again to retry'
             atomic_json(path,job.model_dump())

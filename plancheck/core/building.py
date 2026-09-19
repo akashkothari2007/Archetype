@@ -66,6 +66,7 @@ class Room(Entity):
     floor_material: str = "oak"
     confidence: float = Field(default=1, ge=0, le=1)
     needs_review: bool = False
+    instance_count: int = 0
     source: Source = Field(default_factory=Source)
 
 
@@ -139,6 +140,7 @@ class DesignBrief(BaseModel):
     rooms: str = "3 bedrooms, 2 bathrooms, kitchen, living room"
     area: str = "2,400 sq ft"
     style: str = "Warm minimal"
+    prompt: str = Field(default="", max_length=4000)
 
 
 class ModelCommand(BaseModel):
@@ -167,6 +169,8 @@ class DesktopProject(BaseModel):
     rules: list[dict[str, Any]] = Field(default_factory=list)
     checks: list[dict[str, Any]] = Field(default_factory=list)
     files: list[dict[str, Any]] = Field(default_factory=list)
+    sheets: list[dict[str, Any]] = Field(default_factory=list)
+    import_meta: dict[str, Any] = Field(default_factory=dict)
     can_undo: bool = False
     can_redo: bool = False
 

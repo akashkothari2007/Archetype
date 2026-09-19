@@ -85,3 +85,13 @@ class TestClassify:
         for row in sheets:
             if not row.use:
                 assert row.reason, f"page {row.page} was excluded with no reason"
+
+    def test_drawings_only_run_on_plan_sheets(self, classified) -> None:
+        _document, sheets = classified
+        elevation = next(s for s in sheets if s.page == 17)
+        floor = next(s for s in sheets if s.page == 8)
+        assert elevation.role == "elevation"
+        assert elevation.stats.paths is None
+        assert floor.role == "floor_plan"
+        assert floor.stats.paths is not None
+        assert floor.stats.paths > 0

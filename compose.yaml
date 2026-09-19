@@ -6,6 +6,8 @@ services:
     env_file: .env
     environment:
       PLANCHECK_DATA_DIR: /data/projects
+      PYTHONUNBUFFERED: "1"
+      PLANCHECK_LOG_LEVEL: ${PLANCHECK_LOG_LEVEL:-INFO}
     volumes:
       - ./local-data:/data
     healthcheck:
