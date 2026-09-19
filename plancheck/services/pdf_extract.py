@@ -7,10 +7,11 @@ from plancheck.core.schemas import Sheet,SheetGeometry,Wall,Door,Window,Fixture,
 from plancheck.core.layers import bucket_for,normalise
 from plancheck.core.settings import get_settings
 
-EXTRACTOR_VERSION='4'
+EXTRACTOR_VERSION='5'
 ROOM_TAG_REJECT=re.compile(r"""[\d\[\]'"]""")
 STACK_X_PT=12.0
 STACK_Y_PT=18.0
+DOOR_CLUSTER_FT=0.5
 
 def cache_root()->Path:
  return get_settings().data_dir.parent/'cache'
@@ -50,6 +51,53 @@ def is_fallback_room_tag(text:str)->bool:
  cleaned=' '.join(text.split())
  return len(cleaned)>=3 and cleaned==cleaned.upper() and re.fullmatch(r'[A-Z]+(?: [A-Z]+)*',cleaned) is not None and not ROOM_TAG_REJECT.search(cleaned)
 
+def _bbox_gap(a,b)->float:
+ dx=max(0.0,a[0]-b[2],b[0]-a[2]);dy=max(0.0,a[1]-b[3],b[1]-a[3])
+ return math.hypot(dx,dy)
+
+def _longest_straight(segments):
+ best=None
+ for a,b in segments:
+  length=math.dist(a,b)
+  if best is None or length>best[0]:best=(length,a,b)
+ return best
+
+def cluster_door_fragments(fragments:list[dict],scale:float,cluster_ft:float=DOOR_CLUSTER_FT)->list[dict]:
+ """Group DOOR-layer paths whose bboxes are within cluster_ft, then measure the leaf.
+
+ The layer stores the leaf, swing arc and jamb marks as separate paths. Width is
+ the longest straight segment in the cluster (the leaf) — not the bbox diagonal
+ and not an arc.
+ """
+ n=len(fragments)
+ if not n:return []
+ parent=list(range(n))
+ def find(i):
+  while parent[i]!=i:parent[i]=parent[parent[i]];i=parent[i]
+  return i
+ thresh=(cluster_ft*scale) if scale else cluster_ft
+ for i in range(n):
+  for j in range(i+1,n):
+   if _bbox_gap(fragments[i]['bbox'],fragments[j]['bbox'])<=thresh:
+    a,b=find(i),find(j)
+    if a!=b:parent[a]=b
+ groups={}
+ for i in range(n):groups.setdefault(find(i),[]).append(fragments[i])
+ doors=[]
+ for group in groups.values():
+  segments=[seg for frag in group for seg in frag.get('segments') or []]
+  longest=_longest_straight(segments)
+  xs=[c for frag in group for c in (frag['bbox'][0],frag['bbox'][2])]
+  ys=[c for frag in group for c in (frag['bbox'][1],frag['bbox'][3])]
+  bbox=[min(xs),min(ys),max(xs),max(ys)]
+  if longest:
+   width_pt,a,b=longest
+   xy=[(a[0]+b[0])/2,(a[1]+b[1])/2]
+  else:
+   width_pt=0.0;xy=[(bbox[0]+bbox[2])/2,(bbox[1]+bbox[3])/2]
+  doors.append({'xy':xy,'bbox':bbox,'width_pt':width_pt,'width_ft':width_pt/scale if scale else 0.0})
+ return doors
+
 def merge_stacked_room_tags(items:list[dict],x_tol:float=STACK_X_PT,y_gap:float=STACK_Y_PT)->list[dict]:
  remaining=sorted(items,key=lambda it:(-it['xy'][1],it['xy'][0]))
  clusters=[]
@@ -86,7 +134,7 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
    q=pymupdf.Rect(r)*page.rotation_matrix
    return [float(q.x0),float(height-q.y1),float(q.x1),float(height-q.y0)]
   geom=SheetGeometry(sheet_id=sheet.sheet_id,page=sheet.page,doc_id=sheet.doc_id,size_pt=[page.rect.width,height],scale_pts_per_ft=scale,source_rotation=page.rotation)
-  drawings=page.get_drawings();counts=Counter();frames=[];tag_boxes=[];text_items=[]
+  drawings=page.get_drawings();counts=Counter();frames=[];tag_boxes=[];text_items=[];door_frags=[]
   for i,d in enumerate(drawings):
    layer=normalise(d.get('layer'));bucket=bucket_for(layer);counts[bucket]+=1;geom.layer_map[layer]=bucket
    rr=rect(d['rect']);w=rr[2]-rr[0];h=rr[3]-rr[1]
@@ -104,7 +152,7 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
      length=math.dist(a,b)
      if length>.05:geom.walls.append(Wall(id=f'{sheet.sheet_id}-w{i}-{j}',a=a,b=b,cls=cls,layer=layer,thickness_pt=d.get('width'),len_ft=length/scale if scale else 0))
    elif bucket=='door' and w>1 and h>1:
-    width=max(w,h);geom.doors.append(Door(id=f'{sheet.sheet_id}-d{i}',xy=[(rr[0]+rr[2])/2,(rr[1]+rr[3])/2],bbox=rr,width_pt=width,width_ft=width/scale if scale else 0))
+    door_frags.append({'bbox':rr,'segments':segments})
    elif bucket=='window':
     for j,(a,b) in enumerate(segments):
      if math.dist(a,b)>1:geom.windows.append(Window(id=f'{sheet.sheet_id}-win{i}-{j}',a=a,b=b,width_ft=math.dist(a,b)/scale if scale else 0))
@@ -126,6 +174,8 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
      if not word:continue
      sr=rect(span['bbox']);text_items.append({'text':word,'xy':[(sr[0]+sr[2])/2,(sr[1]+sr[3])/2]})
   geom.room_tags=build_room_tags(text_items,tag_boxes)
+  for i,door in enumerate(cluster_door_fragments(door_frags,scale)):
+   geom.doors.append(Door(id=f'{sheet.sheet_id}-d{i}',xy=door['xy'],bbox=door['bbox'],width_pt=door['width_pt'],width_ft=door['width_ft']))
   for name,rr in sorted(labels,key=lambda x:(-x[1][1],x[1][0])):
    cx=(rr[0]+rr[2])/2
    candidates=[f for f in frames if f[0]<=cx<=f[2] and rr[3]-15<=f[1]<=rr[3]+100]
@@ -133,7 +183,7 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
     region=min(candidates,key=lambda f:(abs(f[1]-rr[3]),(f[2]-f[0])*(f[3]-f[1])))
     if not any(math.dist(region,r['bbox_pt'])<1 for r in geom.regions):geom.regions.append({'id':f'{sheet.sheet_id}-region-{len(geom.regions)+1}','name':name,'bbox_pt':region,'scale_pts_per_ft':scale,'kind':'unit','confidence':.95})
   geom.excluded.furniture=counts['furniture'];geom.excluded.wall_hatch=counts['wall_hatch'];geom.excluded.unmapped=counts['unmapped']
-  geom.extraction_stats={'paths':len(drawings),**dict(counts),'regions':len(geom.regions),'raw_walls':len(geom.walls)}
+  geom.extraction_stats={'paths':len(drawings),**dict(counts),'regions':len(geom.regions),'raw_walls':len(geom.walls),'door_fragments':len(door_frags),'door_clusters':len(geom.doors)}
   if scale and geom.walls:
     from plancheck.services.wall_collapse import collapse_sheet_walls
     geom.walls=collapse_sheet_walls(geom.walls,scale,sheet.sheet_id)

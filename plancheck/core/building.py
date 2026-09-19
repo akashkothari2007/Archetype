@@ -53,6 +53,8 @@ class Opening(Entity):
     hinge: Literal["left", "right"] = "left"
     swing: Literal["in", "out"] = "in"
     clear_width_ft: FiniteFloat | None = None
+    reliability: Literal["ok", "suspect"] = "ok"
+    reliability_reason: str = ""
     source: Source = Field(default_factory=Source)
 
 
@@ -67,6 +69,8 @@ class Room(Entity):
     confidence: float = Field(default=1, ge=0, le=1)
     needs_review: bool = False
     instance_count: int = 0
+    reliability: Literal["ok", "suspect"] = "ok"
+    reliability_reason: str = ""
     source: Source = Field(default_factory=Source)
 
 
@@ -167,6 +171,7 @@ class DesktopProject(BaseModel):
     building: Building
     rules: list[dict[str, Any]] = Field(default_factory=list)
     checks: list[dict[str, Any]] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
     files: list[dict[str, Any]] = Field(default_factory=list)
     sheets: list[dict[str, Any]] = Field(default_factory=list)
     import_meta: dict[str, Any] = Field(default_factory=dict)
@@ -183,5 +188,6 @@ class BuildingPatch(BaseModel):
     changed: dict[str, list[Any]] = Field(default_factory=dict)
     removed_ids: list[str] = Field(default_factory=list)
     checks: list[dict[str, Any]] = Field(default_factory=list)
+    coverage: dict[str, Any] = Field(default_factory=dict)
     environment: dict[str, Any] | None = None
 

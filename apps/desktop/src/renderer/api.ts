@@ -7,6 +7,7 @@ export type BuildingPatch = {
   changed:{vertices?:Building['vertices'];walls?:Building['walls'];rooms?:Building['rooms'];openings?:Building['openings'];objects?:Building['objects']}
   removed_ids:string[]
   checks:DesktopProject['checks']
+  coverage?:Record<string,any>
   environment?:Building['environment']
 }
 export function isDesktopProject(value:unknown):value is DesktopProject{
@@ -36,6 +37,7 @@ export function applyPatch(project:DesktopProject,patch:BuildingPatch):DesktopPr
     can_undo:patch.can_undo,
     can_redo:patch.can_redo,
     checks:patch.checks,
+    ...(patch.coverage ? {coverage: patch.coverage} : {}),
     building:{
       ...building,
       vertices:merge(building.vertices,patch.changed.vertices),

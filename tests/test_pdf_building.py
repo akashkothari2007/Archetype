@@ -24,6 +24,7 @@ from plancheck.services.pdf_extract import (
     EXTRACTOR_VERSION,
     build_room_tags,
     cache_paths,
+    cluster_door_fragments,
     is_fallback_room_tag,
     merge_stacked_room_tags,
 )
@@ -243,27 +244,69 @@ def test_room_tag_frame_captures_stacked_label():
     assert [tag.text for tag in tags] == ["STUDIO KING"]
 
 
+def test_cluster_door_fragments_uses_longest_straight_leaf():
+    fragments = [
+        {"bbox": [0, 0, 0.2, 0.2], "segments": [([0, 0], [0.2, 0])]},
+        {"bbox": [0.1, 0, 3.1, 0.15], "segments": [([0.1, 0], [3.1, 0]), ([0.1, 0.15], [3.1, 0.15])]},
+        {"bbox": [0, 0, 1.5, 1.5], "segments": [([0, 0], [0.3, 0.4])]},
+    ]
+    doors = cluster_door_fragments(fragments, scale=1.0)
+    assert len(doors) == 1
+    assert abs(doors[0]["width_ft"] - 3.0) < 1e-6
+    assert abs(doors[0]["xy"][0] - 1.6) < 0.2
+
+
 def test_openings_snap_to_nearest_wall():
     segments = [
-        ((0, 0), (20, 0), "nonstructural"),
+        ((0, 0), (3, 0), "nonstructural"),
+        ((6, 0), (20, 0), "nonstructural"),
         ((20, 0), (20, 10), "nonstructural"),
         ((20, 10), (0, 10), "nonstructural"),
         ((0, 10), (0, 0), "nonstructural"),
     ]
-    building = from_segments(segments, "f1", "Test", Source())
+    building = from_segments(segments, "f1", "Test", Source(), collapse=False)
     geom = SheetGeometry(
         sheet_id="s",
         page=1,
         size_pt=[100, 100],
         scale_pts_per_ft=1,
         walls=[Wall(id="w", a=[0, 0], b=[20, 0], layer="DOOR", len_ft=20)],
-        doors=[Door(id="door-1", xy=[4, 0.2], bbox=[3, 0, 7, 1], width_pt=4, width_ft=3)],
+        doors=[Door(id="door-1", xy=[4.5, 0.2], bbox=[3, 0, 6, 1], width_pt=3, width_ft=3)],
         windows=[Window(id="win-1", a=[12, 0.1], b=[16, 0.1], width_ft=4)],
     )
     attach_openings(building, geom, lambda p: (p[0], p[1]), Source(sheet_id="s"))
     assert len(building.openings) >= 2
     assert {o.kind for o in building.openings} == {"door", "window"}
     assert all(o.offset_ft >= 0 for o in building.openings)
+    door = next(o for o in building.openings if o.kind == "door")
+    assert 2.8 <= door.width_ft <= 3.2
+
+
+def test_wall_gap_overrides_path_width_and_drops_undersize_doors():
+    segments = [
+        ((0, 0), (8, 0), "nonstructural"),
+        ((11.2, 0), (20, 0), "nonstructural"),
+        ((20, 0), (20, 10), "nonstructural"),
+        ((20, 10), (0, 10), "nonstructural"),
+        ((0, 10), (0, 0), "nonstructural"),
+    ]
+    building = from_segments(segments, "f1", "Test", Source(), collapse=False)
+    geom = SheetGeometry(
+        sheet_id="s",
+        page=1,
+        size_pt=[100, 100],
+        scale_pts_per_ft=1,
+        doors=[
+            Door(id="door-gap", xy=[9.6, 0.2], bbox=[9.4, 0, 9.8, 0.4], width_pt=0.4, width_ft=0.4),
+            Door(id="door-tiny", xy=[4, 10.2], bbox=[3.8, 10, 4.2, 10.4], width_pt=0.4, width_ft=0.4),
+        ],
+    )
+    attach_openings(building, geom, lambda p: (p[0], p[1]), Source(sheet_id="s"))
+    doors = [o for o in building.openings if o.kind == "door"]
+    assert len(doors) == 1
+    assert doors[0].id == "door-gap"
+    assert abs(doors[0].width_ft - 3.2) < 0.05
+    assert any(item.kind == "extraction" and "Dropped" in item.message for item in building.review)
 
 
 def _plan_sheet(sheet_id, page, role, levels, scale=4.5):

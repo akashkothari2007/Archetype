@@ -359,8 +359,8 @@ class Rule(BaseModel):
     value: float
     unit: str
     source_doc: str = ""
-    source_page: int
-    source_text: str
+    source_page: int | None = None
+    source_text: str = ""
     extraction: str = "stub"
     status: Literal["pending", "approved", "rejected"] = "pending"
     scope: Literal["room", "opening", "opening_pair"] = "room"
@@ -369,6 +369,11 @@ class Rule(BaseModel):
     source_section: str = ""
     qualifiers: list[str] = Field(default_factory=list)
     supported: bool = True
+    origin: str = "imported"
+    superseded_by: str = ""
+    excludes: list[str] = Field(default_factory=list)
+    applies_to_filter: dict[str, Any] = Field(default_factory=dict)
+    editable: bool = True
 
 
 class Ruleset(BaseModel):
@@ -397,10 +402,14 @@ class Mismatch(BaseModel):
     entity_ids: list[str] = Field(default_factory=list)
     source_doc: str = ""
     source_label: str = ""
+    assumption: str = ""
+    pinch_polygon: list[list[float]] | None = None
+    superseded_by: str = ""
 
 
 class CheckResult(BaseModel):
     mismatches: list[Mismatch] = Field(default_factory=list)
+    coverage: dict[str, Any] | None = None
 
 
 class ProposedEdit(BaseModel):

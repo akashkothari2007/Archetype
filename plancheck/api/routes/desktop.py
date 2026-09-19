@@ -9,14 +9,24 @@ from pydantic import BaseModel,Field
 from plancheck.core.building import Building,DesignBrief,CommandBatch,RevisionRequest,DesktopProject,BuildingPatch
 from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json
 from plancheck.services.commands import apply_commands,validate_building
-from plancheck.services.compliance import check_building
+from plancheck.services.compliance import evaluate_building
+from plancheck.services.reliability import apply_reliability
+from plancheck.services.baseline_rules import layer_rules
 from plancheck.api import jobs
 router=APIRouter(prefix='/desktop')
 _import_pool=ProcessPoolExecutor(max_workers=2)
 
 def repo():return FileProjectRepository()
 def load(pid):return repo().load(pid)
-def recheck(snapshot):snapshot['checks']=check_building(Building.model_validate(snapshot['building']),snapshot.get('rules',[]));return snapshot
+def recheck(snapshot):
+    building=Building.model_validate(snapshot['building'])
+    apply_reliability(building)
+    snapshot['building']=building.model_dump(mode='json')
+    result=evaluate_building(building,snapshot.get('rules',[]))
+    snapshot['checks']=result['checks']
+    snapshot['coverage']=result['coverage']
+    snapshot['quarantined']=result['quarantined']
+    return snapshot
 
 _COLLECTIONS=('vertices','walls','rooms','openings','objects')
 
@@ -29,7 +39,7 @@ def building_patch(before:DesktopProject,after:DesktopProject)->dict:
         updates=[nxt[i] for i in nxt if prev.get(i)!=nxt[i]]
         if updates:changed[name]=updates
         removed.extend(i for i in prev if i not in nxt)
-    payload={'revision':after.revision,'can_undo':after.can_undo,'can_redo':after.can_redo,'changed':changed,'removed_ids':removed,'checks':after.checks}
+        payload={'revision':after.revision,'can_undo':after.can_undo,'can_redo':after.can_redo,'changed':changed,'removed_ids':removed,'checks':after.checks,'coverage':after.coverage}
     if before.building.environment.model_dump()!=after.building.environment.model_dump():
         payload['environment']=after.building.environment.model_dump(mode='json')
     return payload
@@ -43,11 +53,11 @@ def projects():return repo().list()
 @router.post('/generate')
 def generate(brief:DesignBrief):
     def work(report):
-        from plancheck.mocks.generation import demo_home,demo_rules
+        from plancheck.mocks.generation import demo_home
         for i,message in enumerate(['Reading your design brief','Arranging the two-storey demo layout','Connecting walls and openings','Preparing materials and fixtures','Validating editable geometry']):
             report(phase=['analyzing','planning','working','working','validating'][i],progress=.1+i*.16,message=message);time.sleep(.32)
         building=demo_home();report(phase='saving',progress=.94,message='Saving your editable project')
-        project=repo().create(brief.name,building,demo_rules(),brief)
+        project=repo().create(brief.name,building,layer_rules([]),brief)
         project=repo().commit(project.project_id,project.revision,recheck)
         return {'project_id':project.project_id}
     return {'job_id':jobs.submit(work,'Preparing your project')}
@@ -110,7 +120,7 @@ def review_rule(pid:str,rule_id:str,body:RuleReview):
     def update(s):
         rule=next((r for r in s['rules'] if r['rule_id']==rule_id),None)
         if rule is None:raise ValueError('Unknown rule')
-        allowed={'applies_to','metric','operator','value','unit','target_ids','supported','qualifiers'}
+        allowed={'applies_to','metric','operator','value','unit','target_ids','supported','qualifiers','excludes','applies_to_filter'}
         if set(body.changes)-allowed:raise ValueError('This rule field cannot be edited')
         rule.update(body.changes,status=body.status);Rule.model_validate(rule);return recheck(s)
     return repo().commit(pid,body.expected_revision,update)
@@ -134,7 +144,7 @@ def get_file(pid:str,relative:str):
 @router.post('/import-native',response_model=DesktopProject)
 def import_native(body:dict=Body(...)):
     building=Building.model_validate(body['building']);validate_building(building)
-    return repo().create(str(body.get('name','Imported project')),building,body.get('rules',[]),DesignBrief.model_validate(body['brief']) if body.get('brief') else None,source='import')
+    return repo().create(str(body.get('name','Imported project')),building,layer_rules(body.get('rules',[])),DesignBrief.model_validate(body['brief']) if body.get('brief') else None,source='import')
 
 @router.post('/import')
 def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported building'),roles:str=Form('{}')):
@@ -240,6 +250,7 @@ def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported buil
             for rule in rules:
                 if rule.get('supported'):
                     rule['status']='approved'
+        rules=layer_rules(rules)
         totals.update({'rooms':len(building.rooms),'walls':len(building.walls),'doors':sum(1 for o in building.openings if o.kind=='door'),'windows':sum(1 for o in building.openings if o.kind=='window'),'pages_read':sum(1 for s in sheets_done if s.get('extracted'))})
         source_files=[{k:v for k,v in d.items() if k!='absolute_path'} for d in documents]
         summary={'name':name,'floors':len(building.floors),'rooms':len(building.rooms),'area_sqft':round(area),'doors':totals['doors'],'windows':totals['windows'],'walls':len(building.walls),'rules':len(rules),'violations':0,'elapsed_s':round(elapsed,2),'pages':totals['pages'],'pages_read':totals['pages_read']}

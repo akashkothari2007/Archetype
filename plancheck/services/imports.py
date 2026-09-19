@@ -14,6 +14,11 @@ from plancheck.services.wall_collapse import DEFAULT_THICKNESS_FT,CollapsedWall,
 GAP_BRIDGE_FT = 3.0
 MIN_ROOM_AREA_FT2 = 40.0
 OPENING_SNAP_FT = 1.5
+DOOR_SNAP_FT = 2.5
+DOOR_MIN_FT = 1.5
+DOOR_MAX_FT = 8.0
+GAP_DISAGREE = 0.20
+GAP_ALONG_FT = 2.5
 STOREY_HEIGHT_FT = 10.0
 AREA_MATCH_TOL = 0.08
 ASPECT_MATCH_TOL = 0.15
@@ -122,6 +127,57 @@ def _in_bbox(p,bbox,pad=.1):
     x0,y0,x1,y1=bbox
     return x0-pad<=p[0]<=x1+pad and y0-pad<=p[1]<=y1+pad
 
+def _collinear_gap(walls, a, c, offset: float):
+    ax, ay, cx, cy = a.x, a.y, c.x, c.y
+    length = math.hypot(cx - ax, cy - ay)
+    if length < 1e-9:
+        return None
+    ux, uy = (cx - ax) / length, (cy - ay) / length
+
+    def project(x, y):
+        return (x - ax) * ux + (y - ay) * uy
+
+    def dist_line(x, y):
+        t = project(x, y)
+        return math.hypot(x - (ax + ux * t), y - (ay + uy * t))
+
+    intervals = []
+    for _wall, va, vc in walls:
+        if dist_line(va.x, va.y) > 0.35 or dist_line(vc.x, vc.y) > 0.35:
+            continue
+        wx, wy = vc.x - va.x, vc.y - va.y
+        wall_len = math.hypot(wx, wy)
+        if wall_len < 0.05:
+            continue
+        if abs((wx / wall_len) * ux + (wy / wall_len) * uy) < 0.95:
+            continue
+        t0, t1 = project(va.x, va.y), project(vc.x, vc.y)
+        lo, hi = min(t0, t1), max(t0, t1)
+        intervals.append((lo, hi))
+    if not intervals:
+        return None
+    intervals.sort()
+    merged = []
+    for lo, hi in intervals:
+        if not merged or lo > merged[-1][1] + 0.15:
+            merged.append([lo, hi])
+        else:
+            merged[-1][1] = max(merged[-1][1], hi)
+    gaps = []
+    for i in range(len(merged) - 1):
+        g0, g1 = merged[i][1], merged[i + 1][0]
+        gw = g1 - g0
+        if DOOR_MIN_FT <= gw <= DOOR_MAX_FT:
+            mid = (g0 + g1) / 2
+            along = abs(mid - offset)
+            if along <= GAP_ALONG_FT:
+                gaps.append((along, gw))
+    if not gaps:
+        return None
+    gaps.sort()
+    return gaps[0][1]
+
+
 def attach_openings(building:Building,geom:SheetGeometry,point,source:Source,bbox=None):
     walls=_wall_lookup(building)
     if not walls:return
@@ -134,26 +190,75 @@ def attach_openings(building:Building,geom:SheetGeometry,point,source:Source,bbo
         mid=((window.a[0]+window.b[0])/2,(window.a[1]+window.b[1])/2)
         if bbox and not _in_bbox(mid,bbox,pad=1):continue
         candidates.append(('window',window.id,point(mid),window.width_ft or 3.0))
-    def snap(xy):
+
+    def snap_window(xy):
         best=None
         for wall,a,c in walls:
             offset,dist,length=_project_point(xy[0],xy[1],a.x,a.y,c.x,c.y)
             if dist<=OPENING_SNAP_FT and length>.05 and (best is None or dist<best[0]):
                 best=(dist,wall,a,c,offset,length)
         return best
+
+    def snap_door(xy):
+        hits=[]
+        for wall,a,c in walls:
+            offset,dist,length=_project_point(xy[0],xy[1],a.x,a.y,c.x,c.y)
+            if dist<=DOOR_SNAP_FT and length>.05:
+                hits.append((dist,-length,wall,a,c,offset,length))
+        if not hits:return None
+        long_hits=[h for h in hits if h[6]>=DOOR_MIN_FT]
+        pool=long_hits or hits
+        with_gap=[]
+        for h in pool:
+            dist,_neg,wall,a,c,offset,length=h
+            gap=_collinear_gap(walls,a,c,offset)
+            if gap and length>=gap+0.02:
+                with_gap.append((dist,h,gap))
+        if with_gap:
+            with_gap.sort(key=lambda item:(item[0], item[1][2].id))
+            _dist,h,gap=with_gap[0]
+            return h[2],h[3],h[4],h[5],h[6],gap
+        pool.sort(key=lambda h:(h[0], h[1], h[2].id))
+        h=pool[0]
+        return h[2],h[3],h[4],h[5],h[6],None
+
+    dropped=0
     for kind,oid,xy,width in candidates:
-        hit=snap(xy)
-        if not hit:continue
-        _dist,wall,_a,_c,offset,length=hit
-        width=min(max(width,0.5),length-0.02)
-        if width<=0.2:continue
+        if kind=='door':
+            hit=snap_door(xy)
+            if not hit:
+                dropped+=1
+                continue
+            wall,_a,_c,offset,length,gap=hit
+            path_width=width
+            # A door symbol on a continuous wall has no opening to measure.
+            # The wall-run gap is ground truth; without one, drop the fragment.
+            if gap is None:
+                dropped+=1
+                continue
+            if path_width<=0 or abs(gap-path_width)/max(path_width,1e-9)>GAP_DISAGREE:
+                width=gap
+            if width<DOOR_MIN_FT or width>DOOR_MAX_FT:
+                dropped+=1
+                continue
+            if width>length-0.02:
+                dropped+=1
+                continue
+        else:
+            hit=snap_window(xy)
+            if not hit:continue
+            _dist,wall,_a,_c,offset,length=hit
+            width=min(max(width,0.5),length-0.02)
+            if width<=0.2:continue
         start=max(0.0,min(length-width,offset-width/2))
         interval=occupied.setdefault(wall.id,[])
         if any(min(start+width,other[1])-max(start,other[0])>1e-5 for other in interval):continue
         interval.append((start,start+width))
         building.openings.append(Opening(id=oid,wall_id=wall.id,kind=kind,offset_ft=start,width_ft=width,height_ft=7 if kind=='door' else 4,sill_ft=0 if kind=='door' else 3,source=source))
+    if dropped:
+        building.review.append(ReviewItem(id=f'{source.sheet_id or building.floors[0].id}-dropped-doors',kind='extraction',message=f'Dropped {dropped} door fragments outside {DOOR_MIN_FT:g}–{DOOR_MAX_FT:g} ft or without a host wall; counted as extraction_warnings, not openings.',document_id=source.document_id,sheet_id=source.sheet_id))
     if building.openings:
-        building.review.append(ReviewItem(id=f'{source.sheet_id or building.floors[0].id}-openings',kind='openings',message=f'{len(building.openings)} openings snapped to the nearest wall within {OPENING_SNAP_FT:g} ft. Confirm clear widths and swing before compliance checks.',document_id=source.document_id,sheet_id=source.sheet_id))
+        building.review.append(ReviewItem(id=f'{source.sheet_id or building.floors[0].id}-openings',kind='openings',message=f'{len(building.openings)} openings snapped to the nearest wall. Confirm clear widths and swing before compliance checks.',document_id=source.document_id,sheet_id=source.sheet_id))
 
 def _structural(cls:str):
     return 'loadbearing' if cls=='loadbearing' else 'nonstructural' if cls=='interior' else 'unknown'
@@ -549,6 +654,8 @@ def build_from_sheets(project:Project,geometries:list[SheetGeometry])->Building:
             result=merge_buildings(result,retarget_storey(scratch,f'level-{level}',_floor_name(level),(level-1)*STOREY_HEIGHT_FT))
     link_rooms_to_types(result)
     assign_shared_type_refs(result)
+    from plancheck.services.reliability import apply_reliability
+    apply_reliability(result)
     return result
 
 def import_dxf(path:Path,document_id:str)->Building:

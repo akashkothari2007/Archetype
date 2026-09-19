@@ -8,7 +8,7 @@ import math
 from plancheck.core.schemas import CheckResult, Mismatch, Model, Ruleset
 from plancheck.core.building import Building, Floor, Room
 from plancheck.engines.base import invoke, load_fixture
-from plancheck.services.compliance import check_building
+from plancheck.services.compliance import evaluate_building
 
 
 def run_real(model: Model, rules: Ruleset) -> CheckResult:
@@ -32,8 +32,11 @@ def run_real(model: Model, rules: Ruleset) -> CheckResult:
                     floor_id=f"level-{space.level}",name=room_type.name,category=room_type.category,
                     type_ref=room_type.type_id,polygon=[point(p) for p in room_type.boundary_ft],
                     confidence=min(room_type.confidence,space.confidence)))
-    checks = check_building(building,[r.model_dump() for r in rules.rules])
-    return CheckResult(mismatches=[Mismatch.model_validate(c) for c in checks if c["status"] != "pass"])
+    evaluated = evaluate_building(building,[r.model_dump() for r in rules.rules])
+    return CheckResult(
+        mismatches=[Mismatch.model_validate(c) for c in evaluated["checks"] if c["status"] not in ("pass", "quarantined")],
+        coverage=evaluated["coverage"],
+    )
 
 
 def run_stub(model: Model, rules: Ruleset) -> CheckResult:

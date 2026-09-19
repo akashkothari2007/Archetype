@@ -1,7 +1,7 @@
 import type { DesktopProject as ContractProject } from '@archetype/contracts'
 export type { Building, Floor, Vertex, BuildingWall, Opening, Room, PlacedObject, Environment, Source, ReviewItem, DesignBrief, ModelCommand } from '@archetype/contracts'
 export type DesktopProject = ContractProject & { sheets?: SheetCard[]; import_meta?: ImportSummary }
-export type Check = {id:string;rule_id:string;entity_id:string;entity_ids:string[];status:'pass'|'fail'|'cannot_verify';metric:string;actual:number|null;required:number;unit:string;message:string;source_doc:string;source_page?:number;source_text:string};
+export type Check = {id:string;rule_id:string;entity_id:string;entity_ids:string[];status:'pass'|'fail'|'cannot_verify'|'quarantined';metric:string;actual:number|null;required:number;unit:string;message:string;source_doc:string;source_page?:number;source_text:string};
 export type SheetCard = {
   sheet_id:string
   sheet_no:string

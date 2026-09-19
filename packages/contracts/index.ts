@@ -180,6 +180,8 @@ export interface Opening {
   hinge: Hinge;
   swing: Swing;
   clear_width_ft: ClearWidthFt;
+  reliability?: 'ok' | 'suspect';
+  reliability_reason?: string;
   source: Source;
 }
 export interface Room {
@@ -194,6 +196,8 @@ export interface Room {
   confidence: Confidence1;
   needs_review: NeedsReview;
   instance_count?: InstanceCount;
+  reliability?: 'ok' | 'suspect';
+  reliability_reason?: string;
   source: Source;
 }
 export interface PlacedObject {
