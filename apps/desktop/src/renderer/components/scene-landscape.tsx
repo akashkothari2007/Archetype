@@ -17,7 +17,7 @@ export function Daylight({ bounds, environment }: { bounds: Bounds; environment:
   const sky = <Sky distance={2000} sunPosition={direction} turbidity={2.8} rayleigh={1.6} mieCoefficient={.005} mieDirectionalG={.82} />
   return <>
     <fog attach="fog" args={['#c4d2db', Math.max(span * 5, 240), Math.max(span * 18, 1300)]} />
-    <group position={[bounds.cx, 0, bounds.cy]}>{sky}</group>
+    <group userData={{ captureHide: true }} position={[bounds.cx, 0, bounds.cy]}>{sky}</group>
     <Environment key={`${environment.time}-${environment.season}-${environment.sun_azimuth}`} frames={1} resolution={128} environmentIntensity={.45 + day * .2}>
       {sky}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -10, 0]}><planeGeometry args={[4000, 4000]} /><meshBasicMaterial color="#717763" /></mesh>
@@ -59,17 +59,17 @@ function LandscapeTrees({ bounds }: { bounds: Bounds }) {
 export function Landscape({ bounds }: { bounds: Bounds }) {
   const size = Math.max(2000, Math.max(bounds.width, bounds.height) * 30)
   const roadZ = bounds.minY - 34
-  return <>
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[bounds.cx, -.65, bounds.cy]} receiveShadow><planeGeometry args={[size, size]} /><SurfaceMaterial finish="grass" color="#d6dcc7" /></mesh>
+  return <group userData={{ captureHide: true }}>
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[bounds.cx, -.65, bounds.cy]} receiveShadow><planeGeometry args={[size, size]} /><SurfaceMaterial finish="grass" color="#d6dcc7" matchStyle={false} /></mesh>
     {/* A modest access street and paving give the aerial camera familiar scale. */}
-    <mesh position={[bounds.cx, -.6, roadZ]} receiveShadow><boxGeometry args={[size, .08, 19]} /><SurfaceMaterial finish="stone" color="#535758" /></mesh>
-    {[-12.5, 12.5].map(offset => <mesh key={offset} position={[bounds.cx, -.43, roadZ + offset]} receiveShadow><boxGeometry args={[size, .3, 5]} /><SurfaceMaterial finish="stone" color="#c4c0b5" /></mesh>)}
-    <mesh position={[bounds.minX + 5, -.38, bounds.minY - 10]} receiveShadow><boxGeometry args={[10, .38, 20]} /><SurfaceMaterial finish="stone" color="#bdb9aa" /></mesh>
+    <mesh position={[bounds.cx, -.6, roadZ]} receiveShadow><boxGeometry args={[size, .08, 19]} /><SurfaceMaterial finish="stone" color="#535758" matchStyle={false} /></mesh>
+    {[-12.5, 12.5].map(offset => <mesh key={offset} position={[bounds.cx, -.43, roadZ + offset]} receiveShadow><boxGeometry args={[size, .3, 5]} /><SurfaceMaterial finish="stone" color="#c4c0b5" matchStyle={false} /></mesh>)}
+    <mesh position={[bounds.minX + 5, -.38, bounds.minY - 10]} receiveShadow><boxGeometry args={[10, .38, 20]} /><SurfaceMaterial finish="stone" color="#bdb9aa" matchStyle={false} /></mesh>
     <LandscapeTrees bounds={bounds} />
-  </>
+  </group>
 }
 
-export function FloorSlab({ polygon, y = -.32, roof = false, thickness = .32 }: { polygon: number[][]; y?: number; roof?: boolean; thickness?: number }) {
+export function FloorSlab({ polygon, y = -.32, roof = false, thickness = .32, photoreal = false }: { polygon: number[][]; y?: number; roof?: boolean; thickness?: number; photoreal?: boolean }) {
   const geometry = useMemo(() => {
     const shape = new THREE.Shape(polygon.map(([x,z]) => new THREE.Vector2(x, -z)))
     const geometry = new THREE.ExtrudeGeometry(shape, { depth: roof ? .38 : thickness, bevelEnabled: false })
@@ -77,5 +77,5 @@ export function FloorSlab({ polygon, y = -.32, roof = false, thickness = .32 }: 
     return geometry
   }, [polygon, roof, thickness])
   useEffect(() => () => geometry.dispose(), [geometry])
-  return <mesh geometry={geometry} position={[0,y,0]} receiveShadow castShadow><SurfaceMaterial finish="stone" color={roof ? '#616568' : '#b6b2a8'} /></mesh>
+  return <mesh geometry={geometry} position={[0,y,0]} receiveShadow castShadow><SurfaceMaterial finish="stone" color={roof ? '#616568' : '#b6b2a8'} photoreal={photoreal} /></mesh>
 }

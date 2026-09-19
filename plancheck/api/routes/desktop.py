@@ -46,6 +46,9 @@ def health():
         'generation_provider':settings.generation_provider,
         'orchestrator_model':settings.orchestrator_slug() if live else None,
         'subagent_model':settings.subagent_slug() if live else None,
+        'image_model_id':settings.image_model_id or None,
+        'image_ready':settings.image_live(),
+        'splat_ready':settings.splat_live(),
     }
 
 @router.get('/projects')
@@ -64,6 +67,48 @@ def generate(brief:DesignBrief):
         project=repo().commit(project.project_id,project.revision,recheck)
         return {'project_id':project.project_id}
     return {'job_id':jobs.submit(work,'Preparing your project')}
+
+class AppearanceRequest(BaseModel):
+    image:str
+    projector:list[float]=Field(default_factory=list)
+
+@router.post('/projects/{pid}/appearance')
+def appearance(pid:str,body:AppearanceRequest):
+    load(pid)
+    settings=get_settings()
+    if not settings.image_live():
+        raise HTTPException(400,'Flux is not configured. Set PLANCHECK_IMAGE_MODEL_ID and a Hack the North API key as PLANCHECK_IMAGE_API_KEY.')
+    try:
+        from plancheck.services.image_edit import decode_png
+        png=decode_png(body.image)
+    except Exception as exc:
+        raise HTTPException(400,str(exc)) from None
+    projector=body.projector[:16] if len(body.projector)>=16 else []
+    def work(report, snapshot=png, matrix=projector):
+        from plancheck.services.image_edit import edit_png
+        from plancheck.services.appearance_style import extract_cladding, sample_palette
+        report(phase='editing',progress=.2,message='Painting photoreal materials')
+        result=edit_png(snapshot)
+        folder=repo().path(pid)
+        (folder/'appearance.png').write_bytes(result)
+        wall,roof=extract_cladding(result)
+        (folder/'appearance-wall.png').write_bytes(wall)
+        (folder/'appearance-roof.png').write_bytes(roof)
+        meta={'projector':matrix,'scope':'exterior','palette':sample_palette(result),'wall':'appearance-wall.png','roof':'appearance-roof.png'}
+        if settings.splat_live():
+            try:
+                report(phase='splatting',progress=.7,message='Building an exterior Gaussian splat')
+                from plancheck.services.splat import generate_splat
+                splat=generate_splat(result)
+                (folder/'appearance.splat').write_bytes(splat)
+                meta['splat']='appearance.splat'
+            except Exception as exc:
+                from plancheck.core.logutil import get_logger
+                get_logger('plancheck.appearance').warning('splat.skip %s', exc)
+        atomic_json(folder/'appearance.json',meta)
+        report(phase='saving',progress=.95,message='Applying photoreal wall and roof materials')
+        return {'url':f'/projects/{pid}/files/appearance.png','splat':meta.get('splat')}
+    return {'job_id':jobs.submit(work,'Painting the 3D view')}
 
 @router.get('/projects/{pid}',response_model=DesktopProject)
 def project(pid:str):return load(pid)
@@ -140,7 +185,7 @@ def add_rule(pid:str,body:dict=Body(...)):
 @router.get('/projects/{pid}/files/{relative:path}')
 def get_file(pid:str,relative:str):
     base=repo().path(pid).resolve();path=(base/relative).resolve()
-    if not path.is_relative_to(base) or path.suffix.lower() not in ['.json','.md','.pdf','.png','.dxf','.ifc']:raise HTTPException(403,'File is outside this project')
+    if not path.is_relative_to(base) or path.suffix.lower() not in ['.json','.md','.pdf','.png','.dxf','.ifc','.splat','.ply','.spz']:raise HTTPException(403,'File is outside this project')
     if not path.is_file():raise HTTPException(404,'File not found')
     return FileResponse(path)
 

@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     subagent_model: str = DEFAULT_SUBAGENT_MODEL
     generation_provider: str = "demo"
     generation_model: str = ""
+    image_model_id: str = ""
+    image_model: str = "flux2-dev"
+    image_api_key: str = ""
+    splat_url: str = ""
+    splat_api_key: str = ""
     log_level: str = "INFO"
     use_enlarged: bool = False
     auto_approve: bool = True
@@ -92,6 +97,29 @@ class Settings(BaseSettings):
             "live",
             "model",
         } and bool(self.resolved_api_key())
+
+    def resolved_image_api_key(self) -> str:
+        return (
+            self.image_api_key.strip()
+            or os.environ.get("PLANCHECK_IMAGE_API_KEY", "").strip()
+            or _env_file_value("PLANCHECK_IMAGE_API_KEY")
+            or self.resolved_api_key()
+        )
+
+    def image_live(self) -> bool:
+        return bool(self.image_model_id.strip() and self.resolved_image_api_key())
+
+    def resolved_splat_api_key(self) -> str:
+        return (
+            self.splat_api_key.strip()
+            or os.environ.get("PLANCHECK_SPLAT_API_KEY", "").strip()
+            or os.environ.get("FAL_KEY", "").strip()
+            or _env_file_value("PLANCHECK_SPLAT_API_KEY")
+            or _env_file_value("FAL_KEY")
+        )
+
+    def splat_live(self) -> bool:
+        return bool(self.resolved_splat_api_key() or self.splat_url.strip())
 
     def engine_modes(self) -> dict[str, str]:
         modes = {name: "stub" for name in ENGINE_NAMES}

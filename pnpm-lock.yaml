@@ -26,6 +26,9 @@ importers:
       '@react-three/fiber':
         specifier: ^9.3.0
         version: 9.7.0(@types/react@19.3.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(three@0.183.2)
+      '@sparkjsdev/spark':
+        specifier: ^2.2.0
+        version: 2.2.0(three@0.183.2)
       dockview-react:
         specifier: ^4.10.0
         version: 4.13.1(react@19.2.4)
@@ -719,6 +722,11 @@ packages:
     resolution: {integrity: sha512-Erx822VRBwLa124shbj+wNXe//BOgMEctDV0m1aqTQdNO1S69DgNUCFKC1RCeZfixs1J31l6igk1ziyXErbigQ==}
     cpu: [x64]
     os: [win32]
+
+  '@sparkjsdev/spark@2.2.0':
+    resolution: {integrity: sha512-wf5F2YAmPXnjm20/MgXYer9FQTXz2JOCo05HwxFkaD7Guk9rHVPIwdJ6fq0oF9ME0heMvYj+TxS6DTrucvy6KA==}
+    peerDependencies:
+      three: '>=0.180.0'
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -1901,6 +1909,11 @@ snapshots:
 
   '@rollup/rollup-win32-x64-msvc@4.63.4':
     optional: true
+
+  '@sparkjsdev/spark@2.2.0(three@0.183.2)':
+    dependencies:
+      fflate: 0.8.3
+      three: 0.183.2
 
   '@standard-schema/spec@1.1.0': {}
 
