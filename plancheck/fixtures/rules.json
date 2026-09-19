@@ -1,0 +1,40 @@
+{
+  "rules": [
+    {
+      "rule_id": "TPS-GR-014",
+      "applies_to": "guestroom.*",
+      "metric": "area",
+      "operator": ">=",
+      "value": 16.0,
+      "unit": "m2",
+      "source_doc": "TownePlace Suites Standards.pdf",
+      "source_page": 47,
+      "source_text": "Area: 16 m² (175 sq. ft.) minimum",
+      "extraction": "regex"
+    },
+    {
+      "rule_id": "TPS-CORR-003",
+      "applies_to": "circulation.corridor*",
+      "metric": "width",
+      "operator": ">=",
+      "value": 1.5,
+      "unit": "m",
+      "source_doc": "TownePlace Suites Standards.pdf",
+      "source_page": 22,
+      "source_text": "Corridor Width: minimum 1.5 m (5 ft.)",
+      "extraction": "regex"
+    },
+    {
+      "rule_id": "TPS-GR-CEIL-001",
+      "applies_to": "guestroom.*",
+      "metric": "ceiling_height",
+      "operator": ">=",
+      "value": 2.44,
+      "unit": "m",
+      "source_doc": "TownePlace Suites Standards.pdf",
+      "source_page": 48,
+      "source_text": "Minimum ceiling height 8'-0\" (2.44 m)",
+      "extraction": "regex"
+    }
+  ]
+}

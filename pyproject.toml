@@ -1,34 +1,41 @@
 [project]
 name = "plancheck"
 version = "0.1.0"
-description = "Deterministic ingestion of hotel architectural drawings into a structured building model."
-requires-python = ">=3.12,<3.13"
+description = "Hotel drawing compliance pipeline: classify, extract, model, rules, check, agent."
+readme = "README.md"
+requires-python = ">=3.11"
 dependencies = [
-    "pymupdf>=1.24.0",
-    "pdfplumber>=0.11.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pymupdf>=1.24",
+    "python-multipart>=0.0.9",
 ]
 
-[dependency-groups]
+[project.optional-dependencies]
 dev = [
-    "pytest>=8.3.0",
-    "ruff>=0.7.0",
+    "pytest>=8",
+    "httpx>=0.27",
 ]
+
+[project.scripts]
+plancheck-demo = "plancheck.demo:main"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-packages = ["plancheck"]
+[tool.setuptools.packages.find]
+include = ["plancheck*"]
 
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+[tool.setuptools.package-data]
+plancheck = [
+    "fixtures/*.json",
+    "web/**/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Import from the source tree, so tests never depend on a stale install.
 pythonpath = ["."]
+addopts = "-q"

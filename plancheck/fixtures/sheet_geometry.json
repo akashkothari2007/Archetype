@@ -1,0 +1,137 @@
+{
+  "sheet_id": "A.801",
+  "page": 51,
+  "size_pt": [2384.0, 1684.0],
+  "scale_pts_per_ft": 18.0,
+  "coordinate_system": { "units": "pt", "origin": "bottom-left", "y": "up" },
+  "layer_map": {
+    "WALL-STUD-LOADBEARING": "wall",
+    "WALL-STUD": "wall",
+    "DOOR": "door",
+    "WINDOW": "window",
+    "PLUMBING FIXTURE": "fixture",
+    "GRID": "grid",
+    "ANNO-ROOM TAG": "room_tag",
+    "ANNO-DIMS": "dimension",
+    "FLOOR-CLR SPACE": "clear_space",
+    "FURNITURE": "furniture"
+  },
+  "walls": [
+    {
+      "id": "w-0001",
+      "a": [412.0, 980.5],
+      "b": [412.0, 1252.1],
+      "cls": "loadbearing",
+      "layer": "WALL-STUD-LOADBEARING",
+      "thickness_pt": 2.3,
+      "len_ft": 15.09
+    },
+    {
+      "id": "w-0002",
+      "a": [412.0, 1252.1],
+      "b": [683.5, 1252.1],
+      "cls": "loadbearing",
+      "layer": "WALL-STUD-LOADBEARING",
+      "thickness_pt": 2.3,
+      "len_ft": 15.08
+    },
+    {
+      "id": "w-0003",
+      "a": [683.5, 1252.1],
+      "b": [683.5, 980.5],
+      "cls": "stud",
+      "layer": "WALL-STUD",
+      "thickness_pt": 1.6,
+      "len_ft": 15.09
+    },
+    {
+      "id": "w-0004",
+      "a": [683.5, 980.5],
+      "b": [412.0, 980.5],
+      "cls": "stud",
+      "layer": "WALL-STUD",
+      "thickness_pt": 1.6,
+      "len_ft": 15.08
+    },
+    {
+      "id": "w-0005",
+      "a": [412.0, 1200.1],
+      "b": [511.0, 1200.1],
+      "cls": "interior",
+      "layer": "WALL-STUD",
+      "thickness_pt": 1.2,
+      "len_ft": 5.5
+    }
+  ],
+  "doors": [
+    {
+      "id": "d-0001",
+      "xy": [420.0, 1010.0],
+      "bbox": [412.0, 1002.0, 466.0, 1056.0],
+      "width_pt": 54.0,
+      "width_ft": 3.0,
+      "swing": { "center": [412.0, 1002.0], "r": 54.0, "a0": 0, "a1": 90 }
+    }
+  ],
+  "windows": [
+    {
+      "id": "n-0001",
+      "a": [412.0, 1252.0],
+      "b": [502.0, 1252.0],
+      "width_ft": 5.0
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "f-0001",
+      "xy": [430.0, 1160.0],
+      "bbox": [418.0, 1148.0, 442.0, 1172.0],
+      "kind": "unknown",
+      "layer": "PLUMBING FIXTURE"
+    },
+    {
+      "id": "f-0002",
+      "xy": [470.0, 1160.0],
+      "bbox": [458.0, 1148.0, 482.0, 1172.0],
+      "kind": "unknown",
+      "layer": "PLUMBING FIXTURE"
+    }
+  ],
+  "grid": {
+    "x_axes": [{ "label": "1a", "pos_pt": 180.0, "axis": "x" }],
+    "y_axes": [{ "label": "A", "pos_pt": 240.0, "axis": "y" }],
+    "bubbles": [{ "label": "1a", "xy": [180.0, 1620.0] }]
+  },
+  "room_tags": [
+    {
+      "text": "STUDIO KING",
+      "xy": [455.0, 1080.0],
+      "lines": ["STUDIO", "KING"],
+      "number": "214"
+    }
+  ],
+  "dimensions": [
+    {
+      "text": "15'-1\"",
+      "feet": 15.083,
+      "metres": 4.6,
+      "xy": [455.0, 960.0],
+      "a": [412.0, 955.0],
+      "b": [684.0, 955.0],
+      "source": "metric_bracket"
+    }
+  ],
+  "clear_spaces": [
+    {
+      "id": "cs-01",
+      "polygon": [[418.0, 1002.0], [478.0, 1002.0], [478.0, 1062.0], [418.0, 1062.0]],
+      "layer": "FLOOR-CLR SPACE"
+    }
+  ],
+  "excluded": { "furniture": 6610, "wall_hatch": 0, "unmapped": 329 },
+  "raster": {
+    "dpi": 150.0,
+    "file": "sheets/A.801.raster.png",
+    "size_px": [4967, 3509]
+  }
+}

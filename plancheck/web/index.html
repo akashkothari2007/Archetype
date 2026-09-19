@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PlanCheck</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <header>
+    <h1>PlanCheck</h1>
+    <p class="tag">Drawings in. Brand-standard mismatches out.</p>
+    <nav class="tabs" role="tablist">
+      <button type="button" data-tab="upload" class="active">Upload</button>
+      <button type="button" data-tab="sheet">Sheet</button>
+      <button type="button" data-tab="model">Model</button>
+    </nav>
+  </header>
+
+  <p id="status" class="status" hidden></p>
+
+  <section id="tab-upload" class="tab">
+    <div class="drops">
+      <label class="drop" id="drop-drawings">
+        <span>Drawings PDF</span>
+        <small>Slot A — architectural set</small>
+        <input type="file" id="file-drawings" accept="application/pdf" multiple>
+        <ul id="list-drawings"></ul>
+      </label>
+      <label class="drop" id="drop-standards">
+        <span>Standards PDF</span>
+        <small>Slot B — brand manual</small>
+        <input type="file" id="file-standards" accept="application/pdf" multiple>
+        <ul id="list-standards"></ul>
+      </label>
+    </div>
+    <p>
+      <button type="button" id="btn-create">Create project &amp; classify</button>
+    </p>
+    <div class="table-wrap">
+      <table id="sheet-table">
+        <thead>
+          <tr>
+            <th>page</th>
+            <th>sheet_no</th>
+            <th>title</th>
+            <th>role</th>
+            <th>scale</th>
+            <th>use</th>
+            <th>reason</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p>
+      <button type="button" id="btn-extract" disabled>Extract use=true sheets</button>
+    </p>
+  </section>
+
+  <section id="tab-sheet" class="tab" hidden>
+    <div class="sheet-toolbar">
+      <label>Sheet
+        <select id="sheet-picker"></select>
+      </label>
+      <div id="layer-toggles" class="layer-toggles"></div>
+      <p id="counts" class="counts"></p>
+    </div>
+    <svg id="sheet-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+    <p class="hint">Scroll to zoom, drag to pan. SVG y is inverted so y-up sheet data renders upright.</p>
+  </section>
+
+  <section id="tab-model" class="tab" hidden>
+    <p>
+      <button type="button" id="btn-model">Build model</button>
+      <button type="button" id="btn-rules">Extract rules</button>
+      <button type="button" id="btn-check">Run check</button>
+    </p>
+    <ul id="space-types"></ul>
+    <div id="viewer-3d">
+      <!-- TODO: 3D viewer mounts here.
+           Reads model.json + mismatches.json.
+           For each space, look up type_ref, extrude boundary_ft to
+           ASSUMED_WALL_HEIGHT_FT (9.0 ft, labeled assumed — not extracted),
+           translate by origin_ft, mirror if flagged.
+           plan (x,y) -> world (x,z), extrude along world y.
+           Color by whether the type has a mismatch.
+           confidence < 0.6: hatched + "needs review". -->
+      3D viewer placeholder
+    </div>
+  </section>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

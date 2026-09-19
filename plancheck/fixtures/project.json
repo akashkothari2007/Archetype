@@ -1,0 +1,84 @@
+{
+  "project_id": "pc-fixture",
+  "name": "Sidney TPS",
+  "created_at": "2026-01-15T12:00:00+00:00",
+  "units": "ft",
+  "model_file": null,
+  "documents": [
+    {
+      "doc_id": "drw-01",
+      "filename": "21-039_Sidney TPS_Arch._IFC.pdf",
+      "slot": "drawings",
+      "discipline": "architectural",
+      "pages": 51,
+      "page_size_pt": [2384.0, 1684.0],
+      "text_extractable": true,
+      "layered": true,
+      "layer_count": 48
+    },
+    {
+      "doc_id": "std-01",
+      "filename": "TownePlace Suites Standards.pdf",
+      "slot": "standards",
+      "discipline": "unknown",
+      "pages": 349,
+      "page_size_pt": [612.0, 792.0],
+      "text_extractable": true,
+      "layered": false,
+      "layer_count": 0
+    }
+  ],
+  "sheets": [
+    {
+      "sheet_id": "drw-01-p008",
+      "doc_id": "drw-01",
+      "page": 8,
+      "sheet_no": "A.202",
+      "title": "FLOOR PLAN",
+      "discipline": "architectural",
+      "role": "floor_plan",
+      "scale_text": "1/16\" = 1'-0\"",
+      "scale_pts_per_ft": 4.5,
+      "scale_source": "title_block",
+      "levels": ["2", "3"],
+      "use": true,
+      "reason": "Whole-floor plan at small scale. Room inventory and repeat counts.",
+      "stats": { "paths": 210000, "words": 4200, "layers": 32, "dim_tokens": 18 },
+      "geometry_file": null
+    },
+    {
+      "sheet_id": "drw-01-p051",
+      "doc_id": "drw-01",
+      "page": 51,
+      "sheet_no": "A.801",
+      "title": "UNIT PLAN",
+      "discipline": "architectural",
+      "role": "unit_plan",
+      "scale_text": "1/4\" = 1'-0\"",
+      "scale_pts_per_ft": 18.0,
+      "scale_source": "title_block",
+      "levels": [],
+      "use": true,
+      "reason": "Unit plan; highest-precision geometry in the set.",
+      "stats": { "paths": 8400, "words": 960, "layers": 28, "dim_tokens": 42 },
+      "geometry_file": null
+    },
+    {
+      "sheet_id": "drw-01-p017",
+      "doc_id": "drw-01",
+      "page": 17,
+      "sheet_no": "A.301",
+      "title": "ELEVATION",
+      "discipline": "architectural",
+      "role": "elevation",
+      "scale_text": "1/8\" = 1'-0\"",
+      "scale_pts_per_ft": 9.0,
+      "scale_source": "title_block",
+      "levels": [],
+      "use": false,
+      "reason": "Exterior elevation. No plan geometry.",
+      "stats": { "paths": 1200, "words": 180, "layers": 12, "dim_tokens": 4 },
+      "geometry_file": null
+    }
+  ]
+}

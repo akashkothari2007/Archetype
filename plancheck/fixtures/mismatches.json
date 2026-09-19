@@ -1,0 +1,38 @@
+{
+  "mismatches": [
+    {
+      "id": "V-001",
+      "type_ref": "guestroom.studio_qq_end",
+      "rule_id": "TPS-GR-014",
+      "severity": "fail",
+      "metric": "area",
+      "actual": 15.33,
+      "required": 16.0,
+      "unit": "m2",
+      "delta": -0.67,
+      "instances_affected": 12,
+      "affected_space_ids": ["s-2-014", "s-3-014"],
+      "message": "Studio QQ End Unit is 15.33 m², 0.67 m² under the 16 m² minimum.",
+      "source_page": 47,
+      "source_text": "Area: 16 m² (175 sq. ft.) minimum",
+      "model_confidence": 0.79
+    },
+    {
+      "id": "V-002",
+      "type_ref": "guestroom.studio_king",
+      "rule_id": "TPS-GR-CEIL-001",
+      "severity": "cannot_verify",
+      "metric": "ceiling_height",
+      "actual": null,
+      "required": 2.44,
+      "unit": "m",
+      "delta": null,
+      "instances_affected": 84,
+      "affected_space_ids": ["s-2-001", "s-2-002"],
+      "message": "Ceiling height is not in the 2D plan; cannot verify 8'-0\" minimum.",
+      "source_page": 48,
+      "source_text": "Minimum ceiling height 8'-0\" (2.44 m)",
+      "model_confidence": 0.91
+    }
+  ]
+}

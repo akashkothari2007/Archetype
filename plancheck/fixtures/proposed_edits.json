@@ -1,0 +1,15 @@
+{
+  "proposed_edits": [
+    {
+      "edit_id": "E-001",
+      "mismatch_id": "V-001",
+      "action": "expand",
+      "target": "guestroom.studio_qq_end",
+      "change": { "metric": "area", "from_m2": 15.33, "to_m2": 16.1 },
+      "geometry": { "scale_bbox": { "w": 11.0, "d": 15.7 } },
+      "blocked_by": [],
+      "note": "Extend 0.7ft into the adjacent closet. Verify closet wall is not structural.",
+      "affects_instances": 12
+    }
+  ]
+}

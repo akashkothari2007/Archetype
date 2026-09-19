@@ -1,0 +1,164 @@
+{
+  "units": "feet",
+  "origin": { "grid_x": "1a", "grid_y": "A" },
+  "grid": {
+    "x_axes": [
+      { "label": "1a", "x_ft": 0.0 },
+      { "label": "2a", "x_ft": 93.7 },
+      { "label": "3a", "x_ft": 187.4 }
+    ],
+    "y_axes": [
+      { "label": "A", "y_ft": 0.0 },
+      { "label": "B", "y_ft": 57.2 }
+    ]
+  },
+  "levels": [
+    { "index": 1, "name": "Ground", "sheets": ["A.201", "A.501a", "A.501b"] },
+    { "index": 2, "name": "Typical", "sheets": ["A.202", "A.502a"], "repeats_as": [2, 3] }
+  ],
+  "space_types": [
+    {
+      "type_id": "guestroom.studio_king",
+      "name": "Studio King",
+      "category": "guestroom",
+      "accessible": false,
+      "source_sheet": "A.801",
+      "source_region_pt": [120.0, 400.0, 640.0, 980.0],
+      "boundary_ft": [[0.0, 0.0], [15.08, 0.0], [15.08, 20.2], [0.0, 20.2]],
+      "area_sqft": 304.6,
+      "area_m2": 28.3,
+      "bbox_ft": { "w": 15.08, "d": 20.2 },
+      "children": [
+        {
+          "type_id": "guestroom.studio_king.bath",
+          "name": "Bathroom",
+          "category": "bathroom",
+          "boundary_ft": [[0.0, 12.2], [5.5, 12.2], [5.5, 20.2], [0.0, 20.2]],
+          "area_sqft": 44.0,
+          "area_m2": 4.09,
+          "fixtures": [{ "kind": "wc" }, { "kind": "lav" }, { "kind": "shower" }]
+        },
+        {
+          "type_id": "guestroom.studio_king.closet",
+          "name": "Closet",
+          "category": "storage",
+          "boundary_ft": [[5.5, 17.2], [9.0, 17.2], [9.0, 20.2], [5.5, 20.2]],
+          "area_sqft": 10.5,
+          "area_m2": 0.98
+        }
+      ],
+      "doors": [
+        { "width_ft": 3.0, "accessible": false, "to": "corridor" },
+        { "width_ft": 2.5, "accessible": false, "to": "bathroom" }
+      ],
+      "windows": [{ "width_ft": 5.0 }],
+      "fixtures": [{ "kind": "wc" }, { "kind": "lav" }, { "kind": "shower" }],
+      "confidence": 0.91,
+      "method": "wall_layer",
+      "instance_count": 84
+    },
+    {
+      "type_id": "guestroom.studio_qq_end",
+      "name": "Studio QQ End Unit",
+      "category": "guestroom",
+      "accessible": false,
+      "source_sheet": "A.801",
+      "source_region_pt": [700.0, 400.0, 980.0, 760.0],
+      "boundary_ft": [[0.0, 0.0], [11.0, 0.0], [11.0, 15.0], [0.0, 15.0]],
+      "area_sqft": 165.0,
+      "area_m2": 15.33,
+      "bbox_ft": { "w": 11.0, "d": 15.0 },
+      "children": [],
+      "doors": [{ "width_ft": 3.0, "to": "corridor" }],
+      "windows": [{ "width_ft": 4.0 }],
+      "fixtures": [{ "kind": "wc" }, { "kind": "lav" }],
+      "confidence": 0.79,
+      "method": "wall_layer",
+      "instance_count": 12
+    },
+    {
+      "type_id": "guestroom.acc_studio_king",
+      "name": "Accessible Studio King",
+      "category": "guestroom",
+      "accessible": true,
+      "source_sheet": "A.801",
+      "source_region_pt": [1000.0, 400.0, 1480.0, 980.0],
+      "boundary_ft": [[0.0, 0.0], [16.5, 0.0], [16.5, 21.0], [0.0, 21.0]],
+      "area_sqft": 346.5,
+      "area_m2": 32.19,
+      "bbox_ft": { "w": 16.5, "d": 21.0 },
+      "children": [],
+      "doors": [{ "width_ft": 3.0, "accessible": true, "to": "corridor" }],
+      "windows": [{ "width_ft": 5.0 }],
+      "fixtures": [{ "kind": "wc" }, { "kind": "lav" }, { "kind": "shower" }],
+      "confidence": 0.88,
+      "method": "wall_layer",
+      "instance_count": 6
+    },
+    {
+      "type_id": "circulation.corridor_typ",
+      "name": "Typical Corridor",
+      "category": "circulation",
+      "accessible": true,
+      "source_sheet": "A.502a",
+      "source_region_pt": [80.0, 200.0, 2200.0, 320.0],
+      "boundary_ft": [[0.0, 0.0], [187.4, 0.0], [187.4, 5.5], [0.0, 5.5]],
+      "area_sqft": 1030.7,
+      "area_m2": 95.75,
+      "bbox_ft": { "w": 187.4, "d": 5.5 },
+      "children": [],
+      "doors": [],
+      "windows": [],
+      "fixtures": [],
+      "confidence": 0.93,
+      "method": "wall_layer",
+      "instance_count": 3
+    }
+  ],
+  "spaces": [
+    {
+      "space_id": "s-2-001",
+      "type_ref": "guestroom.studio_king",
+      "level": 2,
+      "number": "201",
+      "origin_ft": [0.0, 0.0],
+      "rotation_deg": 0,
+      "mirrored": false,
+      "source_sheet": "A.202",
+      "confidence": 0.85
+    },
+    {
+      "space_id": "s-2-002",
+      "type_ref": "guestroom.studio_king",
+      "level": 2,
+      "number": "202",
+      "origin_ft": [15.08, 0.0],
+      "rotation_deg": 0,
+      "mirrored": true,
+      "source_sheet": "A.202",
+      "confidence": 0.85
+    },
+    {
+      "space_id": "s-2-014",
+      "type_ref": "guestroom.studio_qq_end",
+      "level": 2,
+      "number": "214",
+      "origin_ft": [172.4, 0.0],
+      "rotation_deg": 0,
+      "mirrored": false,
+      "source_sheet": "A.202",
+      "confidence": 0.71
+    },
+    {
+      "space_id": "s-2-c01",
+      "type_ref": "circulation.corridor_typ",
+      "level": 2,
+      "number": null,
+      "origin_ft": [0.0, 20.2],
+      "rotation_deg": 0,
+      "mirrored": false,
+      "source_sheet": "A.202",
+      "confidence": 0.9
+    }
+  ]
+}
