@@ -14,10 +14,9 @@ export function ExteriorSplat({ url, bounds, height }: { url: string; bounds: Bo
     import('@sparkjsdev/spark').then(({ SparkRenderer, SplatMesh }) => {
       if (cancelled) return
       spark = new SparkRenderer({ renderer: gl, onDirty: () => invalidate() })
-      scene.add(spark)
       splat = new SplatMesh({
         url,
-        onLoad: mesh => {
+        onLoad: (mesh: THREE.Object3D) => {
           if (cancelled) return
           mesh.quaternion.set(1, 0, 0, 0)
           mesh.updateMatrixWorld(true)
@@ -39,11 +38,11 @@ export function ExteriorSplat({ url, bounds, height }: { url: string; bounds: Bo
           invalidate()
         },
       })
-      group.current?.add(splat)
+      spark.add(splat)
+      scene.add(spark)
     }).catch(() => undefined)
     return () => {
       cancelled = true
-      if (splat) group.current?.remove(splat)
       if (spark) scene.remove(spark)
     }
   }, [url, gl, scene, invalidate, bounds.cx, bounds.cy, bounds.width, bounds.height, height])

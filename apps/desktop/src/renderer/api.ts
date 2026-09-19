@@ -8,6 +8,7 @@ export type BuildingPatch = {
   removed_ids:string[]
   checks:DesktopProject['checks']
   environment?:Building['environment']
+  site?:Building['site']
 }
 export function isDesktopProject(value:unknown):value is DesktopProject{
   const project=value as DesktopProject
@@ -44,6 +45,7 @@ export function applyPatch(project:DesktopProject,patch:BuildingPatch):DesktopPr
       openings:merge(building.openings,patch.changed.openings),
       objects:merge(building.objects,patch.changed.objects),
       environment:patch.environment??building.environment,
+      site:patch.site??building.site??{lat:null,lon:null,rotation_deg:0,ground_offset_ft:0,address:''},
     },
   }
 }

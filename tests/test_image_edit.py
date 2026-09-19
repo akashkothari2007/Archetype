@@ -54,6 +54,22 @@ def test_sample_palette_skips_black_background():
     assert palette["primary"] != "#000000"
 
 
+def test_extract_cladding_writes_wall_and_roof_maps():
+    import io
+    from PIL import Image
+    from plancheck.services.appearance_style import extract_cladding
+
+    image = Image.new("RGB", (64, 64), (0, 0, 0))
+    for x in range(12, 52):
+        for y in range(18, 58):
+            image.putpixel((x, y), (160, 70, 40) if y > 28 else (90, 90, 95))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    wall, roof = extract_cladding(buf.getvalue())
+    assert wall[:8] == b"\x89PNG\r\n\x1a\n"
+    assert roof[:8] == b"\x89PNG\r\n\x1a\n"
+
+
 def test_scene_prompt_forbids_toys():
     assert "diorama" in SCENE_PROMPT.lower()
     assert "black" in SCENE_PROMPT.lower()
@@ -72,17 +88,33 @@ def test_appearance_requires_flux_config(monkeypatch):
     assert response.status_code == 400
 
 
-def test_appearance_job_writes_png(monkeypatch, tmp_path):
-    monkeypatch.setenv("PLANCHECK_IMAGE_MODEL_ID", "q4o04ekw")
+def test_appearance_requires_triposplat_key(monkeypatch):
+    monkeypatch.setenv("PLANCHECK_IMAGE_MODEL_ID", "q40o4ekw")
     monkeypatch.setenv("PLANCHECK_IMAGE_API_KEY", "test-key")
-    monkeypatch.setenv("PLANCHECK_DATA_DIR", str(tmp_path / "projects"))
     monkeypatch.setenv("PLANCHECK_SPLAT_API_KEY", "")
     monkeypatch.setenv("PLANCHECK_SPLAT_URL", "")
     monkeypatch.delenv("FAL_KEY", raising=False)
     reset_settings()
     repo = FileProjectRepository()
     project = repo.create("Look", demo_home(), demo_rules())
+    response = TestClient(app).post(
+        f"/api/desktop/projects/{project.project_id}/appearance",
+        json={"image": "data:image/png;base64," + base64.b64encode(TINY_PNG).decode()},
+    )
+    assert response.status_code == 400
+    assert "FAL_KEY" in response.json()["detail"]
+
+
+def test_appearance_job_writes_png(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLANCHECK_IMAGE_MODEL_ID", "q4o04ekw")
+    monkeypatch.setenv("PLANCHECK_IMAGE_API_KEY", "test-key")
+    monkeypatch.setenv("PLANCHECK_DATA_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("FAL_KEY", "test-fal")
+    reset_settings()
+    repo = FileProjectRepository()
+    project = repo.create("Look", demo_home(), demo_rules())
     monkeypatch.setattr("plancheck.services.image_edit.edit_png", lambda png, **kw: TINY_PNG)
+    monkeypatch.setattr("plancheck.services.splat.generate_splat", lambda png, **kw: b"ply\nformat ascii 1.0\nend_header\n")
     client = TestClient(app)
     started = client.post(
         f"/api/desktop/projects/{project.project_id}/appearance",
@@ -104,6 +136,8 @@ def test_appearance_job_writes_png(monkeypatch, tmp_path):
     meta = json.loads((tmp_path / "projects" / project.project_id / "appearance.json").read_text(encoding="utf-8"))
     assert meta["scope"] == "exterior"
     assert "primary" in meta["palette"]
+    assert meta["splat"] == "appearance.ply"
+    assert (tmp_path / "projects" / project.project_id / "appearance.ply").is_file()
 
 
 def test_edit_png_sends_input_image_not_nested_extra_body(monkeypatch):

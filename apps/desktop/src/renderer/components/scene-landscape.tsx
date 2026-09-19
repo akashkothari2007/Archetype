@@ -1,5 +1,5 @@
-import { useEffect, useMemo } from 'react'
-import { Environment, Sky, useGLTF, useTexture } from '@react-three/drei'
+import { useEffect, useMemo, Suspense } from 'react'
+import { Cloud, Clouds, Environment, Sky, Stars, useGLTF, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 import type { Building } from '../types'
 import { floorBounds } from './editor-geometry'
@@ -9,22 +9,47 @@ type Bounds = ReturnType<typeof floorBounds>
 
 export function Daylight({ bounds, environment }: { bounds: Bounds; environment: Building['environment'] }) {
   const day = Math.max(0, Math.sin((environment.time - 6) / 12 * Math.PI))
-  const elevation = Math.max(.025, day * (environment.season === 'winter' ? .45 : environment.season === 'summer' ? 1.05 : .7))
+  const elevation = Math.max(.05, day * (environment.season === 'winter' ? .4 : environment.season === 'summer' ? .98 : .66))
   const angle = environment.sun_azimuth * Math.PI / 180
   const span = Math.max(bounds.width, bounds.height, 35)
-  const direction: [number, number, number] = [Math.cos(angle) * 100, elevation * 100, Math.sin(angle) * 100]
+  const sun: [number, number, number] = [Math.cos(angle), elevation, Math.sin(angle)]
   const target = useMemo(() => { const node = new THREE.Object3D(); node.position.set(bounds.cx, 4, bounds.cy); return node }, [bounds.cx, bounds.cy])
-  const sky = <Sky distance={2000} sunPosition={direction} turbidity={2.8} rayleigh={1.6} mieCoefficient={.005} mieDirectionalG={.82} />
+  const look = useMemo(() => {
+    const t = Math.pow(day, 0.72)
+    return {
+      sun: new THREE.Color().lerpColors(new THREE.Color('#ff6a28'), new THREE.Color('#ffd0a0'), t),
+      fill: new THREE.Color().lerpColors(new THREE.Color('#ffb07a'), new THREE.Color('#ffd8bc'), t),
+      fog: new THREE.Color().lerpColors(new THREE.Color('#e8b48a'), new THREE.Color('#edd9c2'), t),
+      hemiSky: new THREE.Color().lerpColors(new THREE.Color('#f2be9c'), new THREE.Color('#f3deca'), t),
+      hemiGround: new THREE.Color('#8a705c'),
+      turbidity: THREE.MathUtils.lerp(9.4, 4.6, t),
+      rayleigh: THREE.MathUtils.lerp(0.42, 0.82, t),
+      mieCoefficient: THREE.MathUtils.lerp(0.016, 0.006, t),
+      mieDirectionalG: THREE.MathUtils.lerp(0.94, 0.8, t),
+      cloud: new THREE.Color().lerpColors(new THREE.Color('#ffd2b0'), new THREE.Color('#fff4e8'), t),
+    }
+  }, [day])
+  const sky = <Sky distance={450000} sunPosition={sun} turbidity={look.turbidity} rayleigh={look.rayleigh} mieCoefficient={look.mieCoefficient} mieDirectionalG={look.mieDirectionalG} />
   return <>
-    <fog attach="fog" args={['#c4d2db', Math.max(span * 5, 240), Math.max(span * 18, 1300)]} />
-    <group userData={{ captureHide: true }} position={[bounds.cx, 0, bounds.cy]}>{sky}</group>
-    <Environment key={`${environment.time}-${environment.season}-${environment.sun_azimuth}`} frames={1} resolution={128} environmentIntensity={.45 + day * .2}>
+    <color attach="background" args={[look.fog]} />
+    <fog attach="fog" args={[look.fog, Math.max(span * 3.5, 140), Math.max(span * 14, 980)]} />
+    <group userData={{ captureHide: true }}>
       {sky}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -10, 0]}><planeGeometry args={[4000, 4000]} /><meshBasicMaterial color="#717763" /></mesh>
+      {day < 0.14 && <Stars radius={280} depth={50} count={1200} factor={2.4} saturation={0.2} fade speed={0} />}
+      {day > 0.08 && <Suspense fallback={null}><Clouds texture="assets/landscape/cloud.png" material={THREE.MeshBasicMaterial} frustumCulled={false}>
+        <Cloud seed={2} color={look.cloud} opacity={0.38} speed={0} segments={22} volume={28} bounds={[span * 1.4, 10, span * 0.7]} position={[bounds.cx + span * 0.9, 62, bounds.cy - span * 0.4]} fade={40} />
+        <Cloud seed={7} color={look.cloud} opacity={0.3} speed={0} segments={20} volume={22} bounds={[span, 8, span * 0.55]} position={[bounds.cx - span * 1.1, 54, bounds.cy + span * 0.7]} fade={40} />
+        <Cloud seed={11} color={look.cloud} opacity={0.26} speed={0} segments={18} volume={18} bounds={[span * 0.8, 7, span * 0.45]} position={[bounds.cx + span * 0.2, 70, bounds.cy + span * 1.2]} fade={50} />
+      </Clouds></Suspense>}
+    </group>
+    <Environment key={`${environment.time}-${environment.season}-${environment.sun_azimuth}`} frames={1} resolution={256} environmentIntensity={0.42 + day * 0.28}>
+      {sky}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -12, 0]}><planeGeometry args={[8000, 8000]} /><meshBasicMaterial color="#7a6a58" /></mesh>
     </Environment>
-    <hemisphereLight args={['#d5e5f2', '#8b8375', .85]} />
+    <hemisphereLight args={[look.hemiSky, look.hemiGround, 0.38 + day * 0.22]} />
     <primitive object={target} />
-    <directionalLight target={target} position={[bounds.cx + direction[0] * span / 45, direction[1] * span / 45 + 15, bounds.cy + direction[2] * span / 45]} intensity={.15 + day * 3.1} color={day < .3 ? '#ffd2a0' : '#fff2de'} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-span * 1.5} shadow-camera-right={span * 1.5} shadow-camera-top={span * 1.5} shadow-camera-bottom={-span * 1.5} shadow-camera-near={1} shadow-camera-far={span * 10} shadow-bias={-.00004} shadow-normalBias={.035} shadow-radius={3} />
+    <directionalLight target={target} position={[bounds.cx + sun[0] * span * 1.8, sun[1] * span * 1.8 + 18, bounds.cy + sun[2] * span * 1.8]} intensity={0.55 + day * 2.15} color={look.sun} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-span * 1.5} shadow-camera-right={span * 1.5} shadow-camera-top={span * 1.5} shadow-camera-bottom={-span * 1.5} shadow-camera-near={1} shadow-camera-far={span * 10} shadow-bias={-.00004} shadow-normalBias={.035} shadow-radius={2} />
+    <directionalLight position={[bounds.cx - sun[0] * span, 18, bounds.cy - sun[2] * span]} intensity={0.18 + day * 0.12} color={look.fill} />
   </>
 }
 

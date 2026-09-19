@@ -30,7 +30,7 @@ MAX_LLM_CALLS = 2
 # Whole-job wall clock. A reasoning model needs roughly half a minute to write a
 # program, so the budget has to cover the one corrective turn the design allows
 # and still guarantee the job cannot sit there spinning.
-DEADLINE_S = 90.0
+DEADLINE_S = 150.0
 DEMO_PROVIDERS = {"", "demo", "mock", "stub", "off", "none"}
 LIVE_PROVIDERS = {"baseten", "agent", "real", "live", "model"}
 
@@ -61,6 +61,7 @@ class GenerationSession:
     use: str
     floors: int
     area_sqft: float
+    kind: str = ""
     program: BuildingProgram | None = None
     layouts: dict[str, FloorLayout] = field(default_factory=dict)
     overrides: dict[str, FloorLayout] = field(default_factory=dict)
@@ -132,7 +133,7 @@ def _parse_payload(payload: dict[str, Any]) -> tuple[BuildingProgram | None, dic
             if isinstance(raw, dict) and raw.get("floor_id"):
                 layouts[str(raw["floor_id"])] = FloorLayout.model_validate(raw)
     if program is None and not layouts:
-        raise ValueError('The reply contained no "program" object')
+        raise ValueError('The reply contained no "program" object. Return JSON of the form {"program": {...}}.')
     return program, layouts
 
 
@@ -221,6 +222,7 @@ def _ask(session: GenerationSession, errors: list[str]) -> dict[str, Any]:
         errors=errors,
         program=session.program.model_dump(mode="json") if session.program else None,
         layouts=[layout.summary() for layout in session.layouts.values()],
+        kind=session.kind,
     )
     session.llm_calls += 1
     log.info(
@@ -269,17 +271,24 @@ def generate_from_brief(brief: DesignBrief, report: Reporter | None = None) -> G
             "Add BASETEN_API_KEY to .env, or set PLANCHECK_GENERATION_PROVIDER=demo."
         )
 
-    use = defaults.normalise_use(brief.building_use, brief.prompt, brief.rooms, brief.name)
+    use = defaults.normalise_use(brief.building_use, brief.name, brief.prompt, brief.rooms)
+    kind = defaults.detect_kind(brief.building_use, brief.name, brief.prompt, brief.rooms)
     active = defaults.profile(use)
     session = GenerationSession(
         brief=brief,
         use=use,
-        floors=defaults.parse_floor_count(brief.floors, brief.prompt, default=active.default_floors),
-        area_sqft=defaults.parse_area_sqft(brief.area, brief.prompt, default=active.default_area_sqft),
+        floors=defaults.parse_floor_count(
+            brief.floors, brief.prompt, brief.rooms, brief.name, default=active.default_floors
+        ),
+        area_sqft=defaults.parse_area_sqft(
+            brief.area, brief.prompt, brief.rooms, default=active.default_area_sqft
+        ),
         deadline=time.monotonic() + DEADLINE_S,
+        kind=kind,
     )
     log.info(
-        "generation.interpreted use=%s storeys=%d area_sqft=%.0f model=%s deadline_s=%.0f",
+        "generation.interpreted kind=%s packer=%s storeys=%d area_sqft=%.0f model=%s deadline_s=%.0f",
+        kind,
         session.use,
         session.floors,
         session.area_sqft,

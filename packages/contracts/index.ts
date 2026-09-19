@@ -54,6 +54,7 @@ export type WallIds = string[];
 export type FloorMaterial = string;
 export type Confidence1 = number;
 export type NeedsReview = boolean;
+export type InstanceCount = number;
 export type Rooms = Room[];
 export type Id5 = string;
 export type FloorId3 = string;
@@ -78,11 +79,16 @@ export type X2 = number;
 export type Y2 = number;
 export type AssetId1 = string;
 export type Fixtures = CatalogueFixture[];
-export type InstanceCount = number;
+export type InstanceCount1 = number;
 export type TypeCatalogue = TypeCatalogueEntry[];
 export type SunAzimuth = number;
 export type Time = number;
 export type Season = "spring" | "summer" | "autumn" | "winter";
+export type Lat = number | null;
+export type Lon = number | null;
+export type RotationDeg1 = number;
+export type GroundOffsetFt = number;
+export type Address = string;
 export type Id6 = string;
 export type Kind3 = string;
 export type Message = string;
@@ -112,6 +118,9 @@ export type Checks = {
 export type Files = {
   [k: string]: unknown;
 }[];
+export type Sheets = {
+  [k: string]: unknown;
+}[];
 export type CanUndo = boolean;
 export type CanRedo = boolean;
 export type Kind4 = string;
@@ -134,6 +143,7 @@ export interface Building {
   objects: Objects;
   type_catalogue: TypeCatalogue;
   environment: Environment;
+  site: Site;
   review: Review;
   [k: string]: unknown;
 }
@@ -194,7 +204,7 @@ export interface Room {
   floor_material: FloorMaterial;
   confidence: Confidence1;
   needs_review: NeedsReview;
-  instance_count?: InstanceCount;
+  instance_count: InstanceCount;
   source: Source;
 }
 export interface PlacedObject {
@@ -221,7 +231,7 @@ export interface TypeCatalogueEntry {
   area_sqft: AreaSqft;
   aspect_ratio: AspectRatio;
   fixtures: Fixtures;
-  instance_count: InstanceCount;
+  instance_count: InstanceCount1;
   source: Source;
   [k: string]: unknown;
 }
@@ -236,6 +246,17 @@ export interface Environment {
   sun_azimuth: SunAzimuth;
   time: Time;
   season: Season;
+  [k: string]: unknown;
+}
+/**
+ * Where the building stands on the globe. Unsited projects leave lat/lon null.
+ */
+export interface Site {
+  lat: Lat;
+  lon: Lon;
+  rotation_deg: RotationDeg1;
+  ground_offset_ft: GroundOffsetFt;
+  address: Address;
   [k: string]: unknown;
 }
 export interface ReviewItem {
@@ -258,6 +279,8 @@ export interface DesktopProject {
   rules: Rules;
   checks: Checks;
   files: Files;
+  sheets: Sheets;
+  import_meta: ImportMeta;
   can_undo: CanUndo;
   can_redo: CanRedo;
   [k: string]: unknown;
@@ -270,6 +293,9 @@ export interface DesignBrief {
   area: Area;
   style: Style;
   prompt: Prompt;
+  [k: string]: unknown;
+}
+export interface ImportMeta {
   [k: string]: unknown;
 }
 export interface ModelCommand {

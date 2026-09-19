@@ -7,15 +7,32 @@ vertices, envelope versus partition, openings — is derived by the compiler.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 USES = ("home", "office", "retail", "mixed")
 BuildingUse = Literal["home", "office", "retail", "mixed"]
 
 GRID_FT = 0.5
 MIN_ROOM_SIDE_FT = 4.0
+_ID_STRIP = re.compile(r"[^a-z0-9]+")
+_USE_ALIASES: dict[str, BuildingUse] = {
+    "house": "home", "home": "home", "residential": "home", "apartment": "home",
+    "villa": "home", "cabin": "home", "duplex": "home", "dwelling": "home",
+    "office": "office", "workplace": "office", "studio": "office",
+    "coworking": "office", "clinic": "office", "school": "office",
+    "hospital": "office", "healthcare": "office", "university": "office",
+    "college": "office", "library": "office", "civic": "office",
+    "retail": "retail", "shop": "retail", "store": "retail", "boutique": "retail",
+    "showroom": "retail", "restaurant": "retail", "cafe": "retail",
+    "warehouse": "retail", "industrial": "retail", "factory": "retail",
+    "gym": "retail", "supermarket": "retail",
+    "mixed": "mixed", "hotel": "mixed", "motel": "mixed", "museum": "mixed",
+    "theatre": "mixed", "theater": "mixed", "church": "mixed", "mosque": "mixed",
+    "temple": "mixed",
+}
 
 
 def snap(value: float) -> float:
@@ -23,16 +40,45 @@ def snap(value: float) -> float:
     return round(round(float(value) / GRID_FT) * GRID_FT, 3)
 
 
+def slug_id(value: object, fallback: str = "space") -> str:
+    """Turn whatever the model labelled a room into a stable lowercase id."""
+    text = _ID_STRIP.sub("_", str(value or "").strip().lower()).strip("_")
+    if not text or not text[0].isalnum():
+        text = f"{fallback}_{text}".strip("_")
+    return (text or fallback)[:48]
+
+
+def coerce_use(value: object) -> BuildingUse:
+    """Any building type collapses onto one of the four packer families."""
+    key = _ID_STRIP.sub("_", str(value or "").strip().lower()).strip("_")
+    if key in USES:
+        return key  # type: ignore[return-value]
+    return _USE_ALIASES.get(key, "home")
+
+
 class StoreySpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     id: str = Field(min_length=1, max_length=48, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     name: str = Field(min_length=1, max_length=80)
     height_ft: float = Field(default=10, ge=7, le=24)
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def _slug(cls, value: object) -> str:
+        return slug_id(value, "floor")
+
+    @field_validator("height_ft", mode="before")
+    @classmethod
+    def _height(cls, value: object) -> float:
+        try:
+            return min(24.0, max(7.0, float(value)))
+        except (TypeError, ValueError):
+            return 10.0
+
 
 class SpaceSpec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     id: str = Field(min_length=1, max_length=48, pattern=r"^[a-z0-9][a-z0-9_-]*$")
     name: str = Field(min_length=1, max_length=80)
@@ -45,6 +91,39 @@ class SpaceSpec(BaseModel):
     circulation: bool = False
     stair: bool = False
     entry: bool = False
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _slug_id(cls, value: object) -> str:
+        return slug_id(value, "space")
+
+    @field_validator("floor_id", mode="before")
+    @classmethod
+    def _slug_floor(cls, value: object) -> str:
+        return slug_id(value, "floor")
+
+    @field_validator("adjacent_to", mode="before")
+    @classmethod
+    def _adj(cls, value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [slug_id(item, "space") for item in value if item]
+
+    @field_validator("target_area_sqft", mode="before")
+    @classmethod
+    def _area(cls, value: object) -> float:
+        try:
+            return min(100_000.0, max(20.0, float(value)))
+        except (TypeError, ValueError):
+            return 150.0
+
+    @field_validator("min_side_ft", mode="before")
+    @classmethod
+    def _side(cls, value: object) -> float:
+        try:
+            return min(400.0, max(MIN_ROOM_SIDE_FT, float(value)))
+        except (TypeError, ValueError):
+            return 8.0
 
     @model_validator(mode="after")
     def _normalise(self) -> SpaceSpec:
@@ -62,28 +141,54 @@ class SpaceSpec(BaseModel):
 class BuildingProgram(BaseModel):
     """The whole design intent for one generated building."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     building_use: BuildingUse = "home"
     storeys: list[StoreySpec] = Field(min_length=1, max_length=8)
     spaces: list[SpaceSpec] = Field(min_length=1, max_length=120)
     notes: str = Field(default="", max_length=1200)
 
+    @field_validator("building_use", mode="before")
+    @classmethod
+    def _use(cls, value: object) -> BuildingUse:
+        return coerce_use(value)
+
     @model_validator(mode="after")
     def _check(self) -> BuildingProgram:
-        storey_ids = [s.id for s in self.storeys]
-        if len(set(storey_ids)) != len(storey_ids):
-            raise ValueError("Storey ids must be unique")
-        space_ids = [s.id for s in self.spaces]
-        if len(set(space_ids)) != len(space_ids):
-            raise ValueError("Space ids must be unique")
-        known = set(storey_ids)
+        seen_storeys: set[str] = set()
+        for storey in self.storeys:
+            base = storey.id
+            n = 2
+            while storey.id in seen_storeys:
+                storey.id = f"{base}_{n}"[:48]
+                n += 1
+            seen_storeys.add(storey.id)
+        aliases: dict[str, str] = {}
+        for storey in self.storeys:
+            aliases[storey.id] = storey.id
+            aliases[storey.id.replace("_", "")] = storey.id
+            head = storey.id.split("_")[0]
+            aliases.setdefault(head, storey.id)
+
+        used: set[str] = set()
         for space in self.spaces:
-            if space.floor_id not in known:
+            base = space.id
+            n = 2
+            while space.id in used:
+                space.id = f"{base}_{n}"[:48]
+                n += 1
+            used.add(space.id)
+            if space.floor_id not in seen_storeys:
+                space.floor_id = aliases.get(
+                    space.floor_id,
+                    aliases.get(space.floor_id.replace("_", ""), space.floor_id),
+                )
+            if space.floor_id not in seen_storeys:
                 raise ValueError(
                     f"Space {space.id!r} references unknown floor_id {space.floor_id!r}; "
-                    f"use one of {sorted(known)}"
+                    f"use one of {sorted(seen_storeys)}"
                 )
+        space_ids = [s.id for s in self.spaces]
         for storey in self.storeys:
             if not any(s.floor_id == storey.id for s in self.spaces):
                 raise ValueError(f"Storey {storey.id!r} has no spaces")
@@ -120,7 +225,7 @@ class BuildingProgram(BaseModel):
 class RoomRect(BaseModel):
     """One axis-aligned room footprint in floor coordinates (feet, y-up)."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     space_id: str = Field(min_length=1, max_length=48)
     x1: float
@@ -161,7 +266,7 @@ class RoomRect(BaseModel):
 class FloorLayout(BaseModel):
     """Rectangles that tile one storey. Overlaps are rejected before compiling."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     floor_id: str = Field(min_length=1, max_length=48)
     width_ft: float = Field(gt=0, le=2000)

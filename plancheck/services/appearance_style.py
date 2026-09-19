@@ -122,7 +122,7 @@ def _best_patch(image: Image.Image, kind: str) -> Image.Image:
             if score > best[0]:
                 best = (score, x, y)
     _, x, y = best
-    return image.crop((x, y, x + size, y + size)).resize((256, 256), Image.Resampling.BICUBIC)
+    return image.crop((x, y, x + size, y + size)).resize((256, 256), Image.BICUBIC)
 
 
 def extract_cladding(png: bytes) -> tuple[bytes, bytes]:

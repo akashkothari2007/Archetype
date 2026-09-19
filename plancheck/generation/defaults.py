@@ -118,26 +118,100 @@ PROFILES: dict[str, UseProfile] = {
     ),
 }
 
-_USE_WORDS: tuple[tuple[str, BuildingUse], ...] = (
-    ("mixed", "mixed"), ("multi-use", "mixed"), ("multi use", "mixed"),
-    ("office", "office"), ("workplace", "office"), ("studio", "office"),
-    ("coworking", "office"), ("clinic", "office"), ("school", "office"),
-    ("retail", "retail"), ("shop", "retail"), ("store", "retail"),
-    ("boutique", "retail"), ("showroom", "retail"), ("restaurant", "retail"),
-    ("cafe", "retail"), ("home", "home"), ("house", "home"),
-    ("residential", "home"), ("apartment", "home"), ("villa", "home"),
-    ("cabin", "home"), ("duplex", "home"),
+# First matching pattern wins. Longer / more specific kinds come first so
+# "home office" and "cafe" inside a hospital brief cannot steal the type.
+_KIND_PATTERNS: tuple[tuple[str, str, BuildingUse], ...] = (
+    (r"\bmulti[-\s]?use\b|\bmixed\b", "mixed", "mixed"),
+    (r"\bhospital\b|\bmedical centre\b|\bmedical center\b|\bhealthcare\b", "hospital", "office"),
+    (r"\bclinic\b|\bdental\b", "clinic", "office"),
+    (r"\bhotel\b|\bmotel\b|\binn\b", "hotel", "mixed"),
+    (r"\bschool\b|\buniversity\b|\bcollege\b|\bcampus\b", "school", "office"),
+    (r"\bwarehouse\b|\bfactory\b|\bindustrial\b|\bworkshop\b", "warehouse", "retail"),
+    (r"\bmuseum\b|\btheatre\b|\btheater\b|\bgallery\b|\bcivic\b", "civic", "mixed"),
+    (r"\bchurch\b|\bmosque\b|\btemple\b|\bsynagogue\b", "civic", "mixed"),
+    (r"\bgym\b|\bstadium\b|\barena\b", "civic", "retail"),
+    (r"\bapartment\b|\bapartments\b|\bresidential\b", "home", "home"),
+    (r"\boffice\b|\bworkplace\b|\bcoworking\b", "office", "office"),
+    (r"\bstudio\b", "office", "office"),
+    (r"\bretail\b|\bshop\b|\bstore\b|\bboutique\b|\bshowroom\b|\bsupermarket\b", "retail", "retail"),
+    (r"\brestaurant\b|\bcafe\b|\bcoffee\b", "retail", "retail"),
+    (r"\bhome\b|\bhouse\b|\bvilla\b|\bcabin\b|\bduplex\b|\bdwelling\b", "home", "home"),
 )
+
+_KIND_AREAS: dict[str, dict[str, float]] = {
+    "hospital": {
+        "lobby": 800, "cafe": 400, "reception": 300, "waiting": 400, "triage": 240,
+        "exam": 140, "ward": 900, "icu": 600, "or": 450, "pharmacy": 220,
+        "lab": 280, "radiology": 360, "nurse_station": 180, "office": 140,
+        "bathroom": 120, "break": 200, "storage": 160, "circulation": 480, "stair": 160,
+    },
+    "hotel": {
+        "lobby": 600, "reception": 240, "restaurant": 800, "kitchen": 400,
+        "guest_room": 320, "suite": 480, "meeting": 300, "laundry": 220,
+        "bathroom": 80, "circulation": 360, "stair": 140, "storage": 140,
+    },
+    "school": {
+        "lobby": 400, "classroom": 800, "lab": 700, "library": 900, "office": 160,
+        "cafeteria": 1200, "gym": 2400, "bathroom": 140, "circulation": 400, "stair": 150,
+    },
+    "warehouse": {
+        "entry": 200, "warehouse": 6000, "receiving": 500, "office": 180,
+        "break": 160, "bathroom": 100, "circulation": 240, "stair": 130,
+    },
+}
+
+_KIND_GUIDANCE: dict[str, tuple[str, ...]] = {
+    "hospital": (
+        "Public lobby, cafe and reception sit on the entry storey.",
+        "Group wards, exam rooms and nurse stations off a wide corridor; stack the stair and washrooms.",
+        "Do not enumerate every bed. One ward or one operating theatre is a single space.",
+    ),
+    "hotel": (
+        "Lobby, restaurant and reception on the entry storey; guest rooms above.",
+        "A typical guest room is one space, repeated a few times, not one space per key.",
+    ),
+    "school": (
+        "Classrooms line a corridor. Shared gym, cafeteria and library can sit on the entry storey.",
+    ),
+    "warehouse": (
+        "Give the warehouse floor the largest rectangle. Offices and staff rooms line the street edge.",
+    ),
+}
+
+
+def detect_kind(*texts: str) -> str:
+    """Specific building kind (hospital, hotel, home, …) from the brief."""
+    for text in texts:
+        if not text:
+            continue
+        for pattern, kind, _use in _KIND_PATTERNS:
+            if re.search(pattern, text.lower()):
+                return kind
+    return "home"
+
+
+def _match_use(text: str) -> BuildingUse | None:
+    lowered = text.lower()
+    if re.search(r"\b(retail|shop|store)\b", lowered) and re.search(
+        r"\b(office|apartments?|residential|hotel)\b", lowered
+    ):
+        return "mixed"
+    for pattern, _kind, use in _KIND_PATTERNS:
+        if re.search(pattern, lowered):
+            return use
+    return None
 
 
 def normalise_use(*texts: str) -> BuildingUse:
-    """Pick a packer family from whatever the architect typed."""
-    haystack = " ".join(t.lower() for t in texts if t)
-    if "mixed" in haystack or ("retail" in haystack and ("office" in haystack or "apartment" in haystack)):
-        return "mixed"
-    for word, use in _USE_WORDS:
-        if word in haystack:
-            return use
+    """Pick a packer family. First text that names a building type wins.
+
+    Callers should pass building_use, then name, then prompt, then rooms so a
+    'home office' or a cafe listed inside a hospital cannot reclassify the job.
+    """
+    for text in texts:
+        found = _match_use(text or "")
+        if found:
+            return found
     return "home"
 
 
@@ -152,19 +226,35 @@ _NUMBER_WORDS = {
 
 
 def parse_floor_count(*texts: str, default: int = 2) -> int:
-    """Read a storey count from '3', 'three floors', 'G+2', 'two-storey'."""
+    """Read a storey count from '3', 'three floors', 'G+2', 'two-storey'.
+
+    Bare numbers only count when the whole string is a number, so '10 bedrooms'
+    cannot become a 10-storey building.
+    """
     for text in texts:
         if not text:
             continue
-        lowered = text.lower()
+        stripped = text.strip()
+        lowered = stripped.lower()
         ground_plus = re.search(r"\bg\s*\+\s*(\d+)\b", lowered)
         if ground_plus:
             return max(1, min(8, int(ground_plus.group(1)) + 1))
-        digits = re.search(r"\b(\d{1,2})\b", lowered)
-        if digits:
-            return max(1, min(8, int(digits.group(1))))
+        labeled = re.search(
+            r"\b(\d{1,2})\s*[-\s]*(?:storey|story|stories|floors?|levels?)\b",
+            lowered,
+        )
+        if labeled:
+            return max(1, min(8, int(labeled.group(1))))
+        labeled_words = re.search(
+            r"\b(" + "|".join(_NUMBER_WORDS) + r")\s*[-\s]*(?:storey|story|stories|floors?|levels?)\b",
+            lowered,
+        )
+        if labeled_words:
+            return max(1, min(8, _NUMBER_WORDS[labeled_words.group(1)]))
+        if re.fullmatch(r"\d{1,2}", stripped):
+            return max(1, min(8, int(stripped)))
         for word, value in _NUMBER_WORDS.items():
-            if re.search(rf"\b{word}\b", lowered):
+            if re.fullmatch(word, lowered):
                 return max(1, min(8, value))
     return default
 
@@ -292,16 +382,19 @@ def rule_pack(use: str, categories: set[str] | None = None) -> list[dict]:
     return kept
 
 
-def defaults_digest(use: str) -> str:
+def defaults_digest(use: str, kind: str = "") -> str:
     """Compact reference injected into the prompt instead of a tool round trip."""
     active = profile(use)
-    areas = ", ".join(f"{name} ~{area:g} sqft" for name, area in active.typical_areas.items())
+    kind = (kind or use).strip().lower() or active.key
+    typical = _KIND_AREAS.get(kind, active.typical_areas)
+    areas = ", ".join(f"{name} ~{area:g} sqft" for name, area in typical.items())
     lines = [
-        f"Building use: {active.label} ({active.key})",
+        f"Building kind: {kind}. Packer family: {active.label} ({active.key}).",
+        "Honour the architect's brief. The packer family only chooses corridor width and storey height.",
         f"Typical storey height {active.floor_height_ft:g} ft; corridors {active.corridor_width_ft:g} ft wide.",
-        f"Typical areas: {areas}.",
+        f"Typical areas for this kind: {areas}.",
     ]
-    lines.extend(f"- {tip}" for tip in active.guidance)
+    lines.extend(f"- {tip}" for tip in _KIND_GUIDANCE.get(kind, active.guidance))
     packs = rule_pack(active.key)
     lines.append("Requirements that will be measured on the result:")
     lines.extend(

@@ -7,15 +7,16 @@ const model: Building = {
   floors: [{ id: 'f1', name: 'Ground', elevation_ft: 0, height_ft: 9 }],
   vertices: [{ id: 'a', floor_id: 'f1', x: 0, y: 0 }, { id: 'b', floor_id: 'f1', x: 10, y: 0 }],
   walls: [{ id: 'w', floor_id: 'f1', start_id: 'a', end_id: 'b', thickness_ft: .5, height_ft: 9, locked: false, structural: 'nonstructural', material: 'plaster', confidence: 1, source: { document_id: '', sheet_id: '', page: null, method: 'user', assumed: false } }],
-  openings: [], rooms: [], objects: [], environment: { time: 14, sun_azimuth: 135, season: 'summer' }, review: [],
+  openings: [], rooms: [], objects: [], type_catalogue: [], environment: { time: 14, sun_azimuth: 135, season: 'summer' },
+  site: { lat: null, lon: null, rotation_deg: 0, ground_offset_ft: 0, address: '' }, review: [],
 }
 
 describe('floor geometry and asset placement', () => {
   it('places openings by their start offset and clamps them to the host wall', () => {
     const door = fixtures.find(a => a.id === 'door')!
     expect(placementCommand(door, { x: 5, y: .3 }, model, 'f1')?.params).toMatchObject({ wall_id: 'w', offset_ft: 3.5, width_ft: 3 })
-    expect(placementCommand(door, { x: 9.9, y: 0 }, model, 'f1')?.params.offset_ft).toBe(7)
-    expect(placementCommand(door, { x: -.2, y: 0 }, model, 'f1')?.params.offset_ft).toBe(0)
+    expect(placementCommand(door, { x: 9.9, y: 0 }, model, 'f1')?.params?.offset_ft).toBe(7)
+    expect(placementCommand(door, { x: -.2, y: 0 }, model, 'f1')?.params?.offset_ft).toBe(0)
   })
   it('does not attach an opening to a remote wall or another floor', () => {
     const door = fixtures[0]

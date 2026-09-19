@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Search } from 'lucide-react'
 import type { Building, ModelCommand } from '../types'
 import { assetMime, fixtures, furniture, materials, type Asset } from './editor-geometry'
+import { SitePanel } from './SitePanel'
 import './editor-view.css'
 
 export function AssetSymbol({ id }: { id: string }) {
@@ -30,11 +31,11 @@ export function AssetLibrary({ mode, building, onCommand }: { mode: '2d' | '3d';
     <div className="editor-library-header">
       <div className="editor-tabs" role="tablist" aria-label="Library category">
         <button role="tab" aria-selected={tab === 'assets'} className={tab === 'assets' ? 'active' : ''} onClick={() => setTab('assets')}>{mode === '2d' ? 'Fixtures' : 'Furniture'}</button>
-        {mode === '3d' && <><button role="tab" aria-selected={tab === 'materials'} className={tab === 'materials' ? 'active' : ''} onClick={() => setTab('materials')}>Materials</button><button role="tab" aria-selected={tab === 'environment'} className={tab === 'environment' ? 'active' : ''} onClick={() => setTab('environment')}>Environment</button></>}
+        {mode === '3d' && <><button role="tab" aria-selected={tab === 'materials'} className={tab === 'materials' ? 'active' : ''} onClick={() => setTab('materials')}>Materials</button><button role="tab" aria-selected={tab === 'environment'} className={tab === 'environment' ? 'active' : ''} onClick={() => setTab('environment')}>Environment</button><button role="tab" aria-selected={tab === 'site'} className={tab === 'site' ? 'active' : ''} onClick={() => setTab('site')}>Site</button></>}
       </div>
-      {tab !== 'environment' && <label className="editor-asset-search"><Search size={13} /><input aria-label="Find an asset" placeholder="Search library" value={query} onChange={e => setQuery(e.target.value)} /></label>}
+      {tab !== 'environment' && tab !== 'site' && <label className="editor-asset-search"><Search size={13} /><input aria-label="Find an asset" placeholder="Search library" value={query} onChange={e => setQuery(e.target.value)} /></label>}
     </div>
-    {tab === 'environment' ? <div className="editor-environment">
+    {tab === 'site' ? <SitePanel building={building} onCommand={onCommand} /> : tab === 'environment' ? <div className="editor-environment">
       <label>Time of day <output>{Math.floor(environment.time).toString().padStart(2, '0')}:{Math.round(environment.time % 1 * 60).toString().padStart(2, '0')}</output><input type="range" aria-label="Time of day" min="0" max="23.75" step=".25" value={environment.time} onChange={e => setEnvironment({ ...environment, time: Number(e.target.value) })} onPointerUp={() => saveEnvironment()} onKeyUp={() => saveEnvironment()} /></label>
       <label>Sun direction <output>{environment.sun_azimuth}°</output><input type="range" aria-label="Sun direction" min="0" max="360" value={environment.sun_azimuth} onChange={e => setEnvironment({ ...environment, sun_azimuth: Number(e.target.value) })} onPointerUp={() => saveEnvironment()} onKeyUp={() => saveEnvironment()} /></label>
       <label>Season<select aria-label="Season" value={environment.season} onChange={e => { const value = { ...environment, season: e.target.value as Building['environment']['season'] }; setEnvironment(value); saveEnvironment(value) }}>{['spring', 'summer', 'autumn', 'winter'].map(s => <option key={s} value={s}>{s[0].toUpperCase() + s.slice(1)}</option>)}</select></label>

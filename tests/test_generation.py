@@ -13,6 +13,7 @@ from plancheck.core.settings import reset_settings
 from plancheck.generation import GenerationError, generate_from_brief
 from plancheck.generation.compiler import CompileError, compile_building
 from plancheck.generation.defaults import (
+    detect_kind,
     normalise_use,
     parse_area_sqft,
     parse_floor_count,
@@ -124,15 +125,41 @@ def build(raw, area=None):
 @pytest.mark.parametrize(
     "text,expected",
     [("Home", "home"), ("a small dental clinic", "office"), ("corner shop", "retail"),
-     ("retail below apartments", "mixed"), ("", "home")],
+     ("retail below apartments", "mixed"), ("", "home"),
+     ("Hospital", "office"), ("hotel", "mixed"), ("warehouse", "retail")],
 )
 def test_use_is_read_from_free_text(text, expected):
     assert normalise_use(text) == expected
 
 
+def test_hospital_is_not_classified_as_retail_because_it_has_a_cafe():
+    assert normalise_use(
+        "Hospital",
+        "Hospital",
+        "",
+        "lobby, cafe, shared bedrooms, private rooms",
+    ) == "office"
+    assert detect_kind("Hospital", "Hospital") == "hospital"
+
+
+def test_home_office_does_not_turn_a_house_into_an_office():
+    assert normalise_use(
+        "Home",
+        "House",
+        "",
+        "10 bedrooms, kitchen, living room, home office",
+    ) == "home"
+
+
 @pytest.mark.parametrize("text,expected", [("2", 2), ("three floors", 3), ("G+2", 3), ("", 2)])
 def test_floor_count_parsing(text, expected):
     assert parse_floor_count(text) == expected
+
+
+def test_floor_count_ignores_bedroom_counts():
+    assert parse_floor_count("10 bedrooms, 2 bathrooms") == 2
+    assert parse_floor_count("5", "10 bedrooms") == 5
+    assert parse_floor_count("Build a 5 story hospital") == 5
 
 
 def test_area_parsing_handles_both_unit_systems():
@@ -321,6 +348,31 @@ def test_dangling_adjacency_hints_are_dropped_rather_than_fatal():
         }
     )
     assert program.spaces[0].adjacent_to == []
+
+
+def test_program_accepts_any_building_kind_and_ignores_extra_keys():
+    program = BuildingProgram.model_validate(
+        {
+            "building_use": "hospital",
+            "windows": 40,
+            "storeys": [{"id": "Ground Floor", "name": "Ground", "height_ft": 30, "material": "concrete"}],
+            "spaces": [
+                {
+                    "id": "Main Lobby",
+                    "name": "Lobby",
+                    "floor_id": "ground",
+                    "category": "lobby",
+                    "target_area_sqft": 800,
+                    "purpose": "arrival",
+                }
+            ],
+        }
+    )
+    assert program.building_use == "office"
+    assert program.storeys[0].id == "ground_floor"
+    assert program.storeys[0].height_ft == 24
+    assert program.spaces[0].id == "main_lobby"
+    assert program.spaces[0].floor_id == "ground_floor"
 
 
 # --- requirements -----------------------------------------------------------

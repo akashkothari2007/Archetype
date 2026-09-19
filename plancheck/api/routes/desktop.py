@@ -33,6 +33,8 @@ def building_patch(before:DesktopProject,after:DesktopProject)->dict:
     payload={'revision':after.revision,'can_undo':after.can_undo,'can_redo':after.can_redo,'changed':changed,'removed_ids':removed,'checks':after.checks}
     if before.building.environment.model_dump()!=after.building.environment.model_dump():
         payload['environment']=after.building.environment.model_dump(mode='json')
+    if before.building.site.model_dump()!=after.building.site.model_dump():
+        payload['site']=after.building.site.model_dump(mode='json')
     return payload
 
 @router.get('/health')
@@ -71,6 +73,7 @@ def generate(brief:DesignBrief):
 class AppearanceRequest(BaseModel):
     image:str
     projector:list[float]=Field(default_factory=list)
+    prompt:str=''
 
 @router.post('/projects/{pid}/appearance')
 def appearance(pid:str,body:AppearanceRequest):
@@ -78,36 +81,33 @@ def appearance(pid:str,body:AppearanceRequest):
     settings=get_settings()
     if not settings.image_live():
         raise HTTPException(400,'Flux is not configured. Set PLANCHECK_IMAGE_MODEL_ID and a Hack the North API key as PLANCHECK_IMAGE_API_KEY.')
+    if not settings.splat_live():
+        raise HTTPException(400,'TripoSplat is not configured. Set PLANCHECK_SPLAT_URL + PLANCHECK_SPLAT_API_KEY for the Baseten deployment (see deploy/triposplat-baseten), or FAL_KEY to use fal.')
     try:
         from plancheck.services.image_edit import decode_png
         png=decode_png(body.image)
     except Exception as exc:
         raise HTTPException(400,str(exc)) from None
     projector=body.projector[:16] if len(body.projector)>=16 else []
-    def work(report, snapshot=png, matrix=projector):
-        from plancheck.services.image_edit import edit_png
-        from plancheck.services.appearance_style import extract_cladding, sample_palette
-        report(phase='editing',progress=.2,message='Painting photoreal materials')
-        result=edit_png(snapshot)
+    user_prompt=(body.prompt or '').strip()
+    def work(report, snapshot=png, matrix=projector, style=user_prompt):
+        from plancheck.services.image_edit import SCENE_PROMPT, edit_png
+        from plancheck.services.appearance_style import sample_palette
+        from plancheck.services.splat import generate_splat, splat_filename
+        report(phase='editing',progress=.15,message='Painting a photoreal guide with Flux')
+        scene=SCENE_PROMPT if not style else f'{SCENE_PROMPT} {style}'
+        result=edit_png(snapshot, prompt=scene)
         folder=repo().path(pid)
         (folder/'appearance.png').write_bytes(result)
-        wall,roof=extract_cladding(result)
-        (folder/'appearance-wall.png').write_bytes(wall)
-        (folder/'appearance-roof.png').write_bytes(roof)
-        meta={'projector':matrix,'scope':'exterior','palette':sample_palette(result),'wall':'appearance-wall.png','roof':'appearance-roof.png'}
-        if settings.splat_live():
-            try:
-                report(phase='splatting',progress=.7,message='Building an exterior Gaussian splat')
-                from plancheck.services.splat import generate_splat
-                splat=generate_splat(result)
-                (folder/'appearance.splat').write_bytes(splat)
-                meta['splat']='appearance.splat'
-            except Exception as exc:
-                from plancheck.core.logutil import get_logger
-                get_logger('plancheck.appearance').warning('splat.skip %s', exc)
+        meta={'projector':matrix,'scope':'exterior','palette':sample_palette(result)}
+        report(phase='splatting',progress=.45,message='Building a TripoSplat Gaussian from the exterior')
+        splat=generate_splat(result)
+        name=splat_filename(splat)
+        (folder/name).write_bytes(splat)
+        meta['splat']=name
         atomic_json(folder/'appearance.json',meta)
-        report(phase='saving',progress=.95,message='Applying photoreal wall and roof materials')
-        return {'url':f'/projects/{pid}/files/appearance.png','splat':meta.get('splat')}
+        report(phase='saving',progress=.95,message='Applying the Gaussian splat to the exterior')
+        return {'url':f'/projects/{pid}/files/{name}','splat':name}
     return {'job_id':jobs.submit(work,'Painting the 3D view')}
 
 @router.get('/projects/{pid}',response_model=DesktopProject)
@@ -131,6 +131,8 @@ class ChatRequest(RevisionRequest):
     message:str=Field(default='Check and fix issues',max_length=4000)
     context:str='2D'
     selected_ids:list[str]=Field(default_factory=list)
+    floor_id:str=''
+    history:list[dict]=Field(default_factory=list)
 
 @router.post('/projects/{pid}/agent')
 def agent(pid:str,body:ChatRequest):
@@ -140,7 +142,7 @@ def agent(pid:str,body:ChatRequest):
         from plancheck.services.agent import respond
         report(phase='analyzing',progress=.08,message='Reading the selected model and approved requirements');time.sleep(.3)
         report(phase='planning',progress=.18,message='Assigning bounded tasks to geometry workers');time.sleep(.3)
-        result=respond(project.building,project.rules,body.message,body.context,body.selected_ids,report)
+        result=respond(project.building,project.rules,body.message,body.context,body.selected_ids,report,floor_id=body.floor_id or None,history=body.history)
         report(phase='preview-ready',progress=.96,message='Preparing changes for your review')
         run_id=uuid.uuid4().hex[:12];result.update(run_id=run_id,expected_revision=body.expected_revision)
         atomic_json(repo().path(pid)/'repairs'/f'{run_id}.json',result)
