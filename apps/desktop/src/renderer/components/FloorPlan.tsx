@@ -14,6 +14,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const [size, setSize] = useState({ width: 800, height: 600 })
   const [view, setView] = useState({ x: 100, y: 100, scale: 15 })
   const [tool, setTool] = useState<Tool>('select')
+  const [spacePanning, setSpacePanning] = useState(false)
   const [snap, setSnap] = useState(true)
   const [selection, setSelection] = useState<string[]>([])
   const [start, setStart] = useState<Point | null>(null)
@@ -59,6 +60,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     const key = (event: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement)?.tagName)) return
       if (!host.current?.contains(document.activeElement) && document.activeElement !== document.body) return
+      if (event.code === 'Space') { event.preventDefault(); setSpacePanning(true); return }
       if (event.key === 'Escape') { setStart(null); setMeasurement(null); setMarquee(null); setTool('select'); setUnlock(false) }
       if (event.key.toLowerCase() === 'v') setTool('select')
       if (event.key.toLowerCase() === 'h') setTool('pan')
@@ -66,8 +68,12 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
       if (event.key.toLowerCase() === 'm') setTool('measure')
       if ((event.key === 'Backspace' || event.key === 'Delete') && selection.length) { event.preventDefault(); onCommand(selection.map(id => ({ kind: 'delete', target_id: id, params: {} }))) }
     }
+    const keyUp = (event: KeyboardEvent) => { if (event.code === 'Space') setSpacePanning(false) }
+    const release = () => setSpacePanning(false)
     window.addEventListener('keydown', key)
-    return () => window.removeEventListener('keydown', key)
+    window.addEventListener('keyup', keyUp)
+    window.addEventListener('blur', release)
+    return () => { window.removeEventListener('keydown', key); window.removeEventListener('keyup', keyUp); window.removeEventListener('blur', release) }
   }, [selection, onCommand])
   function rawPoint() {
     const p = stage.current?.getPointerPosition()
@@ -106,6 +112,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   }
   function pointerDown(event: KonvaEventObject<MouseEvent | TouchEvent>) {
     host.current?.focus()
+    if (spacePanning) return
     if ('button' in event.evt && event.evt.button !== 0) return
     const p = snapped(rawPoint(), start)
     if (tool === 'wall' || tool === 'measure') {
@@ -144,7 +151,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const magnitude = 10 ** Math.floor(Math.log10(approximate))
   const scaleDistance = [1, 2, 5, 10].map(v => v * magnitude).find(v => v >= approximate) || 10 * magnitude
   const stroke = 1 / view.scale
-  return <div ref={host} tabIndex={0} className={`editor-floorplan tool-${tool}`} aria-label="2D floor plan editor" onDragOver={e => e.preventDefault()} onDrop={e => {
+  return <div ref={host} tabIndex={0} className={`editor-floorplan tool-${tool}${spacePanning ? ' space-panning' : ''}`} aria-label="2D floor plan editor" onDragOver={e => e.preventDefault()} onDrop={e => {
     e.preventDefault()
     const data = e.dataTransfer.getData(assetMime)
     if (!data) return
@@ -161,7 +168,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
       {!selectedRoom && <button title="Delete" aria-label="Delete selection" onClick={() => onCommand(selection.map(id => ({ kind: 'delete', target_id: id, params: {} })))}><Trash2 size={14} /></button>}
       <button aria-label="Clear selection" onClick={() => onSelect(null)}><X size={13} /></button>
     </div>}
-    <Stage ref={stage} width={size.width} height={size.height} x={view.x} y={view.y} scaleX={view.scale} scaleY={view.scale} draggable={tool === 'pan'} onDragEnd={e => { if (e.target === stage.current) setView(v => ({ ...v, x: e.target.x(), y: e.target.y() })) }} onMouseDown={pointerDown} onTouchStart={pointerDown} onMouseMove={() => setCursor(snapped(rawPoint(), start))} onTouchMove={() => setCursor(snapped(rawPoint(), start))} onMouseUp={pointerUp} onTouchEnd={pointerUp} onWheel={e => { e.evt.preventDefault(); const p = stage.current?.getPointerPosition(); if (e.evt.ctrlKey || e.evt.metaKey) zoom(Math.exp(-e.evt.deltaY * .01), p || undefined); else setView(v => ({ ...v, x: v.x - e.evt.deltaX, y: v.y - e.evt.deltaY })) }}>
+    <Stage ref={stage} width={size.width} height={size.height} x={view.x} y={view.y} scaleX={view.scale} scaleY={view.scale} draggable={tool === 'pan' || spacePanning} onDragEnd={e => { if (e.target === stage.current) setView(v => ({ ...v, x: e.target.x(), y: e.target.y() })) }} onMouseDown={pointerDown} onTouchStart={pointerDown} onMouseMove={() => setCursor(snapped(rawPoint(), start))} onTouchMove={() => setCursor(snapped(rawPoint(), start))} onMouseUp={pointerUp} onTouchEnd={pointerUp} onWheel={e => { e.evt.preventDefault(); const p = stage.current?.getPointerPosition(); if (e.evt.ctrlKey || e.evt.metaKey) zoom(Math.exp(-e.evt.deltaY * .01), p || undefined); else setView(v => ({ ...v, x: v.x - e.evt.deltaX, y: v.y - e.evt.deltaY })) }}>
       <Layer listening={false}>
         {gridX.map(x => <Line key={`x${x}`} points={[x, gy0, x, gy1]} stroke={Math.round(x / gridStep) % 5 ? '#eff0f1' : '#e6e8ea'} strokeWidth={stroke} />)}
         {gridY.map(y => <Line key={`y${y}`} points={[gx0, y, gx1, y]} stroke={Math.round(y / gridStep) % 5 ? '#eff0f1' : '#e6e8ea'} strokeWidth={stroke} />)}
@@ -220,7 +227,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
       {selectedRoom && <><div className="editor-property-title">Room</div><input key={selectedRoom.id} aria-label="Room name" defaultValue={selectedRoom.name} onBlur={e => { if (e.target.value && e.target.value !== selectedRoom.name) onCommand((matching ? matchingRooms : [selectedRoom]).map(r => ({ kind: 'rename_room', target_id: r.id, params: { name: e.target.value } }))) }} />{matchingRooms.length > 1 && <label className="editor-match-label"><input type="checkbox" checked={matching} onChange={e => setMatching(e.target.checked)} />Apply to {matchingRooms.length} matching rooms</label>}<span className="editor-property-muted">{selectedRoom.needs_review ? 'Boundary needs review' : 'Shared partitions affect adjacent rooms'}</span></>}
     </div>}
     {unlock && selectedWall && <div className="editor-review-dialog" role="dialog" aria-label="Review wall classification"><strong>Review this wall</strong><p>Confirm the structural classification before enabling edits. Connected walls may still be locked.</p><select aria-label="Structural classification" value={structural} onChange={e => setStructural(e.target.value as typeof structural)}><option value="nonstructural">Nonstructural partition</option><option value="loadbearing">Load-bearing wall</option><option value="unknown">Unknown</option></select><textarea aria-label="Review reason" value={reason} onChange={e => setReason(e.target.value)} placeholder="Record the reason and drawing reference" /><div><button onClick={() => setUnlock(false)}>Cancel</button><button disabled={!reason.trim()} onClick={() => { onCommand([{ kind: 'unlock_wall', target_id: selectedWall.id, params: { structural, reason } }]); setUnlock(false); setReason('') }}>Save review and unlock</button></div></div>}
-    <div className="editor-canvas-hint">{tool === 'wall' ? 'Click to start a wall, click to connect · Esc to finish' : tool === 'measure' ? 'Click two points to measure' : tool === 'pan' ? 'Drag to pan · Pinch to zoom' : 'Select to edit · Shift for multiple · Pinch to zoom'}</div>
+    <div className="editor-canvas-hint">{spacePanning ? 'Drag to pan · Release Space to resume editing' : tool === 'wall' ? 'Click to start a wall, click to connect · Esc to finish' : tool === 'measure' ? 'Click two points to measure' : tool === 'pan' ? 'Drag to pan · Pinch to zoom' : 'Select to edit · Hold Space to pan · Pinch to zoom'}</div>
     {notice && <div className="editor-notice" role="status">{notice}</div>}
     <div className="editor-zoom"><div className="editor-scale"><span style={{ width: scaleDistance / scaleUnits * view.scale }} /><small>{scaleDistance} {units === 'metric' ? 'm' : 'ft'}</small></div><button aria-label="Zoom out" onClick={() => zoom(1 / 1.2)}><Minus size={14} /></button><span>{Math.round(view.scale / 20 * 100)}%</span><button aria-label="Zoom in" onClick={() => zoom(1.2)}><Plus size={14} /></button><button aria-label="Fit floor plan" onClick={fit}><Maximize size={14} /></button></div>
   </div>

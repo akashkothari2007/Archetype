@@ -6,6 +6,8 @@ import { Footprints, Orbit, RotateCw, Maximize, LoaderCircle, X } from 'lucide-r
 import type { Building } from '../types'
 import { assetMime, floorBounds, furniture, interiorPoint, materials, placementCommand, pointInPolygon, projectPoint, type Asset, type EditorProps, type Point } from './editor-geometry'
 import './editor-view.css'
+import { SurfaceMaterial } from './scene-materials'
+import { Daylight, Landscape, FloorSlab } from './scene-landscape'
 
 type Wall = Building['walls'][number]
 type CameraAction = { kind: 'fit' | 'rotate' | 'teleport'; point?: Point; nonce: number }
@@ -16,6 +18,7 @@ export function ModelView(props: EditorProps) {
   const { building, floorId, onCommand, onSelect, selectedId, busy } = props
   const host = useRef<HTMLDivElement>(null)
   const [walking, setWalking] = useState(false)
+  const [exterior, setExterior] = useState(true)
   const [currentRoom, setCurrentRoom] = useState<string | null>(null)
   const [cameraPoint, setCameraPoint] = useState<Point | null>(null)
   const [action, setAction] = useState<CameraAction>({ kind: 'fit', nonce: 0 })
@@ -23,6 +26,7 @@ export function ModelView(props: EditorProps) {
   const [dragTarget, setDragTarget] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const [objectTool, setObjectTool] = useState<'translate' | 'rotate'>('translate')
+  const [spacePanning, setSpacePanning] = useState(false)
   const raycast = useRef<(x: number, y: number) => Hit>(() => null)
   const rooms = building.rooms.filter(r => r.floor_id === floorId)
   const bounds = useMemo(() => floorBounds(building, floorId), [building, floorId])
@@ -33,7 +37,15 @@ export function ModelView(props: EditorProps) {
     return () => window.removeEventListener('archetype:asset-drag', listener)
   }, [])
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(t) }, [notice])
-  return <div ref={host} className={`editor-modelview ${dragAsset ? 'asset-dragging' : ''}`} aria-label="3D model editor" onDragOver={event => { event.preventDefault(); const hit = raycast.current(event.clientX, event.clientY); setDragTarget(hit?.id || null) }} onDragLeave={event => { if (!host.current?.contains(event.relatedTarget as Node)) setDragTarget(null) }} onDrop={event => {
+  useEffect(() => {
+    const isActive = () => !!host.current?.contains(document.activeElement)
+    const down = (event: KeyboardEvent) => { if (event.code === 'Space' && isActive() && !walking) { event.preventDefault(); setSpacePanning(true) } }
+    const up = (event: KeyboardEvent) => { if (event.code === 'Space') setSpacePanning(false) }
+    const release = () => setSpacePanning(false)
+    window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', release)
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', release) }
+  }, [walking])
+  return <div ref={host} tabIndex={0} className={`editor-modelview ${dragAsset ? 'asset-dragging' : ''}${spacePanning ? ' space-panning' : ''}`} aria-label="3D model editor" onPointerDown={() => host.current?.focus()} onDragOver={event => { event.preventDefault(); const hit = raycast.current(event.clientX, event.clientY); setDragTarget(hit?.id || null) }} onDragLeave={event => { if (!host.current?.contains(event.relatedTarget as Node)) setDragTarget(null) }} onDrop={event => {
     event.preventDefault()
     try {
       const data = event.dataTransfer.getData(assetMime)
@@ -47,21 +59,22 @@ export function ModelView(props: EditorProps) {
     } catch { setNotice('This asset could not be placed.') }
     finally { setDragAsset(null); setDragTarget(null); window.dispatchEvent(new CustomEvent('archetype:asset-drag', { detail: null })) }
   }}>
-    <SceneBoundary><Canvas shadows dpr={[1, 1.75]} camera={{ position: [bounds.cx + 30, 38, bounds.cy + 40], fov: 44, near: .1, far: 10000 }} gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05 }} onPointerMissed={() => onSelect(null)}>
-      <color attach="background" args={['#e9e8e4']} />
-      <Scene {...props} walking={walking} objectTool={objectTool} action={action} dragTarget={dragTarget} raycast={raycast} setRoom={(id, point) => { setCurrentRoom(id); setCameraPoint(point) }} />
+    <SceneBoundary><Canvas shadows="soft" dpr={[1, 1.5]} camera={{ position: [bounds.cx + 30, 38, bounds.cy + 40], fov: 42, near: .2, far: 8000 }} gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: .85 }} onPointerMissed={() => onSelect(null)}>
+      <color attach="background" args={['#b9d2e4']} />
+      <Scene {...props} exterior={exterior && !walking} walking={walking} spacePanning={spacePanning} objectTool={objectTool} action={action} dragTarget={dragTarget} raycast={raycast} setRoom={(id, point) => { setCurrentRoom(id); setCameraPoint(point) }} />
     </Canvas></SceneBoundary>
     <div className="editor-floating-tools editor-model-tools" role="toolbar" aria-label="3D navigation">
       <button className={!walking ? 'active' : ''} aria-label="Orbit view" title="Orbit view" onClick={() => setWalking(false)}><Orbit size={17} /></button>
       <button className={walking ? 'active' : ''} aria-label="Walk through the building" title="Walk through" onClick={() => { setWalking(true); const room = rooms.find(r => r.id === currentRoom) || rooms[0]; if (room) setAction({ kind: 'teleport', point: interiorPoint(room.polygon), nonce: Date.now() }) }}><Footprints size={17} /></button>
       <span className="editor-tool-divider" /><button title="Rotate view 45°" aria-label="Rotate view 45 degrees" onClick={() => setAction({ kind: 'rotate', nonce: Date.now() })}><RotateCw size={17} /></button><button title="Fit model" aria-label="Fit model" onClick={() => { setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}><Maximize size={16} /></button>
     </div>
-    <div className="editor-model-label"><span className="editor-live-dot" />{building.floors.find(f => f.id === floorId)?.name} <span>·</span> {walking ? 'Walkthrough' : 'Perspective'}</div>
+    <div className="editor-scene-modes" role="group" aria-label="Building presentation"><button aria-pressed={exterior && !walking} onClick={() => { setExterior(true); setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}>Exterior</button><button aria-pressed={!exterior || walking} onClick={() => { setExterior(false); setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}>Floor cutaway</button></div>
+    <div className="editor-model-label"><span className="editor-live-dot" />{exterior && !walking ? 'Whole building · Concept roof & landscape' : `${building.floors.find(f => f.id === floorId)?.name} · ${walking ? 'Walkthrough' : 'Floor cutaway'}`}</div>
     {selectedId && !walking && <div className="editor-model-selection">{building.walls.some(w => w.id === selectedId) ? 'Wall selected' : building.rooms.find(r => r.id === selectedId)?.name || 'Object selected'}{building.objects.some(o => o.id === selectedId) && <><button className={objectTool === 'translate' ? 'active' : ''} onClick={() => setObjectTool('translate')}>Move</button><button className={objectTool === 'rotate' ? 'active' : ''} onClick={() => setObjectTool('rotate')}>Rotate</button></>}<button aria-label="Clear selection" onClick={() => onSelect(null)}><X size={12} /></button></div>}
     {busy && <div className="editor-updating" role="status"><LoaderCircle size={13} className="editor-spin" />Updating design · showing saved model</div>}
     {notice && <div className="editor-notice" role="status">{notice}</div>}
-    <div className="editor-canvas-hint">{walking ? 'Click the model to look around · W A S D to walk · Esc releases the pointer' : 'Drag to orbit · Right-drag to pan · Scroll to zoom'}</div>
-    {rooms.length > 0 && <div className="editor-minimap"><div>{currentRoom ? rooms.find(r => r.id === currentRoom)?.name : 'Floor overview'}<span>Click a room to enter</span></div><svg viewBox={`${bounds.minX - 1} ${bounds.minY - 1} ${bounds.width + 2} ${bounds.height + 2}`} role="group" aria-label="Floor minimap">
+    <div className="editor-canvas-hint">{walking ? 'Click the model to look around · W A S D to walk · Esc releases the pointer' : spacePanning ? 'Drag to pan · Release Space to orbit' : 'Drag to orbit · Hold Space to pan · Scroll to zoom'}</div>
+    {rooms.length > 0 && (!exterior || walking) && <div className="editor-minimap"><div>{currentRoom ? rooms.find(r => r.id === currentRoom)?.name : 'Floor overview'}<span>Click a room to enter</span></div><svg viewBox={`${bounds.minX - 1} ${bounds.minY - 1} ${bounds.width + 2} ${bounds.height + 2}`} role="group" aria-label="Floor minimap">
       {rooms.map(room => <polygon key={room.id} tabIndex={0} role="button" aria-label={`Enter ${room.name}`} points={room.polygon.map(p => p.join(',')).join(' ')} fill={room.id === currentRoom ? '#7d939f' : '#b9bdbe'} fillOpacity={room.id === currentRoom ? .75 : .4} stroke="#657077" strokeWidth={.12} onClick={() => { setWalking(true); setAction({ kind: 'teleport', point: interiorPoint(room.polygon), nonce: Date.now() }) }} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { setWalking(true); setAction({ kind: 'teleport', point: interiorPoint(room.polygon), nonce: Date.now() }) } }} />)}
       {building.walls.filter(w => w.floor_id === floorId).map(w => { const a = building.vertices.find(v => v.id === w.start_id), b = building.vertices.find(v => v.id === w.end_id); return a && b ? <line key={w.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#4b5459" strokeWidth={Math.max(w.thickness_ft, .12)} pointerEvents="none" /> : null })}
       {cameraPoint && <circle cx={cameraPoint.x} cy={cameraPoint.y} r={Math.max(.25, bounds.width / 75)} fill="#2e647d" stroke="white" strokeWidth={.16} pointerEvents="none" />}
@@ -69,8 +82,8 @@ export function ModelView(props: EditorProps) {
   </div>
 }
 
-function Scene({ building, floorId, onSelect, onCommand, selectedId, walking, objectTool, action, dragTarget, raycast, setRoom }: EditorProps & { walking: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; setRoom: (id: string | null, p: Point) => void }) {
-  const bounds = useMemo(() => floorBounds(building, floorId), [building, floorId])
+function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, walking, spacePanning, objectTool, action, dragTarget, raycast, setRoom }: EditorProps & { exterior: boolean; walking: boolean; spacePanning: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; setRoom: (id: string | null, p: Point) => void }) {
+  const bounds = useMemo(() => floorBounds(exterior ? { ...building, vertices: building.vertices.map(v => ({ ...v, floor_id: floorId })) } : building, floorId), [building, floorId, exterior])
   const walls = building.walls.filter(w => w.floor_id === floorId), rooms = building.rooms.filter(r => r.floor_id === floorId)
   const objects = building.objects.filter(o => o.floor_id === floorId)
   const vertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
@@ -78,13 +91,17 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, walking, ob
   const { camera, gl, scene } = useThree()
   const keys = useRef(new Set<string>())
   const lastRoom = useRef(0)
-  const sun = building.environment
-  const daylight = Math.max(.08, Math.sin((sun.time - 6) / 12 * Math.PI))
-  const elevation = (sun.season === 'winter' ? .42 : sun.season === 'summer' ? 1 : .7) * Math.max(.1, daylight)
-  const azimuth = sun.sun_azimuth * Math.PI / 180
-  const dayColor = daylight < .25 ? '#e8b195' : '#fff4db'
+  const groundElevation = Math.min(...building.floors.map(f => f.elevation_ft), 0)
+  const topFloor = [...building.floors].sort((a,b) => (b.elevation_ft + b.height_ft) - (a.elevation_ft + a.height_ft))[0]
+  useEffect(() => {
+    const orbit = controls.current
+    if (!orbit) return
+    orbit.mouseButtons.LEFT = spacePanning ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE
+    return () => { orbit.mouseButtons.LEFT = THREE.MOUSE.ROTATE }
+  }, [spacePanning])
   useEffect(() => {
     raycast.current = (clientX, clientY) => {
+      if (exterior) return null
       const rect = gl.domElement.getBoundingClientRect(), pointer = new THREE.Vector2((clientX - rect.left) / rect.width * 2 - 1, -(clientY - rect.top) / rect.height * 2 + 1)
       const ray = new THREE.Raycaster(); ray.setFromCamera(pointer, camera)
       const hits = ray.intersectObjects(scene.children, true)
@@ -98,13 +115,15 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, walking, ob
       const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3())
       return point && point.x >= bounds.minX - 2 && point.x <= bounds.maxX + 2 && point.z >= bounds.minY - 2 && point.z <= bounds.maxY + 2 ? { id: '', kind: 'ground', point: { x: point.x, y: point.z } } : null
     }
-  }, [camera, gl, scene, raycast, bounds])
+  }, [camera, gl, scene, raycast, bounds, exterior])
   useEffect(() => {
     if (action.kind === 'fit') {
-      const distance = Math.max(bounds.width, bounds.height, 15)
-      camera.position.set(bounds.cx + distance * .85, distance * .85, bounds.cy + distance * .9)
-      controls.current?.target.set(bounds.cx, 0, bounds.cy)
-      camera.lookAt(bounds.cx, 0, bounds.cy)
+      const height = exterior ? (topFloor?.elevation_ft || 0) + (topFloor?.height_ft || 9) - groundElevation : 9
+      const distance = Math.max(bounds.width, bounds.height, height * 2, 20) * (exterior ? 1.55 : 1)
+      const targetY = exterior ? height * .35 : 1
+      camera.position.set(bounds.cx + distance * .85, targetY + distance * .65, bounds.cy - distance * 1.25)
+      controls.current?.target.set(bounds.cx, targetY, bounds.cy)
+      camera.lookAt(bounds.cx, targetY, bounds.cy)
     } else if (action.kind === 'rotate') {
       if (walking) { camera.rotation.order = 'YXZ'; camera.rotation.y -= Math.PI / 4 }
       else { const center = controls.current?.target || new THREE.Vector3(bounds.cx, 0, bounds.cy); const delta = camera.position.clone().sub(center).applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4); camera.position.copy(center).add(delta); camera.lookAt(center) }
@@ -114,7 +133,7 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, walking, ob
       controls.current?.target.set(action.point.x, 5.3, action.point.y + 4)
     }
     controls.current?.update()
-  }, [action, bounds, camera])
+  }, [action, bounds, camera, exterior, topFloor?.elevation_ft, topFloor?.height_ft, groundElevation])
   useEffect(() => {
     if (!walking && document.pointerLockElement === gl.domElement) document.exitPointerLock()
     keys.current.clear()
@@ -166,14 +185,23 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, walking, ob
     }
   })
   return <>
-    <ambientLight intensity={.35 + daylight * .35} />
-    <hemisphereLight args={['#dce8f7', '#bdb5a4', .8]} />
-    <directionalLight position={[bounds.cx + Math.cos(azimuth) * 80, 15 + elevation * 100, bounds.cy + Math.sin(azimuth) * 80]} intensity={.4 + daylight * 2.5} color={dayColor} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-Math.max(bounds.width, bounds.height)} shadow-camera-right={Math.max(bounds.width, bounds.height)} shadow-camera-top={Math.max(bounds.width, bounds.height)} shadow-camera-bottom={-Math.max(bounds.width, bounds.height)} shadow-camera-far={350} shadow-bias={-.0002} />
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[bounds.cx, -.15, bounds.cy]} receiveShadow><planeGeometry args={[Math.max(bounds.width * 4, 150), Math.max(bounds.height * 4, 150)]} /><meshStandardMaterial color="#e9e6df" roughness={1} /></mesh>
-    {rooms.map(room => <RoomFloor key={room.id} room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} />)}
-    <Walls3D walls={walls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} />
-    {objects.map(object => <PlacedEntity key={object.id} object={object} selected={selectedId === object.id} walking={walking} tool={objectTool} onSelect={onSelect} onCommand={onCommand} />)}
-    {!walking && <OrbitControls ref={controls} makeDefault minDistance={3} maxDistance={Math.max(bounds.width, bounds.height) * 6} maxPolarAngle={Math.PI * .49} enableDamping dampingFactor={.09} />}
+    <Daylight bounds={bounds} environment={building.environment} />
+    <Suspense fallback={null}>
+      <Landscape bounds={bounds} />
+      {(exterior ? building.floors : building.floors.filter(f => f.id === floorId)).map(floor => {
+        const floorRooms = exterior ? building.rooms.filter(r => r.floor_id === floor.id) : rooms
+        const floorWalls = exterior ? building.walls.filter(w => w.floor_id === floor.id) : walls
+        const below = building.floors.filter(f => f.elevation_ft < floor.elevation_ft).sort((a,b) => b.elevation_ft-a.elevation_ft)[0]
+        const slabThickness = exterior && below ? Math.max(.32, floor.elevation_ft-below.elevation_ft-below.height_ft) : .32
+        return <group key={floor.id} position={[0, exterior ? floor.elevation_ft - groundElevation : 0, 0]}>
+          {floorRooms.map(room => <group key={room.id}><FloorSlab polygon={room.polygon} y={-slabThickness} thickness={slabThickness} /><RoomFloor room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} /></group>)}
+          <Walls3D walls={floorWalls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} />
+          {exterior && floor.id === topFloor?.id && <ConceptRoof walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} />}
+          {!exterior && objects.map(object => <PlacedEntity key={object.id} object={object} selected={selectedId === object.id} walking={walking} tool={objectTool} onSelect={onSelect} onCommand={onCommand} />)}
+        </group>
+      })}
+    </Suspense>
+    {!walking && <OrbitControls ref={controls} makeDefault minDistance={3} maxDistance={Math.max(bounds.width, bounds.height) * 8} maxPolarAngle={Math.PI * .485} enablePan enableDamping dampingFactor={.09} />}
     {!walking && <GizmoHelper alignment="top-right" margin={[58, 65]}><GizmoViewcube color="#eeefef" hoverColor="#c8d6df" textColor="#64727b" strokeColor="#e0e1e1" opacity={.8} /></GizmoHelper>}
   </>
 }
@@ -249,7 +277,7 @@ function InstancedWalls({ walls, vertices, selectedId, dragTarget, onSelect }: {
   if (!count) return null
   return <instancedMesh key={count} ref={mesh} args={[undefined, undefined, count]} castShadow receiveShadow frustumCulled={false} userData={{ kind: 'wall-instances', instanceIds: ids }} onClick={e => { e.stopPropagation(); const id = ids[e.instanceId ?? -1]; if (id) onSelect(id) }}>
     <boxGeometry args={[1, 1, 1]} />
-    <meshStandardMaterial roughness={.8} />
+    <SurfaceMaterial finish="plaster" />
   </instancedMesh>
 }
 
@@ -271,33 +299,51 @@ function WallMesh({ wall, a, b, openings, faded, selected, onSelect }: { wall: W
   }, [openings, length, wall.height_ft])
   const color = colors[wall.material] || '#eeeae2'
   return <group position={[a.x, 0, a.y]} rotation={[0, -angle, 0]} userData={{ entityId: wall.id, kind: 'wall' }} onClick={e => { e.stopPropagation(); onSelect(wall.id) }}>
-    {pieces.map((piece, i) => <mesh key={i} position={[piece.x, piece.y, 0]} castShadow receiveShadow><boxGeometry args={[piece.width, piece.height, wall.thickness_ft]} /><meshStandardMaterial color={color} roughness={.8} transparent={faded} opacity={faded ? .35 : 1} emissive={selected ? '#405969' : '#000000'} emissiveIntensity={selected ? .13 : 0} /></mesh>)}
+    {pieces.map((piece, i) => <mesh key={i} position={[piece.x, piece.y, 0]} castShadow receiveShadow><boxGeometry args={[piece.width, piece.height, wall.thickness_ft]} /><SurfaceMaterial finish="plaster" color={color} faded={faded} selected={selected} /></mesh>)}
     {openings.map(opening => <group key={opening.id} position={[opening.offset_ft + opening.width_ft / 2, opening.sill_ft + opening.height_ft / 2, 0]}>
-      {opening.kind === 'window' ? <mesh><boxGeometry args={[opening.width_ft - .1, opening.height_ft - .1, .035]} /><meshPhysicalMaterial color="#b8d1d9" transparent opacity={.22} roughness={.1} metalness={.1} side={THREE.DoubleSide} /></mesh> : null}
+      {opening.kind === 'window' ? <mesh><boxGeometry args={[opening.width_ft - .1, opening.height_ft - .1, .035]} /><meshPhysicalMaterial color="#abc4cd" transparent opacity={.48} roughness={.08} metalness={.35} envMapIntensity={1.3} side={THREE.DoubleSide} /></mesh> : null}
+      {opening.kind === 'door' ? <DoorLeaf opening={opening} wallThickness={wall.thickness_ft} /> : null}
       {[[-opening.width_ft / 2 + .04, 0, .08, opening.height_ft], [opening.width_ft / 2 - .04, 0, .08, opening.height_ft], [0, opening.height_ft / 2 - .04, opening.width_ft, .08], ...(opening.kind === 'window' ? [[0, -opening.height_ft / 2 + .04, opening.width_ft, .08], [0, 0, .06, opening.height_ft]] : [])].map(([x, y, w, h], i) => <mesh key={i} position={[x, y, 0]} castShadow><boxGeometry args={[w, h, wall.thickness_ft + .04]} /><meshStandardMaterial color={opening.kind === 'window' ? '#747871' : '#f4efe4'} roughness={.6} /></mesh>)}
     </group>)}
   </group>
 }
+function DoorLeaf({ opening, wallThickness }: { opening: Building['openings'][number]; wallThickness: number }) {
+  const width = Math.max(.3, opening.width_ft - .16), height = Math.max(.3, opening.height_ft - .16)
+  return <group position={[0, 0, wallThickness / 2 + .075]}>
+    <mesh castShadow receiveShadow><boxGeometry args={[width, height, .12]} /><meshStandardMaterial color="#5b3925" roughness={.5} metalness={.02} /></mesh>
+    <mesh position={[0, 0, .066]}><boxGeometry args={[width * .78, height * .78, .012]} /><meshStandardMaterial color="#755039" roughness={.42} /></mesh>
+    <mesh position={[width * .34, 0, .13]} rotation={[Math.PI / 2, 0, 0]} castShadow><cylinderGeometry args={[.045, .045, .11, 12]} /><meshStandardMaterial color="#c5a46a" metalness={.8} roughness={.22} /></mesh>
+  </group>
+}
 function RoomFloor({ room, faded, selected, onSelect }: { room: Building['rooms'][number]; faded: boolean; selected: boolean; onSelect: (id: string) => void }) {
   const geometry = useMemo(() => { const shape = new THREE.Shape(); room.polygon.forEach(([x, y], i) => i === 0 ? shape.moveTo(x, -y) : shape.lineTo(x, -y)); shape.closePath(); return new THREE.ShapeGeometry(shape) }, [room.polygon])
-  const texture = useMemo(() => floorTexture(room.floor_material), [room.floor_material])
+  const usesOak = ['oak', 'walnut'].includes(room.floor_material)
   useEffect(() => () => geometry.dispose(), [geometry])
-  useEffect(() => () => texture?.dispose(), [texture])
-  return <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]} position={[0, .005, 0]} receiveShadow userData={{ entityId: room.id, kind: 'room' }} onClick={e => { e.stopPropagation(); onSelect(room.id) }}><meshStandardMaterial color={colors[room.floor_material] || '#c7aa7f'} map={texture} roughness={.85} transparent={faded} opacity={faded ? .4 : 1} side={THREE.DoubleSide} emissive={selected ? '#354c69' : '#000000'} emissiveIntensity={selected ? .16 : 0} /></mesh>
+  return <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]} position={[0, .025, 0]} receiveShadow userData={{ entityId: room.id, kind: 'room' }} onClick={e => { e.stopPropagation(); onSelect(room.id) }}><SurfaceMaterial finish={usesOak ? 'wood' : 'stone'} color={room.floor_material === 'walnut' ? '#ad876a' : usesOak ? '#ffffff' : colors[room.floor_material] || '#d5d0c3'} faded={faded} selected={selected} /></mesh>
 }
-function floorTexture(material: string) {
-  if (!['oak', 'walnut', 'tile'].includes(material)) return null
-  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 256
-  const ctx = canvas.getContext('2d')!; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 256, 256)
-  if (material === 'tile') { ctx.strokeStyle = '#b9b6af'; ctx.lineWidth = 2; ctx.strokeRect(0, 0, 256, 256) }
-  else {
-    for (let i = 0; i < 8; i++) { ctx.fillStyle = i % 3 ? '#f5f0e8' : '#fffdf9'; ctx.fillRect(0, i * 32, 256, 32); ctx.strokeStyle = '#c8bba8'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, i * 32); ctx.lineTo(256, i * 32); ctx.moveTo((i % 3) * 80, i * 32); ctx.lineTo((i % 3) * 80, (i + 1) * 32); ctx.stroke(); for (let n = 0; n < 8; n++) { ctx.strokeStyle = '#cbbda51c'; ctx.beginPath(); ctx.moveTo(0, i * 32 + n * 4 + 2); ctx.bezierCurveTo(90, i * 32 + n * 4, 180, i * 32 + n * 4 + 4, 256, i * 32 + n * 4 + 2); ctx.stroke() } }
-  }
-  const map = new THREE.CanvasTexture(canvas); map.wrapS = map.wrapT = THREE.RepeatWrapping; map.repeat.set(.2, .2); map.colorSpace = THREE.SRGBColorSpace; return map
+function ConceptRoof({ walls, rooms, vertices, height }: { walls: Wall[]; rooms: Building['rooms']; vertices: Map<string, Point>; height: number }) {
+  return <group>
+    {rooms.map(room => <FloorSlab key={room.id} polygon={room.polygon} y={height} roof />)}
+    {walls.map(wall => {
+      const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id)
+      if (!a || !b) return null
+      const length = Math.hypot(b.x-a.x,b.y-a.y)
+      if (length < .01) return null
+      const center = { x: (a.x+b.x)/2, y: (a.y+b.y)/2 }
+      const nx = -(b.y-a.y)/length * .1, ny = (b.x-a.x)/length * .1
+      const sideA = rooms.some(room => pointInPolygon({x:center.x+nx,y:center.y+ny},room.polygon))
+      const sideB = rooms.some(room => pointInPolygon({x:center.x-nx,y:center.y-ny},room.polygon))
+      const edge = sideA !== sideB
+      return <group key={wall.id} position={[center.x,height,center.y]} rotation={[0,-Math.atan2(b.y-a.y,b.x-a.x),0]}>
+        <mesh position={[0,.19,0]} castShadow receiveShadow><boxGeometry args={[length+.03,.38,wall.thickness_ft+.03]} /><SurfaceMaterial finish="stone" color="#616568" /></mesh>
+        {edge && <><mesh position={[0,.55,0]} castShadow receiveShadow><boxGeometry args={[length+.05,.8,wall.thickness_ft+.12]} /><SurfaceMaterial finish="plaster" color="#efede5" /></mesh><mesh position={[0,.97,0]} castShadow receiveShadow><boxGeometry args={[length+.12,.08,wall.thickness_ft+.23]} /><meshStandardMaterial color="#858887" metalness={.4} roughness={.5} /></mesh></>}
+      </group>
+    })}
+  </group>
 }
 function FurnitureModel({ object, selected }: { object: Building['objects'][number]; selected: boolean }) {
   const source = furniture.find(a => a.id === object.asset_id)!
-  const { scene } = useGLTF(source.model!)
+  const { scene } = useGLTF(source.model!, false, false)
   const { clone, size, center, minY } = useMemo(() => {
     const clone = scene.clone(true), box = new THREE.Box3().setFromObject(clone), size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3())
     clone.traverse(node => { if (node instanceof THREE.Mesh) { node.castShadow = node.receiveShadow = true } })
