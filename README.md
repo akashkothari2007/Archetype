@@ -1,4 +1,23 @@
-# PlanCheck
+# Archetype
+
+Archetype is a local-first Electron desktop editor for architectural projects. It includes a guided project generator, managed local project storage, an editable 2D floor plan, a derived 3D view, standards checks, and deterministic repair previews. The FastAPI service owns the versioned model and command history; the Electron renderer never writes project JSON directly.
+
+## Run the app
+
+Install Python dependencies into `.venv`, install the workspace packages with `pnpm install`, then run `pnpm dev:local`. That starts the local API and Electron shell together. The API is available at `http://127.0.0.1:8000`; project data is kept under `local-data/projects/` and is ignored by git. Copy `.env.example` to `.env` when changing local settings. Docker support is provided by `compose.yaml` for environments with Docker installed.
+
+The main workflow is:
+
+1. Generate a demo project through the six-question brief, or import a PDF, DXF, or IFC source.
+2. Edit the shared model in the 2D Floor Plan view and inspect the derived 3D Model view.
+3. Ask the local mock agent to analyze or repair issues; review the proposed commands before applying them.
+4. Save, undo, redo, and reopen the project from the recent-projects sidebar.
+
+Source drawings and standards documents remain outside version control. Imported geometry that cannot be measured confidently is preserved as review content rather than silently promoted to editable geometry.
+
+The acceptance dataset is documented in the implementation plan supplied with the project. The real PDF pipeline preserves page rotation, source references, CAD layers, unresolved regions, and standards provenance. Native DXF/IFC fixtures are covered by tests; the supplied archive itself contains PDFs only.
+
+The sections below describe the original PlanCheck pipeline and remain useful for engine-level work.
 
 Hotel drawing compliance pipeline. Reads an architectural drawing set (PDF) and a brand-standards manual (PDF), builds a structured model of the building, and checks every **space type** against every extracted rule.
 
