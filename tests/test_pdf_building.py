@@ -13,6 +13,7 @@ from plancheck.core.schemas import Door, Project, Sheet, SheetGeometry, Wall, Wi
 from plancheck.core.settings import reset_settings
 from plancheck.services.imports import (
     GAP_BRIDGE_FT,
+    MAX_ROOM_SQFT,
     MIN_ROOM_AREA_FT2,
     attach_openings,
     build_from_sheets,
@@ -76,6 +77,85 @@ def test_room_takes_tag_inside_polygon():
     assert all(not room.name.startswith("Space ") for room in building.rooms)
     vestibule = next(room for room in building.rooms if room.name == "VESTIBULE")
     assert vestibule.category == "circulation"
+
+
+def test_oversize_face_is_review_not_a_room():
+    segments = [
+        ((0, 0), (40, 0), "nonstructural"),
+        ((40, 0), (40, 30), "nonstructural"),
+        ((40, 30), (0, 30), "nonstructural"),
+        ((0, 30), (0, 0), "nonstructural"),
+    ]
+    building = from_segments(segments, "f1", "Test", Source(), collapse=False, max_room_sqft=MAX_ROOM_SQFT)
+    assert building.rooms == []
+    assert any("700" in item.message for item in building.review)
+
+
+def test_small_guestroom_tag_is_not_applied():
+    segments = [
+        ((0, 0), (8, 0), "nonstructural"),
+        ((8, 0), (8, 8), "nonstructural"),
+        ((8, 8), (0, 8), "nonstructural"),
+        ((0, 8), (0, 0), "nonstructural"),
+    ]
+    building = from_segments(
+        segments, "f1", "Test", Source(), room_names=[("STUDIO KING", (4, 4))], collapse=False
+    )
+    assert all(room.name != "STUDIO KING" for room in building.rooms)
+    assert Polygon(building.rooms[0].polygon).area < 140
+
+
+def test_nested_fixture_room_inherits_bath_name():
+    segments = [
+        ((0, 0), (20, 0), "nonstructural"),
+        ((20, 0), (20, 20), "nonstructural"),
+        ((20, 20), (0, 20), "nonstructural"),
+        ((0, 20), (0, 0), "nonstructural"),
+        ((2, 2), (9, 2), "nonstructural"),
+        ((9, 2), (9, 9), "nonstructural"),
+        ((9, 9), (2, 9), "nonstructural"),
+        ((2, 9), (2, 2), "nonstructural"),
+    ]
+    building = from_segments(
+        segments,
+        "f1",
+        "Test",
+        Source(),
+        room_names=[("STUDIO KING", (14, 14))],
+        fixtures=[(5.5, 5.5)],
+        collapse=False,
+    )
+    names = {room.name for room in building.rooms}
+    assert "STUDIO KING" in names
+    baths = [room for room in building.rooms if room.category == "bathroom"]
+    assert baths
+    assert any(room.name.endswith("Bath") for room in baths)
+
+
+def test_named_rooms_share_a_type_ref():
+    segments = [
+        ((0, 0), (16, 0), "nonstructural"),
+        ((16, 0), (16, 22), "nonstructural"),
+        ((16, 22), (0, 22), "nonstructural"),
+        ((0, 22), (0, 0), "nonstructural"),
+        ((20, 0), (36, 0), "nonstructural"),
+        ((36, 0), (36, 22), "nonstructural"),
+        ((36, 22), (20, 22), "nonstructural"),
+        ((20, 22), (20, 0), "nonstructural"),
+    ]
+    building = from_segments(
+        segments,
+        "f1",
+        "Test",
+        Source(),
+        room_names=[("STUDIO KING", (8, 11)), ("STUDIO KING", (28, 11))],
+        collapse=False,
+    )
+    named = [room for room in building.rooms if room.name == "STUDIO KING"]
+    assert len(named) == 2
+    assert named[0].type_ref == named[1].type_ref == "guestroom.studio_king"
+    assert named[0].instance_count == 2
+    assert named[0].needs_review is False
 
 
 def test_should_extract_skips_enlarged_before_geometry():
@@ -398,5 +478,28 @@ class TestSidneyFloorMapping:
         names = {room.name for room in building.rooms if room.floor_id == "level-2"}
         assert "STUDIO KING" in names
         assert any("QQ" in name for name in names)
-        assert any("CORRIDOR" in name for name in names)
+        assert any(token in name for name in names for token in ("CORRIDOR", "STAIR", "LOBBY"))
         assert all(not name.startswith("Space ") for name in names)
+
+    def test_room_quality_and_types(self, sidney_building):
+        _sheets, _geometries, building = sidney_building
+        rooms = building.rooms
+        unnamed = sum(1 for room in rooms if room.name == "Unnamed")
+        assert unnamed / max(1, len(rooms)) < 0.25
+        assert sum(1 for room in rooms if room.category == "bathroom") >= 20
+        areas = [Polygon(room.polygon).area for room in rooms]
+        assert areas
+        assert max(areas) <= 700
+        assert 34250 * 0.85 <= sum(areas) <= 34250 * 1.15
+        for room in rooms:
+            blob = room.name.upper()
+            if any(token in blob for token in ("STUDIO", "KING", "QQ")) and "BATH" not in blob and "CLOSET" not in blob:
+                assert Polygon(room.polygon).area >= 140
+        named = [room for room in rooms if room.name != "Unnamed" and not room.name.startswith("Space ")]
+        assert named
+        assert all(room.type_ref for room in named)
+        kings = [room for room in named if "STUDIO KING" == room.name]
+        if kings:
+            assert kings[0].instance_count == len(kings)
+            assert all(room.type_ref == kings[0].type_ref for room in kings)
+        assert sum(1 for room in rooms if room.needs_review) / len(rooms) < 0.40

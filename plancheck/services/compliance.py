@@ -91,8 +91,15 @@ def matches_room(room: Room, rule: dict) -> bool:
     if ids:
         return room.id in ids
     pattern = str(rule.get("applies_to", "*")).lower()
-    values = [room.id, room.category, room.type_ref, room.name, room.name.replace(" ", "_")]
-    return any(fnmatch.fnmatchcase(v.lower(), pattern) for v in values if v)
+    values = [
+        room.id,
+        room.category,
+        room.type_ref,
+        room.type_ref.split(".", 1)[0] if room.type_ref else "",
+        room.name,
+        room.name.replace(" ", "_"),
+    ]
+    return any(fnmatch.fnmatchcase(str(value).lower(), pattern) for value in values if value)
 
 
 def matches_opening(opening: Opening, building: Building, rule: dict) -> bool:

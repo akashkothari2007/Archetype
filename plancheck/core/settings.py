@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     agent_model: str = ""
     generation_provider: str = "demo"
     use_enlarged: bool = False
+    auto_approve: bool = True
     session_token: str = ""
     allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
 

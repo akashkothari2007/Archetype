@@ -193,6 +193,7 @@ export interface Room {
   floor_material: FloorMaterial;
   confidence: Confidence1;
   needs_review: NeedsReview;
+  instance_count?: InstanceCount;
   source: Source;
 }
 export interface PlacedObject {

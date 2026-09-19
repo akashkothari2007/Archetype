@@ -19,6 +19,10 @@ AREA_MATCH_TOL = 0.08
 ASPECT_MATCH_TOL = 0.15
 GUESTROOM_AREA_MIN = 140.0
 GUESTROOM_AREA_MAX = 520.0
+MAX_ROOM_SQFT = 700.0
+NEST_ROOM_SQFT = 140.0
+TAG_SNAP_FT = 6.0
+UNDERSZ_MEDIAN_FRAC = 0.35
 EXTRACT_ROLES = frozenset({'floor_plan','unit_plan','schedule'})
 SKIP_LABELS = {
     'elevation':'elevation — no plan geometry',
@@ -58,7 +62,7 @@ def _project_point(px,py,ax,ay,bx,by):
     qx,qy=ax+t_clamp*dx,ay+t_clamp*dy
     return t_clamp*length,math.hypot(px-qx,py-qy),length
 
-def from_segments(segments,floor_id,name,source:Source,thickness=DEFAULT_THICKNESS_FT,room_names=None,collapse=True):
+def from_segments(segments,floor_id,name,source:Source,thickness=DEFAULT_THICKNESS_FT,room_names=None,collapse=True,fixtures=None,max_room_sqft=None):
     b=Building(floors=[Floor(id=floor_id,name=name)])
     known={};edges=set()
     if collapse:
@@ -92,11 +96,21 @@ def from_segments(segments,floor_id,name,source:Source,thickness=DEFAULT_THICKNE
         bridged=[LineString(_extend_segment(start,end)) for start,end in usable]
         faces=[p for p in polygonize(unary_union(bridged)) if p.area>MIN_ROOM_AREA_FT2 and p.is_valid]
         wall_lines=[(w,LineString([(v.x,v.y) for v in [next(v for v in b.vertices if v.id==w.start_id),next(v for v in b.vertices if v.id==w.end_id)]])) for w in b.walls]
-        for i,p in enumerate(sorted(faces,key=lambda p:(p.centroid.x,p.centroid.y))):
+        kept=[]
+        for p in sorted(faces,key=lambda p:(p.centroid.x,p.centroid.y)):
+            if max_room_sqft and p.area>max_room_sqft:
+                b.review.append(ReviewItem(id=f'{floor_id}-oversize-{len(b.review)}',kind='geometry',message=f'Rejected a {p.area:.0f} sqft face over {max_room_sqft:g} sqft; not a single room.',document_id=source.document_id,sheet_id=source.sheet_id))
+                continue
+            kept.append(p)
+        for i,p in enumerate(kept):
             area=p.area
             fallback='Unnamed' if room_names else f'Space {i+1}'
             b.rooms.append(Room(id=f'{floor_id}-r{i}',floor_id=floor_id,name=fallback,category='guestroom' if GUESTROOM_AREA_MIN<=area<=GUESTROOM_AREA_MAX else 'other',polygon=list(p.exterior.coords)[:-1],wall_ids=[w.id for w,line in wall_lines if p.boundary.intersection(line).length>.02],confidence=.55,needs_review=True,source=source))
-        _apply_room_names(b.rooms,room_names)
+        tag_inside=_apply_room_names(b.rooms,room_names)
+        nested=_inherit_nested_rooms(b.rooms,fixtures or [])
+        _drop_unlabelled_fragments(b)
+        _finalize_room_flags(b.rooms,tag_inside,nested)
+        assign_shared_type_refs(b)
     b.review.append(ReviewItem(id=f'{floor_id}-review',kind='geometry',message=f'{len(b.walls)} measured wall segments and {len(b.rooms)} enclosed faces recovered. Review room identity, wall centerlines/thickness, and structural classification before compliance checks.',document_id=source.document_id,sheet_id=source.sheet_id))
     return b
 
@@ -151,18 +165,122 @@ def _aspect(polygon)->float:
     short=min(width,depth);long=max(width,depth)
     return long/short if short>1e-6 else 0.0
 
-def _label_for_polygon(polygon,room_names)->str|None:
-    if not room_names:return None
-    inside=[]
-    for text,xy in room_names:
-        point=Point(xy)
-        if polygon.covers(point):inside.append((point.distance(polygon.centroid),text))
-    if not inside:return None
-    return min(inside)[1]
+def _is_named(room:Room)->bool:
+    name=(room.name or '').strip()
+    return bool(name) and name not in {'Unnamed'} and not name.startswith('Space ')
 
-def _apply_room_names(rooms,room_names,snap_ft=8.0)->None:
-    if not room_names or not rooms:return
+def _is_guestroom_label(text:str)->bool:
+    return bool(re.search(r'STUDIO|\bKING\b|\bQQ\b|\bQUEEN\b|SUITE|BEDROOM',text or '',re.I))
+
+def _normalise_name(name:str)->str:
+    text=re.sub(r'\s+',' ',(name or '').upper().strip())
+    return re.sub(r'\s+\d+$','',text).strip()
+
+def _room_area(room:Room)->float:
+    if not room.polygon or len(room.polygon)<3:return 0.0
+    try:return float(Polygon(room.polygon).area)
+    except Exception:return 0.0
+
+def _unname(room:Room)->None:
+    room.name='Unnamed'
+    room.category='other' if room.category=='guestroom' else room.category
+
+def _can_apply_label(room:Room,text:str)->bool:
+    area=_room_area(room)
+    if _is_guestroom_label(text) and area<GUESTROOM_AREA_MIN:return False
+    if _category_from_name(text)=='circulation' and area<80:return False
+    return True
+
+def _is_unit_parent(room:Room)->bool:
+    if room.category=='circulation':return False
+    if re.search(r'CORRIDOR|STAIR|LOBBY|SHAFT|ELEVATOR',room.name or '',re.I):return False
+    if room.category=='guestroom' or _is_guestroom_label(room.name):return True
+    return GUESTROOM_AREA_MIN<=_room_area(room)<=MAX_ROOM_SQFT
+
+def _nested_in_parent(child:Polygon,parent:Polygon,loose=False)->bool:
+    if not parent.is_valid or not child.is_valid:return False
+    dist=parent.distance(child)
+    hull=parent.convex_hull
+    if hull.contains(child) or hull.buffer(0.75).contains(child.centroid):return True
+    if parent.envelope.buffer(0.5).contains(child.centroid) and dist<=0.6:return True
+    if dist<=0.35:return True
+    return bool(loose and parent.buffer(8.0).contains(child.centroid))
+
+def _has_fixture(poly:Polygon,points)->bool:
+    return any(poly.buffer(0.75).covers(point) or poly.distance(point)<0.75 for point in points)
+
+def _pick_parent(poly:Polygon,area:float,named,loose:bool):
+    parent=None;parent_area=None
+    for other in named:
+        outer=Polygon(other.polygon)
+        if not outer.is_valid or outer.area<=area*1.2:continue
+        if not _nested_in_parent(poly,outer,loose=loose):continue
+        if parent is None or outer.area<parent_area:
+            parent=other;parent_area=outer.area
+    return parent
+
+def _inherit_nested_rooms(rooms,fixtures)->set[str]:
+    nested=set()
+    named=[room for room in rooms if _is_named(room) and _is_unit_parent(room)]
+    points=[Point(xy) for xy in fixtures or []]
+    children={}
+    for room in rooms:
+        if _is_named(room):continue
+        poly=Polygon(room.polygon)
+        area=poly.area
+        if area>=NEST_ROOM_SQFT or not poly.is_valid:continue
+        parent=_pick_parent(poly,area,named,loose=False) or _pick_parent(poly,area,named,loose=True)
+        if parent is None:continue
+        children.setdefault(parent.id,[]).append(room)
+    parents={room.id:room for room in named}
+    for parent_id,kids in children.items():
+        parent=parents[parent_id]
+        scored=[]
+        for kid in kids:
+            poly=Polygon(kid.polygon)
+            scored.append((_has_fixture(poly,points),poly.area,kid))
+        baths={kid.id for has_fx,_area,kid in scored if has_fx}
+        if not baths:
+            baths={max(scored,key=lambda item:item[1])[2].id}
+        for has_fx,area,kid in scored:
+            if kid.id in baths:
+                kid.name=f'{parent.name} Bath';kid.category='bathroom'
+            else:
+                kid.name=f'{parent.name} Closet';kid.category='storage'
+            nested.add(kid.id)
+    return nested
+
+def _drop_unlabelled_fragments(building:Building)->None:
+    if not any(_is_named(room) for room in building.rooms):return
+    kept=[]
+    source=building.rooms[0].source if building.rooms else Source()
+    for room in building.rooms:
+        area=_room_area(room)
+        if room.name=='Unnamed' and area<NEST_ROOM_SQFT:
+            building.review.append(ReviewItem(id=f'{room.id}-unlabelled',kind='geometry',message=f'Unlabelled {area:.0f} sqft face was not matched to a room tag.',document_id=source.document_id,sheet_id=source.sheet_id))
+            continue
+        kept.append(room)
+    building.rooms=kept
+
+def _reject_undersized_labels(rooms)->set[str]:
+    dropped=set()
+    groups={}
+    for room in rooms:
+        if not _is_named(room):continue
+        groups.setdefault(room.name,[]).append(room)
+    for name,group in groups.items():
+        areas=[_room_area(r) for r in group]
+        median=sorted(areas)[len(areas)//2]
+        for room,area in zip(group,areas):
+            if area<UNDERSZ_MEDIAN_FRAC*median or not _can_apply_label(room,name):
+                dropped.add(room.id);_unname(room)
+    return dropped
+
+def _apply_room_names(rooms,room_names,snap_ft:float=TAG_SNAP_FT)->set[str]:
+    tag_inside=set()
+    if not room_names or not rooms:return tag_inside
     claimed=set()
+    assigned={}
     for room in rooms:
         polygon=Polygon(room.polygon)
         inside=[]
@@ -171,30 +289,80 @@ def _apply_room_names(rooms,room_names,snap_ft=8.0)->None:
             if polygon.covers(point):inside.append((point.distance(polygon.centroid),i,text))
         if not inside:continue
         _dist,index,text=min(inside)
-        claimed.add(index)
+        if not _can_apply_label(room,text):continue
+        claimed.add(index);assigned[room.id]=index;tag_inside.add(room.id)
         room.name=text
         category=_category_from_name(text)
         if category!='other' or room.category=='other':room.category=category
-    for i,(text,xy) in enumerate(room_names):
-        if i in claimed:continue
-        point=Point(xy)
+    for room_id in _reject_undersized_labels(rooms):
+        tag_inside.discard(room_id)
+        index=assigned.pop(room_id,None)
+        if index is not None:claimed.discard(index)
+    for room in rooms:
+        if _is_named(room):continue
+        polygon=Polygon(room.polygon)
         nearest=[]
-        for room in rooms:
-            if room.name!='Unnamed':continue
-            polygon=Polygon(room.polygon)
-            dist=polygon.distance(point)
-            if dist<=snap_ft:nearest.append((dist,-polygon.area,room))
+        for i,(text,xy) in enumerate(room_names):
+            if i in claimed:continue
+            dist=polygon.distance(Point(xy))
+            if dist<=snap_ft:nearest.append((dist,i,text))
         if not nearest:continue
-        room=min(nearest)[2]
-        room.name=text
-        room.category=_category_from_name(text)
-        claimed.add(i)
+        _dist,index,text=min(nearest)
+        if not _can_apply_label(room,text):continue
+        claimed.add(index);room.name=text
+        category=_category_from_name(text)
+        if category!='other' or room.category=='other':room.category=category
+    for room_id in _reject_undersized_labels(rooms):
+        tag_inside.discard(room_id)
+    return tag_inside
+
+def _plausible_area(category:str,area:float)->bool:
+    if category=='guestroom':return GUESTROOM_AREA_MIN<=area<=GUESTROOM_AREA_MAX
+    if category=='bathroom':return 20<=area<NEST_ROOM_SQFT
+    if category=='storage':return 20<=area<NEST_ROOM_SQFT
+    if category=='circulation':return 40<=area<=MAX_ROOM_SQFT
+    return MIN_ROOM_AREA_FT2<=area<=MAX_ROOM_SQFT
+
+def _finalize_room_flags(rooms,tag_inside,nested=None)->None:
+    nested=nested or set()
+    for room in rooms:
+        named=_is_named(room)
+        area=_room_area(room)
+        plausible=_plausible_area(room.category,area) if named else False
+        tagged=room.id in tag_inside
+        inherited=room.id in nested
+        if named and tagged and plausible:
+            room.confidence=0.85;room.needs_review=False
+        elif named and inherited and plausible:
+            room.confidence=0.8;room.needs_review=False
+        elif named and plausible and room.category in {'bathroom','storage','guestroom','circulation','service'} and area>=MIN_ROOM_AREA_FT2:
+            room.confidence=0.7;room.needs_review=False
+        else:
+            room.confidence=0.55;room.needs_review=True
+
+def assign_shared_type_refs(building:Building)->None:
+    groups={}
+    for room in building.rooms:
+        if not _is_named(room):continue
+        groups.setdefault(_normalise_name(room.name),[]).append(room)
+    counts={}
+    for key,group in groups.items():
+        category=next((r.category for r in group if r.category!='other'),group[0].category)
+        type_ref=_type_ref(key,category)
+        counts[type_ref]=len(group)
+        for room in group:
+            room.type_ref=type_ref
+            room.instance_count=len(group)
+            if room.category=='other':room.category=category
+    for entry in building.type_catalogue:
+        if entry.type_ref in counts:entry.instance_count=counts[entry.type_ref]
 
 def _category_from_name(name:str)->str:
     text=(name or '').upper()
     if re.search(r'\bBATH\b|\bWC\b|WASHROOM',text):return 'bathroom'
     if re.search(r'CORRIDOR|VESTIBULE|LOBBY',text):return 'circulation'
     if re.search(r'STAIR|SHAFT|\bMECH\b',text):return 'service'
+    if re.search(r'CLOSET|STORAGE|LINEN',text):return 'storage'
     if re.search(r'STUDIO|\bKING\b|\bQQ\b|\bQUEEN\b|SUITE|BEDROOM|GUEST',text):return 'guestroom'
     return 'other'
 
@@ -283,7 +451,10 @@ def _extract_plan(geom:SheetGeometry,sheet:Sheet|None,source:Source,origin=(0.0,
     def point(p,x0=x0,y0=y0,scale=scale):return ((p[0]-x0)/scale,(p[1]-y0)/scale)
     fid=floor_id or f'{geom.sheet_id}-src'
     label=name or (sheet.title if sheet else geom.sheet_id)
-    building=from_segments(_convert_walls(geom,point,bbox,scale),fid,label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False)
+    role=sheet.role if sheet else 'floor_plan'
+    limit=MAX_ROOM_SQFT if role in {'floor_plan','unit_plan',None} else None
+    fixtures=[point(f.xy) for f in geom.fixtures if not bbox or _in_bbox(f.xy,bbox,pad=1)]
+    building=from_segments(_convert_walls(geom,point,bbox,scale),fid,label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False,fixtures=fixtures,max_room_sqft=limit)
     attach_openings(building,geom,point,source,bbox=bbox)
     return building
 
@@ -304,7 +475,7 @@ def _catalogue_from_unit_plan(geom:SheetGeometry,sheet:Sheet,source:Source)->Bui
         def point(p,x0=x0,y0=y0,scale=scale):return ((p[0]-x0)/scale,(p[1]-y0)/scale)
         name=region.get('name') or geom.sheet_id
         label=('Reference · ' if region.get('kind')=='unit' else '')+name
-        scratch=from_segments(_convert_walls(geom,point,bbox,scale),region['id'],label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False)
+        scratch=from_segments(_convert_walls(geom,point,bbox,scale),region['id'],label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False,fixtures=[point(f.xy) for f in geom.fixtures if _in_bbox(f.xy,bbox,pad=1)],max_room_sqft=MAX_ROOM_SQFT)
         if not scratch.rooms:
             result.review.extend(scratch.review);continue
         room=max(scratch.rooms,key=lambda r:Polygon(r.polygon).area)
@@ -377,6 +548,7 @@ def build_from_sheets(project:Project,geometries:list[SheetGeometry])->Building:
         for level in new_levels:
             result=merge_buildings(result,retarget_storey(scratch,f'level-{level}',_floor_name(level),(level-1)*STOREY_HEIGHT_FT))
     link_rooms_to_types(result)
+    assign_shared_type_refs(result)
     return result
 
 def import_dxf(path:Path,document_id:str)->Building:

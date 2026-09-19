@@ -235,6 +235,11 @@ def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported buil
                 try:area+=abs(Polygon(room.polygon).area)
                 except Exception:pass
         elapsed=time.perf_counter()-started
+        from plancheck.core.settings import get_settings
+        if get_settings().auto_approve:
+            for rule in rules:
+                if rule.get('supported'):
+                    rule['status']='approved'
         totals.update({'rooms':len(building.rooms),'walls':len(building.walls),'doors':sum(1 for o in building.openings if o.kind=='door'),'windows':sum(1 for o in building.openings if o.kind=='window'),'pages_read':sum(1 for s in sheets_done if s.get('extracted'))})
         source_files=[{k:v for k,v in d.items() if k!='absolute_path'} for d in documents]
         summary={'name':name,'floors':len(building.floors),'rooms':len(building.rooms),'area_sqft':round(area),'doors':totals['doors'],'windows':totals['windows'],'walls':len(building.walls),'rules':len(rules),'violations':0,'elapsed_s':round(elapsed,2),'pages':totals['pages'],'pages_read':totals['pages_read']}
