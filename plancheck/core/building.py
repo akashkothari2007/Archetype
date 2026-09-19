@@ -167,6 +167,8 @@ class DesktopProject(BaseModel):
     rules: list[dict[str, Any]] = Field(default_factory=list)
     checks: list[dict[str, Any]] = Field(default_factory=list)
     files: list[dict[str, Any]] = Field(default_factory=list)
+    sheets: list[dict[str, Any]] = Field(default_factory=list)
+    import_meta: dict[str, Any] = Field(default_factory=dict)
     can_undo: bool = False
     can_redo: bool = False
 

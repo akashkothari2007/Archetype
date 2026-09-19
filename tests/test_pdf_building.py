@@ -10,6 +10,7 @@ from shapely.geometry import Polygon
 
 from plancheck.core.building import Building, Floor, Room, Source, TypeCatalogueEntry
 from plancheck.core.schemas import Door, Project, Sheet, SheetGeometry, Wall, Window
+from plancheck.core.settings import reset_settings
 from plancheck.services.imports import (
     GAP_BRIDGE_FT,
     MIN_ROOM_AREA_FT2,
@@ -19,7 +20,9 @@ from plancheck.services.imports import (
     link_rooms_to_types,
 )
 from plancheck.services.pdf_extract import (
+    EXTRACTOR_VERSION,
     build_room_tags,
+    cache_paths,
     is_fallback_room_tag,
     merge_stacked_room_tags,
 )
@@ -53,6 +56,71 @@ def test_gap_bridge_closes_doorway():
     assert all(room.needs_review and room.confidence == 0.55 for room in building.rooms)
 
 
+def test_room_takes_tag_inside_polygon():
+    segments = [
+        ((0, 0), (20, 0), "nonstructural"),
+        ((20, 0), (20, 12), "nonstructural"),
+        ((20, 12), (0, 12), "nonstructural"),
+        ((0, 12), (0, 0), "nonstructural"),
+    ]
+    building = from_segments(
+        segments,
+        "f1",
+        "Test",
+        Source(),
+        room_names=[("VESTIBULE", (10, 6)), ("KING", (10, 6.2))],
+        collapse=False,
+    )
+    names = {room.name for room in building.rooms}
+    assert "VESTIBULE" in names or "KING" in names
+    assert all(not room.name.startswith("Space ") for room in building.rooms)
+    vestibule = next(room for room in building.rooms if room.name == "VESTIBULE")
+    assert vestibule.category == "circulation"
+
+
+def test_should_extract_skips_enlarged_before_geometry():
+    from plancheck.services.imports import should_extract_sheet, skip_label
+
+    enlarged = Sheet(
+        sheet_id="s",
+        doc_id="d",
+        page=30,
+        role="enlarged_plan",
+        use=True,
+        reason="enlarged",
+    )
+    floor = Sheet(
+        sheet_id="f",
+        doc_id="d",
+        page=8,
+        role="floor_plan",
+        use=True,
+        reason="plan",
+    )
+    elevation = Sheet(
+        sheet_id="e",
+        doc_id="d",
+        page=17,
+        role="elevation",
+        use=False,
+        reason="Exterior elevation. No plan geometry.",
+    )
+    assert should_extract_sheet(floor)
+    assert not should_extract_sheet(enlarged)
+    assert not should_extract_sheet(elevation)
+    assert "enlarged" in skip_label(enlarged)
+
+
+def test_extractor_cache_key_uses_version(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLANCHECK_DATA_DIR", str(tmp_path / "projects"))
+    reset_settings()
+    json_path, raster_path, thumb = cache_paths("deadbeef", 8)
+    assert EXTRACTOR_VERSION in json_path.parts
+    assert json_path.name == "8.json"
+    assert raster_path.name == "8.raster.png"
+    assert thumb.name == "8.thumb.png"
+
+
 def test_fallback_room_tags_drop_dimensions_and_merge_stack():
     assert is_fallback_room_tag("STUDIO")
     assert is_fallback_room_tag("KING")
@@ -81,6 +149,18 @@ def test_room_tag_layer_uses_path_bbox():
     ]
     tags = build_room_tags(items, [[0.0, 0.0, 10.0, 10.0]])
     assert [tag.text for tag in tags] == ["101"]
+
+
+def test_room_tag_frame_captures_stacked_label():
+    bar = [1658.8, 1240.6, 1679.0, 1246.1]
+    expanded = [bar[0] - 12, bar[1] - 8, bar[2] + 12, bar[3] + 18]
+    items = [
+        {"text": "STUDIO", "xy": [1668.7, 1254.4]},
+        {"text": "KING", "xy": [1668.6, 1249.1]},
+        {"text": "8'-11", "xy": [1700.0, 1300.0]},
+    ]
+    tags = build_room_tags(items, [expanded])
+    assert [tag.text for tag in tags] == ["STUDIO KING"]
 
 
 def test_openings_snap_to_nearest_wall():
@@ -312,3 +392,11 @@ class TestSidneyFloorMapping:
         linked = [room for room in guests if room.type_ref]
         assert len(linked) / len(guests) >= 0.6
         assert any(entry.instance_count > 0 for entry in building.type_catalogue)
+
+    def test_typical_floor_uses_room_names(self, sidney_building):
+        _sheets, _geometries, building = sidney_building
+        names = {room.name for room in building.rooms if room.floor_id == "level-2"}
+        assert "STUDIO KING" in names
+        assert any("QQ" in name for name in names)
+        assert any("CORRIDOR" in name for name in names)
+        assert all(not name.startswith("Space ") for name in names)

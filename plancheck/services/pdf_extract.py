@@ -1,14 +1,47 @@
 """Measured CAD PDF paths normalized to displayed sheet coordinates, y up."""
 from pathlib import Path
 from collections import Counter
-import math,re
+import hashlib,math,re,shutil
 import pymupdf
 from plancheck.core.schemas import Sheet,SheetGeometry,Wall,Door,Window,Fixture,RoomTag,RasterRef,Dimension
 from plancheck.core.layers import bucket_for,normalise
+from plancheck.core.settings import get_settings
 
+EXTRACTOR_VERSION='4'
 ROOM_TAG_REJECT=re.compile(r"""[\d\[\]'"]""")
 STACK_X_PT=12.0
 STACK_Y_PT=18.0
+
+def cache_root()->Path:
+ return get_settings().data_dir.parent/'cache'
+
+def file_digest(path:Path)->str:
+ hasher=hashlib.sha256()
+ with path.open('rb') as handle:
+  for chunk in iter(lambda:handle.read(1024*1024),b''):hasher.update(chunk)
+ return hasher.hexdigest()
+
+def cache_paths(digest:str,page:int):
+ root=cache_root()/digest/EXTRACTOR_VERSION
+ return root/f'{page}.json',root/f'{page}.raster.png',root/f'{page}.thumb.png'
+
+def thumb_path(raster:Path)->Path:
+ name=raster.name
+ if name.endswith('.raster.png'):return raster.with_name(name.replace('.raster.png','.thumb.png'))
+ return raster.with_name(raster.stem+'.thumb.png')
+
+def write_wall_thumb(geom:SheetGeometry,dest:Path,px:int=220):
+ dest.parent.mkdir(parents=True,exist_ok=True)
+ width,height=geom.size_pt or [100,100]
+ scale=px/max(width,height,1)
+ page_w=max(8.0,width*scale);page_h=max(8.0,height*scale)
+ doc=pymupdf.open();page=doc.new_page(width=page_w,height=page_h)
+ shape=page.new_shape()
+ for wall in geom.walls:
+  shape.draw_line(pymupdf.Point(wall.a[0]*scale,page_h-wall.a[1]*scale),pymupdf.Point(wall.b[0]*scale,page_h-wall.b[1]*scale))
+ shape.finish(color=(0.16,0.17,0.16),width=0.45)
+ shape.commit()
+ pix=page.get_pixmap(alpha=False);pix.save(dest);doc.close()
 
 def _point_in_bbox(xy,bbox)->bool:
  return bbox[0]<=xy[0]<=bbox[2] and bbox[1]<=xy[1]<=bbox[3]
@@ -76,7 +109,9 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
     for j,(a,b) in enumerate(segments):
      if math.dist(a,b)>1:geom.windows.append(Window(id=f'{sheet.sheet_id}-win{i}-{j}',a=a,b=b,width_ft=math.dist(a,b)/scale if scale else 0))
    elif bucket=='fixture':geom.fixtures.append(Fixture(id=f'{sheet.sheet_id}-f{i}',xy=[(rr[0]+rr[2])/2,(rr[1]+rr[3])/2],bbox=rr,layer=layer))
-   elif bucket=='room_tag':tag_boxes.append(rr)
+   elif bucket=='room_tag':
+    w,h=rr[2]-rr[0],rr[3]-rr[1]
+    if w>=8 and h>=3:tag_boxes.append([rr[0]-STACK_X_PT,rr[1]-8.0,rr[2]+STACK_X_PT,rr[3]+STACK_Y_PT])
   labels=[]
   for block in page.get_text('dict')['blocks']:
    for line in block.get('lines',[]):
@@ -106,5 +141,26 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
   if not scale:geom.warnings.append('Scale is unknown. Set a calibrated scale before metric reconstruction.')
   if not geom.walls:geom.warnings.append('No recognized wall layers; use the sheet as reference or review layer mappings.')
   raster.parent.mkdir(parents=True,exist_ok=True);pix=page.get_pixmap(matrix=pymupdf.Matrix(.6,.6),alpha=False);pix.save(raster)
+  write_wall_thumb(geom,thumb_path(raster))
   geom.raster=RasterRef(dpi=43.2,file=f'sheets/{raster.name}',size_px=[pix.width,pix.height])
   return geom
+
+def extract_cached(sheet:Sheet,path:Path,raster:Path,digest:str|None=None)->tuple[SheetGeometry,bool]:
+ digest=digest or file_digest(path)
+ json_path,raster_cache,thumb_cache=cache_paths(digest,sheet.page)
+ thumb=thumb_path(raster)
+ if json_path.exists() and raster_cache.exists():
+  geom=SheetGeometry.model_validate_json(json_path.read_text())
+  geom.sheet_id=sheet.sheet_id;geom.doc_id=sheet.doc_id;geom.page=sheet.page
+  raster.parent.mkdir(parents=True,exist_ok=True)
+  shutil.copyfile(raster_cache,raster)
+  if thumb_cache.exists():shutil.copyfile(thumb_cache,thumb)
+  else:write_wall_thumb(geom,thumb)
+  geom.raster=RasterRef(dpi=geom.raster.dpi or 43.2,file=f'sheets/{raster.name}',size_px=geom.raster.size_px)
+  return geom,True
+ geom=extract(sheet,path,raster)
+ json_path.parent.mkdir(parents=True,exist_ok=True)
+ json_path.write_text(geom.model_dump_json())
+ if raster.exists():shutil.copyfile(raster,raster_cache)
+ if thumb.exists():shutil.copyfile(thumb,thumb_cache)
+ return geom,False

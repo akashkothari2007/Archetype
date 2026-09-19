@@ -52,6 +52,7 @@ TITLE_KEYWORDS = tuple(name for name, _ in KEYWORD_PATTERNS)
 USABLE_ROLES = frozenset(
     {"unit_plan", "enlarged_plan", "floor_plan", "schedule"}
 )
+DRAWING_STAT_ROLES = frozenset({"floor_plan", "enlarged_plan", "unit_plan"})
 ENLARGED_MIN_PTS_PER_FT = 13.0
 
 KEYWORD_ROLES: dict[str, str] = {
@@ -252,19 +253,25 @@ def classify_page(
     text = page.get_text() or ""
     title_block = title_block_text(page)
     words = page.get_text("words") or []
-    drawings = page.get_drawings()
-
-    layer_names = [normalise(d.get("layer")) for d in drawings]
-    distinct_layers = {name for name in layer_names if name}
+    field_title = sheet_title_field(title_block)
+    keyword_title = parse_title(title_block, text)
+    title = field_title or keyword_title
 
     sheet_no = parse_sheet_no(title_block) or parse_sheet_no(text)
     scale_text, pts_per_ft = find_scale(title_block)
     if scale_text is None:
         scale_text, pts_per_ft = find_scale(text)
-    title = parse_title(title_block, text)
-    role = assign_role(sheet_no, title, pts_per_ft)
+    role = assign_role(sheet_no, keyword_title or title, pts_per_ft)
     use = role in USABLE_ROLES
-    levels = parse_levels(sheet_title_field(title_block)) or parse_levels(title)
+    levels = parse_levels(field_title) or parse_levels(title)
+
+    paths = None
+    distinct_layers: set[str] = set()
+    if role in DRAWING_STAT_ROLES:
+        drawings = page.get_drawings()
+        paths = len(drawings)
+        distinct_layers = {normalise(d.get("layer")) for d in drawings}
+        distinct_layers.discard("")
 
     page_no = page_index + 1
     return Sheet(
@@ -282,7 +289,7 @@ def classify_page(
         use=use,
         reason=reason_for(role, use, title),
         stats=SheetStats(
-            paths=len(drawings),
+            paths=paths,
             words=len(words),
             layers=len(distinct_layers),
             dim_tokens=len(DIM_TOKEN_RE.findall(text)),
@@ -291,18 +298,25 @@ def classify_page(
     )
 
 
-def classify_document(path: Path, doc_id: str) -> tuple[Document, list[Sheet]]:
+def classify_document(
+    path: Path,
+    doc_id: str,
+    on_progress: Callable[[int, int, Sheet], None] | None = None,
+) -> tuple[Document, list[Sheet]]:
     with pymupdf.open(path) as doc:
         first = doc[0]
         ocgs = doc.get_ocgs() or {}
         page_size = [round(first.rect.width, 2), round(first.rect.height, 2)]
         sheets: list[Sheet] = []
         any_text = False
-        for index in range(doc.page_count):
+        total = doc.page_count
+        for index in range(total):
             sheet = classify_page(doc, index, doc_id)
             if sheet.stats.words > 0:
                 any_text = True
             sheets.append(sheet)
+            if on_progress:
+                on_progress(index + 1, total, sheet)
         counts = collections.Counter(s.discipline for s in sheets)
         discipline = counts.most_common(1)[0][0] if counts else "unknown"
         document = Document(

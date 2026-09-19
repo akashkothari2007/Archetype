@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json,uuid,time,asyncio,shutil
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor,wait,FIRST_COMPLETED
 from fastapi import APIRouter,Body,UploadFile,File,Form,HTTPException,Query
 from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,Field
@@ -149,17 +149,100 @@ def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported buil
     if not documents:raise ValueError('Choose a folder containing PDF, DXF, or IFC files')
     def work(report):
         from plancheck.services.imports import import_document,merge_buildings,extract_standards
-        building=Building();rules=[]
-        for i,document in enumerate(documents):
-            report(progress=.04+.85*i/len(documents),phase='extracting',message=f"Reading {document['name']}")
+        from shapely.geometry import Polygon
+        started=time.perf_counter()
+        building=Building();rules=[];sheet_cards=[];progress_path=str(base/'_import_progress.jsonl')
+        Path(progress_path).write_text('')
+        cursor=0
+        sheets_done=[]
+        totals={'pages':0,'pages_read':0,'walls':0,'rooms':0,'doors':0,'windows':0,'skipped':0,'rules':0}
+
+        def upsert(card):
+            sid=card.get('sheet_id') or f"{card.get('sheet_no')}-{card.get('page')}"
+            for i,existing in enumerate(sheets_done):
+                if existing.get('sheet_id')==sid:
+                    sheets_done[i]=card;return
+            sheets_done.append(card)
+
+        def recompute():
+            totals['pages']=len(sheets_done) or totals['pages']
+            totals['pages_read']=sum(1 for s in sheets_done if s.get('extracted'))
+            totals['skipped']=sum(1 for s in sheets_done if not s.get('extracted'))
+            totals['walls']=sum(s.get('walls') or 0 for s in sheets_done if s.get('extracted'))
+            totals['rooms']=sum(s.get('rooms') or 0 for s in sheets_done if s.get('extracted'))
+            totals['doors']=sum(s.get('doors') or 0 for s in sheets_done if s.get('extracted'))
+            totals['windows']=sum(s.get('windows') or 0 for s in sheets_done if s.get('extracted'))
+
+        def drain(progress=None,phase=None,message=None):
+            nonlocal cursor
+            path=Path(progress_path)
+            if path.exists():
+                lines=path.read_text().splitlines()
+                for line in lines[cursor:]:
+                    if not line.strip():continue
+                    try:event=json.loads(line)
+                    except json.JSONDecodeError:continue
+                    if event.get('kind')=='classified':
+                        for card in event.get('sheets') or []:upsert(card)
+                        report(progress=event.get('progress',0.15),phase='classify',message=event.get('message') or 'Classifying pages',sheets_done=list(sheets_done),totals=dict(totals))
+                    elif event.get('kind')=='sheet':
+                        upsert(event.get('sheet') or {})
+                        recompute()
+                        report(progress=event.get('progress',0.5),phase='extracting',message=event.get('message') or 'Reading sheets',sheets_done=list(sheets_done),totals=dict(totals))
+                    elif event.get('kind')=='phase':
+                        if event.get('phase')=='standards' and event.get('rules') is not None:totals['rules']=event['rules']
+                        report(progress=event.get('progress',progress or 0.2),phase=event.get('phase') or phase or 'working',message=event.get('message') or message or '',sheets_done=list(sheets_done),totals=dict(totals))
+                cursor=len(lines)
+            if message:
+                recompute();report(progress=progress or 0,phase=phase or 'working',message=message,sheets_done=list(sheets_done),totals=dict(totals))
+
+        futures={}
+        for document in documents:
             if document['role']=='standards' and document['name'].lower().endswith('.pdf'):
-                rules.extend(_import_pool.submit(extract_standards,document).result())
+                futures[_import_pool.submit(extract_standards,document,progress_path)]=('standards',document)
             elif Path(document['name']).suffix.lower() in ['.pdf','.dxf','.ifc']:
-                result=_import_pool.submit(import_document,document,str(base)).result();building=merge_buildings(building,Building.model_validate(result))
-        report(progress=.95,phase='validating',message='Saving source geometry and review items')
+                futures[_import_pool.submit(import_document,document,str(base),progress_path)]=('drawing',document)
+        drain(progress=0.02,phase='classify',message='Classifying pages')
+        pending=set(futures)
+        while pending:
+            finished,pending=wait(pending,timeout=0.12,return_when=FIRST_COMPLETED)
+            drain()
+            for future in finished:
+                kind,_document=futures[future]
+                payload=future.result()
+                if kind=='standards':
+                    rules.extend(payload);totals['rules']=len(rules)
+                    drain(progress=0.88,phase='standards',message='Extracting rules from standards')
+                else:
+                    building=merge_buildings(building,Building.model_validate(payload.get('building',payload)))
+                    for card in payload.get('sheets') or []:upsert(card)
+                    recompute()
+                    drain(progress=0.9,phase='build',message='Building rooms and openings')
+        drain()
+        report(progress=.95,phase='saving',message='Saving',sheets_done=list(sheets_done),totals=dict(totals))
+        floors={f.id for f in building.floors}
+        for card in sheets_done:
+            ids=[]
+            for raw in card.get('levels') or []:
+                try:level=int(str(raw).strip())
+                except (TypeError,ValueError):continue
+                fid=f'level-{level}'
+                if fid in floors:ids.append(fid)
+            card['floor_ids']=ids
+        area=0.0
+        for room in building.rooms:
+            if room.polygon and len(room.polygon)>=3:
+                try:area+=abs(Polygon(room.polygon).area)
+                except Exception:pass
+        elapsed=time.perf_counter()-started
+        totals.update({'rooms':len(building.rooms),'walls':len(building.walls),'doors':sum(1 for o in building.openings if o.kind=='door'),'windows':sum(1 for o in building.openings if o.kind=='window'),'pages_read':sum(1 for s in sheets_done if s.get('extracted'))})
         source_files=[{k:v for k,v in d.items() if k!='absolute_path'} for d in documents]
-        project=repo().create(name,building,rules,source='import',project_id=pid,source_files=source_files)
-        return {'project_id':pid,'review_count':len(building.review)}
+        summary={'name':name,'floors':len(building.floors),'rooms':len(building.rooms),'area_sqft':round(area),'doors':totals['doors'],'windows':totals['windows'],'walls':len(building.walls),'rules':len(rules),'violations':0,'elapsed_s':round(elapsed,2),'pages':totals['pages'],'pages_read':totals['pages_read']}
+        project=repo().create(name,building,rules,source='import',project_id=pid,source_files=source_files,sheets=sheets_done,import_meta=summary)
+        project=repo().commit(pid,project.revision,recheck)
+        summary['violations']=sum(1 for c in project.checks if c.get('status')=='fail')
+        print(f"[import] save {elapsed:.2f}s walls={len(building.walls)} rooms={len(building.rooms)}",flush=True)
+        return {'project_id':pid,'review_count':len(building.review),'summary':summary}
     return {'job_id':jobs.submit(work,'Importing your sources'),'project_id':pid}
 
 @router.get('/jobs/{jid}')

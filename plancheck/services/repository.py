@@ -46,7 +46,7 @@ class FileProjectRepository:
     def _snapshot(self,pid,revision):return json.loads((self.path(pid)/'revisions'/str(revision)/'model.json').read_text())
     def load(self,pid):
         m=self.manifest(pid);s=self._snapshot(pid,m['current_revision'])
-        return DesktopProject(project_id=pid,name=m['name'],revision=m['current_revision'],created_at=m['created_at'],updated_at=m['updated_at'],brief=m.get('brief'),building=s['building'],rules=s.get('rules',[]),checks=s.get('checks',[]),files=self.files(pid,m),can_undo=bool(m.get('undo')),can_redo=bool(m.get('redo')))
+        return DesktopProject(project_id=pid,name=m['name'],revision=m['current_revision'],created_at=m['created_at'],updated_at=m['updated_at'],brief=m.get('brief'),building=s['building'],rules=s.get('rules',[]),checks=s.get('checks',[]),files=self.files(pid,m),sheets=m.get('sheets',[]),import_meta=m.get('import_meta') or {},can_undo=bool(m.get('undo')),can_redo=bool(m.get('redo')))
     def files(self,pid,m=None):
         m=m or self.manifest(pid)
         files=[{'name':'model.json','path':f"revisions/{m['current_revision']}/model.json",'origin':'generated'},{'name':'rules.json','path':f"revisions/{m['current_revision']}/rules.json",'origin':'generated'},{'name':'mismatches.json','path':f"revisions/{m['current_revision']}/mismatches.json",'origin':'generated'}]
@@ -58,12 +58,12 @@ class FileProjectRepository:
         atomic_json(directory/'model.json',snapshot)
         atomic_json(directory/'rules.json',{'rules':snapshot.get('rules',[])})
         atomic_json(directory/'mismatches.json',{'checks':snapshot.get('checks',[])})
-    def create(self,name,building:Building,rules=None,brief:DesignBrief|None=None,source='generated',project_id=None,source_files=None):
+    def create(self,name,building:Building,rules=None,brief:DesignBrief|None=None,source='generated',project_id=None,source_files=None,sheets=None,import_meta=None):
         pid=project_id or 'pc-'+uuid.uuid4().hex[:12];directory=self.path(pid);directory.mkdir(parents=True,exist_ok=True)
         if (directory/'project.json').exists():raise ValueError('Project already exists')
         timestamp=now();snapshot={'building':building.model_dump(mode='json'),'rules':rules or [],'checks':[]}
         self._write_snapshot(pid,1,snapshot)
-        m={'schema_version':2,'project_id':pid,'name':name,'created_at':timestamp,'updated_at':timestamp,'current_revision':1,'next_revision':2,'undo':[],'redo':[],'brief':brief.model_dump() if brief else None,'source':source,'source_files':source_files or [],'documents':[],'sheets':[],'units':'ft','model_file':'revisions/1/model.json'}
+        m={'schema_version':2,'project_id':pid,'name':name,'created_at':timestamp,'updated_at':timestamp,'current_revision':1,'next_revision':2,'undo':[],'redo':[],'brief':brief.model_dump() if brief else None,'source':source,'source_files':source_files or [],'documents':[],'sheets':sheets or [],'import_meta':import_meta or {},'units':'ft','model_file':'revisions/1/model.json'}
         atomic_json(directory/'project.json',m);(directory/'notes').mkdir(exist_ok=True)
         return self.load(pid)
     def commit(self,pid,expected_revision,update):
