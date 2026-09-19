@@ -1,0 +1,34 @@
+[project]
+name = "plancheck"
+version = "0.1.0"
+description = "Deterministic ingestion of hotel architectural drawings into a structured building model."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pymupdf>=1.24.0",
+    "pdfplumber>=0.11.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["plancheck"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Import from the source tree, so tests never depend on a stale install.
+pythonpath = ["."]

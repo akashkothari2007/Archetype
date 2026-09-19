@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PlanCheck sheet viewer</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --line: #262b33;
+    --text: #dfe3e9;
+    --muted: #7b828e;
+    --accent: #4da3ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.45 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  aside {
+    width: 268px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--line);
+    background: var(--panel);
+    overflow-y: auto;
+  }
+  aside section { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 2px; font-size: 14px; letter-spacing: -0.01em; }
+  h2 {
+    margin: 0 0 8px; font-size: 10px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+  }
+  .sub { color: var(--muted); font-size: 11px; }
+
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 11px; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+
+  label.layer {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 6px; border-radius: 5px; cursor: pointer; user-select: none;
+  }
+  label.layer:hover { background: #1c2027; }
+  label.layer input { accent-color: var(--accent); margin: 0; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .layer-name { flex: 1; }
+  .count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+
+  main { flex: 1; position: relative; min-width: 0; }
+  svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  svg.dragging { cursor: grabbing; }
+
+  .hud {
+    position: absolute; top: 10px; right: 10px;
+    display: flex; gap: 6px; align-items: center;
+    padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px;
+    background: rgba(20, 23, 28, 0.9); font-size: 11px; color: var(--muted);
+    backdrop-filter: blur(6px);
+  }
+  button {
+    border: 1px solid var(--line); background: #1c2027; color: var(--text);
+    border-radius: 5px; padding: 4px 9px; font: inherit; font-size: 11px; cursor: pointer;
+  }
+  button:hover { border-color: #39404b; }
+
+  .drop {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    text-align: center; padding: 32px; gap: 10px;
+  }
+  .drop.hidden { display: none; }
+  .drop-inner {
+    border: 1px dashed #39404b; border-radius: 10px; padding: 36px 44px; max-width: 460px;
+  }
+  code {
+    background: #1c2027; padding: 1px 5px; border-radius: 4px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+  }
+  .note { color: var(--muted); font-size: 11px; margin-top: 10px; }
+  .warn { color: #d9a441; }
+</style>
+</head>
+<body>
+
+<aside>
+  <section>
+    <h1 id="sheet-no">PlanCheck</h1>
+    <div class="sub" id="sheet-title">No sheet loaded</div>
+  </section>
+
+  <section id="meta-section" hidden>
+    <h2>Sheet</h2>
+    <dl class="meta" id="meta"></dl>
+  </section>
+
+  <section id="layers-section" hidden>
+    <h2>Layers</h2>
+    <div id="layers"></div>
+  </section>
+
+  <section id="excluded-section" hidden>
+    <h2>Excluded at extract time</h2>
+    <dl class="meta" id="excluded"></dl>
+    <div class="note">Dropped before output, so these cannot be toggled on.</div>
+  </section>
+
+  <section id="unmapped-section" hidden>
+    <h2>Unmapped layers</h2>
+    <dl class="meta" id="unmapped"></dl>
+    <div class="note">Counted but not classified. Nothing is silently lost.</div>
+  </section>
+</aside>
+
+<main>
+  <svg id="stage"><g id="scene"></g></svg>
+
+  <div class="hud">
+    <span id="zoom">1.00x</span>
+    <button id="reset">Reset view</button>
+    <button id="pick">Open JSON</button>
+  </div>
+
+  <div class="drop" id="drop">
+    <div class="drop-inner">
+      <div style="font-size:15px;margin-bottom:6px">Open a sheet JSON</div>
+      <div class="sub">Drop a file from <code>sheets/</code> here, or click <b>Open JSON</b>.</div>
+      <div class="note">
+        Serving the folder also works:<br />
+        <code>python -m http.server</code> then
+        <code>viewer/?sheet=../sheets/A.801.json</code>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="file" accept="application/json,.json" hidden />
+</main>
+
+<script>
+"use strict";
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/* Draw order is bottom to top. Each entry becomes one <g> and one checkbox. */
+const LAYERS = [
+  { key: "grid",         label: "Grid",         colour: "#4b5563", on: true  },
+  { key: "clear_spaces", label: "Clear space",  colour: "#eab308", on: true  },
+  { key: "shafts",       label: "Shafts",       colour: "#64748b", on: true  },
+  { key: "stairs",       label: "Stairs",       colour: "#94a3b8", on: true  },
+  { key: "elevators",    label: "Elevators",    colour: "#a78bfa", on: true  },
+  { key: "columns",      label: "Columns",      colour: "#c084fc", on: true  },
+  { key: "fixtures",     label: "Fixtures",     colour: "#f0a35e", on: true  },
+  { key: "windows",      label: "Windows",      colour: "#5eead4", on: true  },
+  { key: "walls",        label: "Walls",        colour: "#e8eaed", on: true  },
+  { key: "doors",        label: "Doors",        colour: "#4da3ff", on: true  },
+  { key: "room_tags",    label: "Room tags",    colour: "#f5f5f5", on: true  },
+  { key: "dimensions",   label: "Dimensions",   colour: "#8b93a1", on: false },
+  { key: "grid_labels",  label: "Grid labels",  colour: "#9aa3b0", on: true  },
+];
+
+/* Wall stroke width by construction class, in sheet points. */
+const WALL_WIDTH = {
+  loadbearing: 2.6, concrete: 2.6, structural: 2.4,
+  exterior_cladding: 2.0, interior: 1.4, stud: 1.4, unknown: 1.2,
+};
+
+const stage = document.getElementById("stage");
+const scene = document.getElementById("scene");
+const view = { k: 1, tx: 0, ty: 0 };
+let sheet = null;
+let height = 0;
+
+function el(name, attrs, text) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const key in attrs) {
+    if (attrs[key] !== null && attrs[key] !== undefined) {
+      node.setAttribute(key, attrs[key]);
+    }
+  }
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/* Data is y-up from the bottom-left; SVG is y-down from the top-left.
+   This is the only place the axis is inverted. */
+const flip = (y) => height - y;
+
+/* ---------------------------------------------------------------- loading */
+
+function load(data) {
+  sheet = data;
+  height = data.page.height;
+
+  stage.setAttribute("viewBox", `0 0 ${data.page.width} ${data.page.height}`);
+  document.getElementById("drop").classList.add("hidden");
+
+  renderMeta();
+  renderScene();
+  renderLayerControls();
+  resetView();
+}
+
+function renderMeta() {
+  const s = sheet.sheet, c = sheet.counts;
+  document.getElementById("sheet-no").textContent = s.sheet_no || "(no sheet number)";
+  document.getElementById("sheet-title").textContent = s.title || "Untitled sheet";
+
+  fillDefList("meta", [
+    ["Role", s.role],
+    ["Scale", s.scale || "—"],
+    ["pts / ft", s.scale_pts_per_ft ?? "—"],
+    ["Source", `${sheet.source.pdf} p${sheet.source.page}`],
+    ["Sheet size", `${sheet.page.width} x ${sheet.page.height} pt`],
+    ["Words", c.words],
+  ]);
+  document.getElementById("meta-section").hidden = false;
+
+  const excluded = Object.entries(sheet.excluded || {});
+  if (excluded.length) {
+    fillDefList("excluded", excluded);
+    document.getElementById("excluded-section").hidden = false;
+  }
+
+  const unmapped = Object.entries(sheet.unmapped || {}).slice(0, 12);
+  if (unmapped.length) {
+    fillDefList("unmapped", unmapped);
+    document.getElementById("unmapped-section").hidden = false;
+  }
+}
+
+function fillDefList(id, rows) {
+  const list = document.getElementById(id);
+  list.replaceChildren();
+  for (const [key, value] of rows) {
+    const dt = document.createElement("dt"); dt.textContent = key;
+    const dd = document.createElement("dd"); dd.textContent = value;
+    list.append(dt, dd);
+  }
+}
+
+/* ---------------------------------------------------------------- drawing */
+
+function renderScene() {
+  scene.replaceChildren();
+  for (const layer of LAYERS) {
+    const group = el("g", { id: `layer-${layer.key}` });
+    draw(layer, group);
+    scene.append(group);
+  }
+}
+
+function draw(layer, g) {
+  const key = layer.key;
+
+  if (key === "walls") {
+    for (const w of sheet.walls || []) {
+      g.append(el("line", {
+        x1: w.x1, y1: flip(w.y1), x2: w.x2, y2: flip(w.y2),
+        stroke: layer.colour,
+        "stroke-width": WALL_WIDTH[w.cls] ?? WALL_WIDTH.unknown,
+        "stroke-linecap": "square",
+      }));
+    }
+    return;
+  }
+
+  if (key === "doors") {
+    for (const d of sheet.doors || []) {
+      const [x0, y0, x1, y1] = d.bbox;
+      g.append(el("rect", {
+        x: x0, y: flip(y1), width: Math.max(x1 - x0, 0.4), height: Math.max(y1 - y0, 0.4),
+        fill: "none", stroke: layer.colour, "stroke-width": 0.9,
+      }));
+      /* A door path containing a curve carries its swing. The arc itself is
+         not stored, so the quarter-circle is reconstructed from the bbox. */
+      if (d.swing) {
+        g.append(el("path", {
+          d: `M ${x0} ${flip(y0)} A ${x1 - x0} ${y1 - y0} 0 0 1 ${x1} ${flip(y1)}`,
+          fill: "none", stroke: layer.colour, "stroke-width": 0.6, opacity: 0.55,
+        }));
+      }
+    }
+    return;
+  }
+
+  if (key === "grid") {
+    for (const line of (sheet.grid && sheet.grid.lines) || []) {
+      g.append(el("line", {
+        x1: line.x1, y1: flip(line.y1), x2: line.x2, y2: flip(line.y2),
+        stroke: layer.colour, "stroke-width": 0.6, "stroke-dasharray": "6 4 1 4",
+      }));
+    }
+    return;
+  }
+
+  if (key === "grid_labels") {
+    for (const label of (sheet.grid && sheet.grid.labels) || []) {
+      g.append(el("circle", {
+        cx: label.x, cy: flip(label.y), r: 7,
+        fill: "none", stroke: layer.colour, "stroke-width": 0.6,
+      }));
+      g.append(el("text", {
+        x: label.x, y: flip(label.y) + 2.6, fill: layer.colour,
+        "font-size": 7, "text-anchor": "middle",
+      }, label.text));
+    }
+    return;
+  }
+
+  if (key === "room_tags") {
+    for (const tag of sheet.room_tags || []) {
+      if (tag.label) {
+        tag.lines.forEach((line, i) => {
+          g.append(el("text", {
+            x: tag.x, y: flip(tag.y) + i * 8, fill: layer.colour,
+            "font-size": 7, "font-weight": 600, "text-anchor": "middle",
+          }, line));
+        });
+      } else {
+        /* Text was converted to vector outlines on this layer, so only the
+           tag's footprint is known. Showing the box is honest; inventing a
+           label would not be. */
+        const [x0, y0, x1, y1] = tag.bbox;
+        g.append(el("rect", {
+          x: x0, y: flip(y1), width: x1 - x0, height: y1 - y0,
+          fill: "none", stroke: "#d9a441", "stroke-width": 0.5,
+          "stroke-dasharray": "2 2", opacity: 0.85,
+        }));
+      }
+    }
+    return;
+  }
+
+  if (key === "dimensions") {
+    for (const dim of sheet.dimensions || []) {
+      g.append(el("text", {
+        x: dim.x, y: flip(dim.y), fill: layer.colour,
+        "font-size": 5.5, "text-anchor": "middle",
+      }, dim.metres.toFixed(2) + "m"));
+    }
+    return;
+  }
+
+  /* Everything else is a bbox list: fixtures, columns, stairs, shafts,
+     elevators, windows, clear spaces. */
+  const filled = key === "fixtures" || key === "columns";
+  for (const item of sheet[key] || []) {
+    const [x0, y0, x1, y1] = item.bbox;
+    g.append(el("rect", {
+      x: x0, y: flip(y1),
+      width: Math.max(x1 - x0, 0.5), height: Math.max(y1 - y0, 0.5),
+      fill: filled ? layer.colour : "none",
+      "fill-opacity": filled ? 0.35 : 0,
+      stroke: layer.colour,
+      "stroke-width": 0.7,
+      "stroke-dasharray": key === "clear_spaces" ? "3 2" : null,
+    }));
+  }
+}
+
+/* --------------------------------------------------------------- controls */
+
+function countFor(key) {
+  const c = sheet.counts;
+  if (key === "grid") return c.grid_lines;
+  if (key === "grid_labels") return c.grid_labels;
+  return c[key] ?? 0;
+}
+
+function renderLayerControls() {
+  const host = document.getElementById("layers");
+  host.replaceChildren();
+
+  for (const layer of [...LAYERS].reverse()) {
+    const n = countFor(layer.key);
+    const group = document.getElementById(`layer-${layer.key}`);
+    const visible = layer.on && n > 0;
+    group.style.display = visible ? "" : "none";
+
+    const label = document.createElement("label");
+    label.className = "layer";
+    if (n === 0) label.title = "This sheet has nothing on this layer.";
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = visible;
+    box.disabled = n === 0;
+    box.addEventListener("change", () => {
+      group.style.display = box.checked ? "" : "none";
+    });
+
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = layer.colour;
+
+    const name = document.createElement("span");
+    name.className = "layer-name";
+    name.textContent = layer.label;
+    if (n === 0) name.style.color = "var(--muted)";
+
+    const count = document.createElement("span");
+    count.className = "count";
+    count.textContent = n.toLocaleString();
+
+    label.append(box, swatch, name, count);
+    host.append(label);
+  }
+  document.getElementById("layers-section").hidden = false;
+}
+
+/* ------------------------------------------------------------- pan / zoom */
+
+function applyView() {
+  scene.setAttribute("transform", `translate(${view.tx} ${view.ty}) scale(${view.k})`);
+  document.getElementById("zoom").textContent = view.k.toFixed(2) + "x";
+}
+
+function resetView() {
+  view.k = 1; view.tx = 0; view.ty = 0;
+  applyView();
+}
+
+/* Pointer position in viewBox units, so zoom holds the point under the cursor. */
+function toViewBox(event) {
+  const rect = stage.getBoundingClientRect();
+  const vb = stage.viewBox.baseVal;
+  const scale = Math.min(rect.width / vb.width, rect.height / vb.height);
+  const offsetX = (rect.width - vb.width * scale) / 2;
+  const offsetY = (rect.height - vb.height * scale) / 2;
+  return {
+    x: (event.clientX - rect.left - offsetX) / scale,
+    y: (event.clientY - rect.top - offsetY) / scale,
+  };
+}
+
+stage.addEventListener("wheel", (event) => {
+  if (!sheet) return;
+  event.preventDefault();
+  const p = toViewBox(event);
+  const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const k = Math.min(400, Math.max(0.2, view.k * factor));
+  const ratio = k / view.k;
+  view.tx = p.x - (p.x - view.tx) * ratio;
+  view.ty = p.y - (p.y - view.ty) * ratio;
+  view.k = k;
+  applyView();
+}, { passive: false });
+
+let drag = null;
+stage.addEventListener("pointerdown", (event) => {
+  if (!sheet) return;
+  stage.setPointerCapture(event.pointerId);
+  stage.classList.add("dragging");
+  const p = toViewBox(event);
+  drag = { x: p.x, y: p.y, tx: view.tx, ty: view.ty };
+});
+stage.addEventListener("pointermove", (event) => {
+  if (!drag) return;
+  const p = toViewBox(event);
+  view.tx = drag.tx + (p.x - drag.x);
+  view.ty = drag.ty + (p.y - drag.y);
+  applyView();
+});
+for (const type of ["pointerup", "pointercancel", "pointerleave"]) {
+  stage.addEventListener(type, () => {
+    drag = null;
+    stage.classList.remove("dragging");
+  });
+}
+
+document.getElementById("reset").addEventListener("click", resetView);
+
+/* ------------------------------------------------------------------ input */
+
+const fileInput = document.getElementById("file");
+document.getElementById("pick").addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  if (fileInput.files[0]) readFile(fileInput.files[0]);
+});
+
+function readFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      load(JSON.parse(reader.result));
+    } catch (err) {
+      alert("Could not parse that file as a sheet JSON.\n\n" + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
+});
+
+/* ?sheet=../sheets/A.801.json works when the folder is served over http. */
+const requested = new URLSearchParams(location.search).get("sheet");
+if (requested) {
+  fetch(requested)
+    .then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    })
+    .then(load)
+    .catch((err) => {
+      document.querySelector(".drop-inner").insertAdjacentHTML(
+        "beforeend",
+        `<div class="note warn">Could not load ${requested}: ${err.message}</div>`,
+      );
+    });
+}
+</script>
+</body>
+</html>

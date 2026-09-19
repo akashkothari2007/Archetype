@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Client drawings are real material under a Marriott brand license.
+# The drawings are real client material under a Marriott brand license.
 # Nothing resembling a drawing set may ever be committed.
 # ---------------------------------------------------------------------------
 *.pdf
@@ -7,8 +7,11 @@
 *.dwg
 *.rvt
 *.xlsx
-apps/api/var/
-data/
+
+# Generated artifacts
+sheets/
+renders/
+project.json
 
 # Python
 __pycache__/
@@ -20,18 +23,7 @@ venv/
 .mypy_cache/
 *.egg-info/
 
-# Node
-node_modules/
-dist/
-.vite/
-*.tsbuildinfo
-
-# Env
-.env
-.env.*
-!.env.example
-
-# Editors / OS
+# OS / editors
 .DS_Store
 .idea/
 .vscode/
