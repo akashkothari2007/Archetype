@@ -57,7 +57,7 @@ class FileProjectRepository:
         directory=self.path(pid)/'revisions'/str(rev);directory.mkdir(parents=True,exist_ok=False)
         atomic_json(directory/'model.json',snapshot)
         atomic_json(directory/'rules.json',{'rules':snapshot.get('rules',[])})
-        atomic_json(directory/'mismatches.json',{'checks':snapshot.get('checks',[]),'coverage':snapshot.get('coverage') or {}})
+        atomic_json(directory/'mismatches.json',{'checks':snapshot.get('checks',[]),'coverage':snapshot.get('coverage') or {},'quarantined':snapshot.get('quarantined') or []})
     def create(self,name,building:Building,rules=None,brief:DesignBrief|None=None,source='generated',project_id=None,source_files=None,sheets=None,import_meta=None):
         pid=project_id or 'pc-'+uuid.uuid4().hex[:12];directory=self.path(pid);directory.mkdir(parents=True,exist_ok=True)
         if (directory/'project.json').exists():raise ValueError('Project already exists')

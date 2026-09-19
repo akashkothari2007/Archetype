@@ -248,8 +248,8 @@ def attach_openings(building:Building,geom:SheetGeometry,point,source:Source,bbo
             hit=snap_window(xy)
             if not hit:continue
             _dist,wall,_a,_c,offset,length=hit
-            width=min(max(width,0.5),length-0.02)
-            if width<=0.2:continue
+            width=min(width,length-0.02)
+            if width<1.0 or width>DOOR_MAX_FT:continue
         start=max(0.0,min(length-width,offset-width/2))
         interval=occupied.setdefault(wall.id,[])
         if any(min(start+width,other[1])-max(start,other[0])>1e-5 for other in interval):continue

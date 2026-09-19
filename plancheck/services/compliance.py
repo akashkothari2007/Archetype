@@ -582,4 +582,5 @@ def evaluate_building(building: Building, rules: list[Any]) -> dict[str, Any]:
 
 
 def check_building(building: Building, rules: list[dict]) -> list[dict[str, Any]]:
+    """Run checks. The split lives on evaluate_building: violations / passes / quarantined."""
     return evaluate_building(building, rules)["checks"]

@@ -1,16 +1,158 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Stage, Layer, Group, Line, Rect, Circle, Text, Shape } from 'react-konva'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Stage, Layer, Group, Line, Rect, Circle, Text, Shape, Image as KonvaImage } from 'react-konva'
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
 import { MousePointer2, Hand, Ruler, Plus, Minus, Maximize, PencilLine, Scissors, Link, Copy, Trash2, LockKeyhole, RotateCw, Magnet, X } from 'lucide-react'
 import { assetMime, distance, floorBounds, interiorPoint, lengthLabel, placementCommand, polygonArea, projectPoint, type Asset, type EditorProps, type Point } from './editor-geometry'
+import { base } from '../api'
+import type { Check, Floor, SheetCard } from '../types'
 import './editor-view.css'
 
 type Tool = 'select' | 'pan' | 'wall' | 'measure'
-export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, units, busy }: EditorProps) {
+type LayerStop = 0 | 1 | 2 | 3 | 4 | 5
+type CheckHit = Check & { type_ref?: string; instances_affected?: number; affected_space_ids?: string[] }
+type SheetGeom = {
+  walls?: { a: number[]; b: number[]; cls?: string }[]
+  doors?: unknown[]
+  windows?: unknown[]
+  fixtures?: { xy: number[] }[]
+  size_pt?: number[]
+  scale_pts_per_ft?: number
+  excluded?: { furniture?: number }
+  extraction_stats?: { furniture?: number }
+}
+type FloorPlanProps = EditorProps & {
+  checks?: CheckHit[]
+  sheets?: SheetCard[]
+  projectId?: string
+  onFloor?: (id: string) => void
+  checkPulse?: number
+}
+
+const LAYER_STOPS: { id: LayerStop; label: string }[] = [
+  { id: 0, label: 'Structure' },
+  { id: 1, label: 'Partitions' },
+  { id: 2, label: 'Doors & Windows' },
+  { id: 3, label: 'Fixtures' },
+  { id: 4, label: 'Furniture' },
+  { id: 5, label: 'All' },
+]
+const revealedSheets = new Set<string>()
+const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+
+function loadRaster(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new window.Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('raster'))
+    image.src = url
+  })
+}
+
+function roomIdsFor(check: CheckHit) {
+  const ids = [...(check.affected_space_ids || []), ...(check.entity_ids || []), check.entity_id]
+  return ids.filter(Boolean)
+}
+
+function chipName(floor: Floor, index: number) {
+  const digits = floor.name.match(/\d+/)
+  if (digits) return `L${digits[0]}`
+  if (/ground/i.test(floor.name)) return 'G'
+  return floor.name.length <= 4 ? floor.name : `L${index + 1}`
+}
+
+function stagger(dist: number, maxDist: number, start: number, end: number, duration: number) {
+  const window = Math.max(0.05, end - start - duration)
+  return start + (maxDist ? dist / maxDist : 0) * window
+}
+
+type PlotterSeg = { key: string; d: string; len: number; delay: number; duration: number; width: number; color: string; kind: string }
+
+const PlotterOverlay = memo(function PlotterOverlay({
+  segs, labels, fixtures, rooms, view, size, skip,
+}: {
+  segs: PlotterSeg[]
+  labels: { key: string; x: number; y: number; name: string; area: string }[]
+  fixtures: { key: string; x: number; y: number }[]
+  rooms: { key: string; points: string }[]
+  view: { x: number; y: number; scale: number }
+  size: { width: number; height: number }
+  skip: boolean
+}) {
+  return (
+    <svg className={'plotter-overlay' + (skip ? ' plotter-skip' : '')} width={size.width} height={size.height} aria-hidden>
+      <g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>
+        {rooms.map(room => <polygon key={room.key} points={room.points} fill="#fff" opacity={0.86} />)}
+        {segs.map(seg => (
+          <path
+            key={seg.key}
+            className={`plotter-${seg.kind}`}
+            d={seg.d}
+            stroke={seg.color}
+            strokeWidth={seg.width}
+            style={{ strokeDasharray: seg.len, strokeDashoffset: skip ? 0 : seg.len, animationDuration: `${seg.duration}s`, animationDelay: `${seg.delay}s` }}
+          />
+        ))}
+        <g className="plotter-fixtures">
+          {fixtures.map(item => <circle key={item.key} cx={item.x} cy={item.y} r={0.12} fill="#6d7174" />)}
+        </g>
+        <g className="plotter-labels">
+          {labels.map(label => (
+            <text key={label.key} x={label.x} y={label.y} textAnchor="middle" fontSize={0.62} fill="#33383e" fontFamily="Inter, -apple-system, sans-serif">{label.name}<tspan x={label.x} dy={0.85} fontSize={0.42} fill="#898e95">{label.area}</tspan></text>
+          ))}
+        </g>
+      </g>
+    </svg>
+  )
+})
+
+const FixtureDots = memo(function FixtureDots({ fixtures }: { fixtures: { key: string; x: number; y: number }[] }) {
+  return <>{fixtures.map(item => <circle key={item.key} cx={item.x} cy={item.y} r={0.11} fill="#6d7174" opacity={0.85} />)}</>
+})
+
+const PlanFx = memo(function PlanFx({
+  view, size, floorId, hatch, pings, flash, fixtures, showFixtures, pinging, flashing,
+}: {
+  view: { x: number; y: number; scale: number }
+  size: { width: number; height: number }
+  floorId: string
+  hatch: { id: string; points: string }[]
+  pings: { id: string; x: number; y: number; delay: number }[]
+  flash: { id: string; points: string }[]
+  fixtures: { key: string; x: number; y: number }[]
+  showFixtures: boolean
+  pinging: boolean
+  flashing: boolean
+}) {
+  return (
+    <svg className="plan-fx" width={size.width} height={size.height} aria-hidden>
+      <defs>
+        <pattern id={`quarantine-hatch-${floorId}`} patternUnits="userSpaceOnUse" width="0.65" height="0.65" patternTransform="rotate(38)">
+          <line x1="0" y1="0" x2="0" y2="0.65" stroke="#b7b0a6" strokeWidth="0.08" />
+        </pattern>
+      </defs>
+      <g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>
+        {hatch.map(room => (
+          <polygon key={room.id} className="quarantine-fill" points={room.points} fill={`url(#quarantine-hatch-${floorId})`} stroke="#b7b0a6" strokeWidth={0.06} strokeDasharray="0.35 0.28" />
+        ))}
+        {flashing && flash.map(room => <polygon key={room.id} className="blast-fill" points={room.points} />)}
+        {pinging && pings.map(ping => (
+          <circle key={ping.id} className="sonar-ring" cx={ping.x} cy={ping.y} r={9} style={{ animationDelay: `${ping.delay}ms` }} />
+        ))}
+        {showFixtures && <FixtureDots fixtures={fixtures} />}
+      </g>
+    </svg>
+  )
+})
+
+export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, units, busy, checks = [], sheets, projectId, onFloor, checkPulse = 0 }: FloorPlanProps) {
   const host = useRef<HTMLDivElement>(null)
   const stage = useRef<Konva.Stage>(null)
   const wallDrag = useRef<{ pointer: Point; a: Point; b: Point } | null>(null)
+  const interacting = useRef(false)
+  const interactTimer = useRef(0)
+  const lastCheckSig = useRef('')
   const [size, setSize] = useState({ width: 800, height: 600 })
   const [view, setView] = useState({ x: 100, y: 100, scale: 15 })
   const [tool, setTool] = useState<Tool>('select')
@@ -26,20 +168,41 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const [reason, setReason] = useState('')
   const [structural, setStructural] = useState<'nonstructural' | 'loadbearing' | 'unknown'>('nonstructural')
   const [matching, setMatching] = useState(false)
+  const [layerStop, setLayerStop] = useState<LayerStop>(5)
+  const [revealing, setRevealing] = useState(false)
+  const [sheetGeom, setSheetGeom] = useState<SheetGeom | null>(null)
+  const [raster, setRaster] = useState<HTMLImageElement | null>(null)
+  const [sonarKey, setSonarKey] = useState('')
+  const [sonarSettled, setSonarSettled] = useState(true)
+  const [blastAt, setBlastAt] = useState(0)
+  const [shownCount, setShownCount] = useState(0)
+  const sheet = useMemo(() => (sheets || []).find(s => s.extracted && s.floor_ids?.includes(floorId)) || (sheets || []).find(s => s.extracted), [sheets, floorId])
+  const revealKey = sheet?.sheet_id || floorId
   const baseVertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
   const vertexAt = useCallback((id: string) => {
     const v = baseVertices.get(id); if (!v) return undefined
     const p = preview[id]; return p ? { ...v, ...p } : v
   }, [baseVertices, preview])
-  const walls = building.walls.filter(w => w.floor_id === floorId)
+  const floorWalls = building.walls.filter(w => w.floor_id === floorId)
   const rooms = building.rooms.filter(r => r.floor_id === floorId)
-  const objects = building.objects.filter(o => o.floor_id === floorId)
+  const floorObjects = building.objects.filter(o => o.floor_id === floorId)
+  const walls = floorWalls.filter(w => w.structural === 'loadbearing' || layerStop >= 1)
+  const openingsVisible = layerStop >= 2
+  const fixturesVisible = layerStop >= 3
+  const furnitureVisible = layerStop >= 4
+  const objects = floorObjects.filter(o => {
+    const fixture = o.kind === 'fixture' || ['toilet', 'sink', 'bath', 'shower', 'closet', 'counter'].includes(o.asset_id)
+    return fixture ? fixturesVisible : furnitureVisible
+  })
   const bounds = useMemo(() => floorBounds(building, floorId), [building, floorId])
-  const selectedWall = walls.find(w => w.id === selectedId)
+  const selectedWall = floorWalls.find(w => w.id === selectedId)
   const selectedOpening = building.openings.find(o => o.id === selectedId)
-  const selectedObject = objects.find(o => o.id === selectedId)
+  const selectedObject = floorObjects.find(o => o.id === selectedId)
   const selectedRoom = rooms.find(r => r.id === selectedId)
   const matchingRooms = selectedRoom?.type_ref ? building.rooms.filter(r => r.type_ref === selectedRoom.type_ref) : []
+  const scale = sheet?.scale_pts_per_ft || sheetGeom?.scale_pts_per_ft || 1
+  const sizePt = sheet?.size_pt || sheetGeom?.size_pt || [0, 0]
+  const world = { width: sizePt[0] / scale, height: sizePt[1] / scale }
   useEffect(() => { if (selectedId && !selection.includes(selectedId)) setSelection([selectedId]); if (!selectedId) setSelection([]) }, [selectedId])
   useEffect(() => { setPreview({}) }, [building])
   useEffect(() => {
@@ -49,8 +212,8 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     return () => observer.disconnect()
   }, [])
   const fit = () => {
-    const scale = Math.max(.02, Math.min((size.width - 160) / bounds.width, (size.height - 160) / bounds.height, 45))
-    setView({ scale, x: size.width / 2 - bounds.cx * scale, y: size.height / 2 - bounds.cy * scale })
+    const scaleFit = Math.max(.02, Math.min((size.width - 160) / bounds.width, (size.height - 160) / bounds.height, 45))
+    setView({ scale: scaleFit, x: size.width / 2 - bounds.cx * scaleFit, y: size.height / 2 - bounds.cy * scaleFit })
   }
   const lastFloor = useRef('')
   useEffect(() => { if (size.width > 100 && size.height > 100 && lastFloor.current !== floorId) { fit(); lastFloor.current = floorId } }, [floorId, size, bounds])
@@ -69,6 +232,171 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
   }, [selection, onCommand])
+  useEffect(() => {
+    if (!sheet?.geometry_url || !projectId) { setSheetGeom(null); setRaster(null); return }
+    let live = true
+    fetch(`${base}/projects/${projectId}/files/${sheet.geometry_url}`).then(r => r.json()).then((data: SheetGeom) => { if (live) setSheetGeom(data) }).catch(() => { if (live) setSheetGeom(null) })
+    if (sheet.raster_url) loadRaster(`${base}/projects/${projectId}/files/${sheet.raster_url}`).then(img => { if (live) setRaster(img) }).catch(() => { if (live) setRaster(null) })
+    else setRaster(null)
+    return () => { live = false }
+  }, [sheet?.sheet_id, sheet?.geometry_url, sheet?.raster_url, projectId])
+  useEffect(() => {
+    if (!floorWalls.length) { setRevealing(false); return }
+    if (reducedMotion() || revealedSheets.has(revealKey)) { revealedSheets.add(revealKey); setRevealing(false); return }
+    setRevealing(true)
+    const done = window.setTimeout(() => { revealedSheets.add(revealKey); setRevealing(false) }, 2400)
+    return () => window.clearTimeout(done)
+  }, [revealKey, floorWalls.length])
+  useEffect(() => {
+    if (!revealing || !import.meta.env.DEV) return
+    let frames = 0, last = performance.now(), min = 120
+    let raf = 0
+    const tick = (now: number) => {
+      frames++
+      if (now - last >= 400) { min = Math.min(min, (frames * 1000) / (now - last)); frames = 0; last = now }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => { cancelAnimationFrame(raf); console.debug(`[plotter] ${revealKey} min ~${min.toFixed(0)} fps`) }
+  }, [revealing, revealKey])
+  const failChecks = useMemo(() => (checks || []).filter(c => c.status === 'fail'), [checks])
+  const quarantineChecks = useMemo(() => (checks || []).filter(c => c.status === 'quarantined'), [checks])
+  const failRoomIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const check of failChecks) {
+      for (const id of roomIdsFor(check)) ids.add(id)
+      if (check.type_ref) for (const room of rooms) if (room.type_ref === check.type_ref) ids.add(room.id)
+    }
+    return ids
+  }, [failChecks, rooms])
+  const quarantineIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const check of quarantineChecks) for (const id of roomIdsFor(check)) ids.add(id)
+    for (const room of rooms) if (room.reliability === 'suspect') ids.add(room.id)
+    return ids
+  }, [quarantineChecks, rooms])
+  useEffect(() => {
+    const sig = failChecks.map(c => c.id).sort().join(',')
+    if (sig === lastCheckSig.current) return
+    lastCheckSig.current = sig
+    if (!sig || reducedMotion() || interacting.current) { setSonarKey(''); setSonarSettled(true); return }
+    setSonarKey(sig)
+    setSonarSettled(false)
+  }, [failChecks])
+  const pingRooms = useMemo(() => {
+    if (!sonarKey) return []
+    const seen = new Set<string>()
+    const ordered: { id: string; x: number; y: number; delay: number }[] = []
+    const ranked = [...failChecks].sort((a, b) => (b.instances_affected || 0) - (a.instances_affected || 0))
+    for (const check of ranked) {
+      const typed = check.type_ref ? rooms.filter(r => r.type_ref === check.type_ref) : []
+      const group = typed.length ? typed : rooms.filter(r => roomIdsFor(check).includes(r.id))
+      for (const room of group) {
+        if (seen.has(room.id) || quarantineIds.has(room.id)) continue
+        seen.add(room.id)
+        const c = interiorPoint(room.polygon)
+        ordered.push({ id: room.id, x: c.x, y: c.y, delay: ordered.length * 60 })
+      }
+    }
+    return ordered
+  }, [rooms, quarantineIds, failChecks, sonarKey])
+  useEffect(() => {
+    if (!sonarKey || !pingRooms.length) { setSonarSettled(true); return }
+    const wait = (pingRooms.length - 1) * 60 + 900
+    const t = window.setTimeout(() => setSonarSettled(true), wait)
+    return () => window.clearTimeout(t)
+  }, [sonarKey, pingRooms.length])
+  const activeCheck = useMemo(() => {
+    if (!selectedId) return undefined
+    return failChecks.find(c => c.entity_id === selectedId || (c.entity_ids || []).includes(selectedId) || (c.affected_space_ids || []).includes(selectedId))
+      || quarantineChecks.find(c => c.entity_id === selectedId || (c.entity_ids || []).includes(selectedId))
+  }, [failChecks, quarantineChecks, selectedId])
+  const blastCheck = activeCheck?.status === 'fail' ? activeCheck : undefined
+  const blastRooms = useMemo(() => {
+    if (!blastCheck) return []
+    const typeRef = blastCheck.type_ref
+    if (typeRef) return building.rooms.filter(r => r.type_ref === typeRef)
+    const ids = new Set(roomIdsFor(blastCheck))
+    return building.rooms.filter(r => ids.has(r.id))
+  }, [blastCheck, building.rooms])
+  const blastHere = blastRooms.filter(r => r.floor_id === floorId)
+  const blastCount = blastCheck?.instances_affected || blastRooms.length
+  useEffect(() => {
+    if (!checkPulse || !blastCheck) return
+    setBlastAt(checkPulse)
+  }, [checkPulse, blastCheck])
+  useEffect(() => {
+    if (!blastAt || !blastCount) { setShownCount(0); return }
+    if (reducedMotion()) { setShownCount(blastCount); return }
+    let n = 0
+    const step = Math.max(1, Math.ceil(blastCount / 16))
+    const id = window.setInterval(() => {
+      n = Math.min(blastCount, n + step)
+      setShownCount(n)
+      if (n >= blastCount) window.clearInterval(id)
+    }, 28)
+    return () => window.clearInterval(id)
+  }, [blastAt, blastCount])
+  const otherFloors = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const room of blastRooms) if (room.floor_id !== floorId) counts.set(room.floor_id, (counts.get(room.floor_id) || 0) + 1)
+    return building.floors.map((floor, i) => ({ floor, i, count: counts.get(floor.id) || 0 })).filter(item => item.count)
+  }, [blastRooms, building.floors, floorId])
+  const plotter = useMemo(() => {
+    const cx = bounds.cx, cy = bounds.cy
+    const wallsRaw: (PlotterSeg & { dist: number })[] = []
+    for (const wall of floorWalls) {
+      const a = baseVertices.get(wall.start_id), b = baseVertices.get(wall.end_id)
+      if (!a || !b) continue
+      const len = Math.hypot(b.x - a.x, b.y - a.y)
+      wallsRaw.push({ key: wall.id, kind: 'wall', d: `M${a.x} ${a.y}L${b.x} ${b.y}`, len, width: wall.thickness_ft, color: '#242628', delay: 0, duration: 0.45, dist: Math.hypot((a.x + b.x) / 2 - cx, (a.y + b.y) / 2 - cy) })
+    }
+    const openingsRaw: (PlotterSeg & { dist: number })[] = []
+    for (const opening of building.openings) {
+      const wall = floorWalls.find(w => w.id === opening.wall_id)
+      const a = wall && baseVertices.get(wall.start_id), b = wall && baseVertices.get(wall.end_id)
+      if (!wall || !a || !b) continue
+      const angle = Math.atan2(b.y - a.y, b.x - a.x)
+      const x1 = a.x + Math.cos(angle) * opening.offset_ft, y1 = a.y + Math.sin(angle) * opening.offset_ft
+      const x2 = x1 + Math.cos(angle) * opening.width_ft, y2 = y1 + Math.sin(angle) * opening.width_ft
+      const len = opening.width_ft || Math.hypot(x2 - x1, y2 - y1)
+      openingsRaw.push({ key: opening.id, kind: opening.kind, d: `M${x1} ${y1}L${x2} ${y2}`, len, width: Math.max(wall.thickness_ft * 0.35, 0.08), color: '#282c31', delay: 0, duration: 0.28, dist: Math.hypot((x1 + x2) / 2 - cx, (y1 + y2) / 2 - cy) })
+    }
+    const maxWall = Math.max(0.001, ...wallsRaw.map(s => s.dist))
+    const segs: PlotterSeg[] = wallsRaw.map(s => ({ ...s, delay: stagger(s.dist, maxWall, 0, 1.2, 0.45), duration: 0.45 }))
+    const maxOpen = Math.max(0.001, ...openingsRaw.map(s => s.dist), 0.001)
+    for (const s of openingsRaw) {
+      const door = s.kind === 'door'
+      segs.push({ ...s, delay: stagger(s.dist, maxOpen, door ? 1.0 : 1.2, door ? 1.6 : 1.7, 0.28), duration: 0.28 })
+    }
+    const labels = rooms.map(room => {
+      const c = interiorPoint(room.polygon)
+      const area = `${(polygonArea(room.polygon) * (units === 'metric' ? .092903 : 1)).toFixed(1)} ${units === 'metric' ? 'm²' : 'sq ft'}`
+      return { key: room.id, x: c.x, y: c.y, name: room.name.toUpperCase() + ((room.instance_count || 0) > 1 ? `  ×${room.instance_count}` : ''), area }
+    })
+    const roomPolys = rooms.map(room => ({ key: room.id, points: room.polygon.map(p => p.join(',')).join(' ') }))
+    return { segs, labels, roomPolys }
+  }, [floorWalls, building.openings, rooms, baseVertices, bounds.cx, bounds.cy, units])
+  const sheetFixtures = useMemo(() => (sheetGeom?.fixtures || []).map((item, i) => ({ key: `fx${i}`, x: item.xy[0] / scale, y: item.xy[1] / scale })), [sheetGeom, scale])
+  const layerCounts = useMemo(() => {
+    const structure = (sheetGeom?.walls || []).filter(w => w.cls === 'loadbearing').length || floorWalls.filter(w => w.structural === 'loadbearing').length
+    const partitions = (sheetGeom?.walls || []).filter(w => w.cls !== 'loadbearing').length || floorWalls.filter(w => w.structural !== 'loadbearing').length
+    const openings = (sheetGeom?.doors?.length || 0) + (sheetGeom?.windows?.length || 0) || building.openings.filter(o => floorWalls.some(w => w.id === o.wall_id)).length
+    const fixtureN = (sheetGeom?.fixtures?.length || 0) + floorObjects.filter(o => o.kind === 'fixture').length
+    const furnitureN = sheetGeom?.excluded?.furniture || sheetGeom?.extraction_stats?.furniture || floorObjects.filter(o => o.kind !== 'fixture').length
+    const all = structure + partitions + openings + fixtureN + furnitureN
+    return [structure, partitions, openings, fixtureN, furnitureN, all]
+  }, [sheetGeom, floorWalls, building.openings, floorObjects])
+  function markInteract() {
+    interacting.current = true
+    host.current?.classList.add('is-interacting')
+    if (revealing) { revealedSheets.add(revealKey); setRevealing(false) }
+    window.clearTimeout(interactTimer.current)
+    interactTimer.current = window.setTimeout(() => {
+      interacting.current = false
+      host.current?.classList.remove('is-interacting')
+    }, 200)
+  }
   function rawPoint() {
     const p = stage.current?.getPointerPosition()
     return p ? { x: (p.x - view.x) / view.scale, y: (p.y - view.y) / view.scale } : { x: 0, y: 0 }
@@ -89,7 +417,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     const step = units === 'metric' ? .1 / .3048 : .25
     let q = { x: Math.round(p.x / step) * step, y: Math.round(p.y / step) * step }
     if (anchor) { if (Math.abs(q.x - anchor.x) < threshold) q.x = anchor.x; if (Math.abs(q.y - anchor.y) < threshold) q.y = anchor.y }
-    for (const wall of walls) {
+    for (const wall of floorWalls) {
       const a = vertexAt(wall.start_id), b = vertexAt(wall.end_id)
       if (!a || !b || wall.start_id === exclude || wall.end_id === exclude) continue
       const projection = projectPoint(q, a, b)
@@ -126,8 +454,9 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     setMarquee(null)
   }
   function zoom(factor: number, anchor = { x: size.width / 2, y: size.height / 2 }) {
-    const scale = Math.max(.02, Math.min(120, view.scale * factor))
-    setView({ scale, x: anchor.x - (anchor.x - view.x) * scale / view.scale, y: anchor.y - (anchor.y - view.y) * scale / view.scale })
+    markInteract()
+    const next = Math.max(.02, Math.min(120, view.scale * factor))
+    setView({ scale: next, x: anchor.x - (anchor.x - view.x) * next / view.scale, y: anchor.y - (anchor.y - view.y) * next / view.scale })
   }
   function rotate(angle: number) {
     const points = selection.flatMap(id => { const w = walls.find(w => w.id === id); return w ? [vertexAt(w.start_id), vertexAt(w.end_id)].filter(Boolean) as Point[] : objects.filter(o => o.id === id) })
@@ -144,6 +473,11 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const magnitude = 10 ** Math.floor(Math.log10(approximate))
   const scaleDistance = [1, 2, 5, 10].map(v => v * magnitude).find(v => v >= approximate) || 10 * magnitude
   const stroke = 1 / view.scale
+  const showModel = !revealing
+  const currentStop = LAYER_STOPS[layerStop]
+  const currentCount = layerCounts[layerStop] || 0
+  const hatch = rooms.filter(r => quarantineIds.has(r.id)).map(r => ({ id: r.id, points: r.polygon.map(p => p.join(',')).join(' ') }))
+  const flash = blastHere.map(r => ({ id: r.id, points: r.polygon.map(p => p.join(',')).join(' ') }))
   return <div ref={host} tabIndex={0} className={`editor-floorplan tool-${tool}`} aria-label="2D floor plan editor" onDragOver={e => e.preventDefault()} onDrop={e => {
     e.preventDefault()
     const data = e.dataTransfer.getData(assetMime)
@@ -154,6 +488,17 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
       {[['select', MousePointer2, 'Select · V'], ['pan', Hand, 'Pan · H'], ['wall', PencilLine, 'Draw wall · W'], ['measure', Ruler, 'Measure · M']].map(([id, Icon, title]) => { const I = Icon as typeof MousePointer2; return <button key={id as string} className={tool === id ? 'active' : ''} title={title as string} aria-label={title as string} onClick={() => { setTool(id as Tool); setStart(null) }}><I size={17} /></button> })}
       <span className="editor-tool-divider" /><button className={snap ? 'active' : ''} title="Snap to grid and geometry" aria-label="Toggle snapping" aria-pressed={snap} onClick={() => setSnap(!snap)}><Magnet size={17} /></button>
     </div>
+    <div className="xray-scrubber" onPointerDown={markInteract}>
+      <div className="xray-head">
+        <span>{currentStop.label} · {currentCount.toLocaleString()} segments</span>
+      </div>
+      <input type="range" min={0} max={5} step={1} value={layerStop} aria-label="Layer x-ray" onChange={e => setLayerStop(Number(e.target.value) as LayerStop)} />
+      <div className="xray-stops">
+        {LAYER_STOPS.map(stop => (
+          <button key={stop.id} type="button" className={layerStop === stop.id ? 'active' : layerStop > stop.id ? 'passed' : ''} onClick={() => setLayerStop(stop.id)}>{stop.label}</button>
+        ))}
+      </div>
+    </div>
     {selection.length > 0 && <div className="editor-selection-tools" role="toolbar" aria-label="Selection tools">
       <span>{selection.length > 1 ? `${selection.length} selected` : selectedWall ? 'Wall' : selectedOpening?.kind || selectedObject?.asset_id.replaceAll('_', ' ') || selectedRoom?.name || 'Selection'}</span>
       {(selectedWall || selectedObject) && <><button title="Rotate 15°" aria-label="Rotate selection 15 degrees" onClick={() => rotate(15)}><RotateCw size={14} /></button><button title="Duplicate" aria-label="Duplicate selection" onClick={() => onCommand(selection.map(id => ({ kind: 'duplicate', target_id: id, params: { dx: 2, dy: 2 } })))}><Copy size={14} /></button></>}
@@ -161,37 +506,43 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
       {!selectedRoom && <button title="Delete" aria-label="Delete selection" onClick={() => onCommand(selection.map(id => ({ kind: 'delete', target_id: id, params: {} })))}><Trash2 size={14} /></button>}
       <button aria-label="Clear selection" onClick={() => onSelect(null)}><X size={13} /></button>
     </div>}
-    <Stage ref={stage} width={size.width} height={size.height} x={view.x} y={view.y} scaleX={view.scale} scaleY={view.scale} draggable={tool === 'pan'} onDragEnd={e => { if (e.target === stage.current) setView(v => ({ ...v, x: e.target.x(), y: e.target.y() })) }} onMouseDown={pointerDown} onTouchStart={pointerDown} onMouseMove={() => setCursor(snapped(rawPoint(), start))} onTouchMove={() => setCursor(snapped(rawPoint(), start))} onMouseUp={pointerUp} onTouchEnd={pointerUp} onWheel={e => { e.evt.preventDefault(); const p = stage.current?.getPointerPosition(); if (e.evt.ctrlKey || e.evt.metaKey) zoom(Math.exp(-e.evt.deltaY * .01), p || undefined); else setView(v => ({ ...v, x: v.x - e.evt.deltaX, y: v.y - e.evt.deltaY })) }}>
+    <Stage ref={stage} width={size.width} height={size.height} x={view.x} y={view.y} scaleX={view.scale} scaleY={view.scale} draggable={tool === 'pan'} onDragStart={e => { if (e.target === stage.current) markInteract() }} onDragEnd={e => { if (e.target === stage.current) setView(v => ({ ...v, x: e.target.x(), y: e.target.y() })) }} onMouseDown={pointerDown} onTouchStart={pointerDown} onMouseMove={() => { if (!revealing) setCursor(snapped(rawPoint(), start)) }} onTouchMove={() => { if (!revealing) setCursor(snapped(rawPoint(), start)) }} onMouseUp={pointerUp} onTouchEnd={pointerUp} onWheel={e => { e.evt.preventDefault(); markInteract(); const p = stage.current?.getPointerPosition(); if (e.evt.ctrlKey || e.evt.metaKey) zoom(Math.exp(-e.evt.deltaY * .01), p || undefined); else setView(v => ({ ...v, x: v.x - e.evt.deltaX, y: v.y - e.evt.deltaY })) }}>
       <Layer listening={false}>
         {gridX.map(x => <Line key={`x${x}`} points={[x, gy0, x, gy1]} stroke={Math.round(x / gridStep) % 5 ? '#eff0f1' : '#e6e8ea'} strokeWidth={stroke} />)}
         {gridY.map(y => <Line key={`y${y}`} points={[gx0, y, gx1, y]} stroke={Math.round(y / gridStep) % 5 ? '#eff0f1' : '#e6e8ea'} strokeWidth={stroke} />)}
       </Layer>
-      <Layer>
-        {rooms.map(room => <Group key={room.id} onClick={e => select(room.id, e)} onTap={e => select(room.id, e)}>
-          <Line points={room.polygon.flat()} closed fill={selectedId === room.id ? '#eaf2fa' : '#ffffff'} opacity={.86} stroke={room.needs_review ? '#d3ad6a' : undefined} dash={room.needs_review ? [4 * stroke, 4 * stroke] : undefined} strokeWidth={stroke} listening={tool === 'select'} perfectDrawEnabled={false} shadowForStrokeEnabled={false} />
-        </Group>)}
+      <Layer visible={showModel}>
+        {rooms.map(room => {
+          const chosen = selectedId === room.id
+          const quarantined = quarantineIds.has(room.id)
+          const violating = sonarSettled && failRoomIds.has(room.id) && !quarantined
+          return <Group key={room.id} onClick={e => select(room.id, e)} onTap={e => select(room.id, e)}>
+            <Line points={room.polygon.flat()} closed fill={chosen ? '#eaf2fa' : quarantined ? '#f3f1ed' : violating ? '#f6ebe8' : '#ffffff'} opacity={furnitureVisible ? (quarantined ? .45 : .55) : quarantined ? .7 : .86} stroke={quarantined ? '#b7b0a6' : room.needs_review ? '#d3ad6a' : undefined} dash={quarantined || room.needs_review ? [4 * stroke, 4 * stroke] : undefined} strokeWidth={stroke} listening={tool === 'select'} perfectDrawEnabled={false} shadowForStrokeEnabled={false} />
+          </Group>
+        })}
+        {furnitureVisible && raster && world.width > 0 && <KonvaImage image={raster} x={0} y={world.height} width={world.width} height={world.height} scaleY={-1} opacity={layerStop === 5 ? 0.22 : 0.38} listening={false} />}
         {walls.map(wall => {
           const a = vertexAt(wall.start_id), b = vertexAt(wall.end_id)
           if (!a || !b) return null
           const chosen = selection.includes(wall.id)
           return <Group key={wall.id}>
             {chosen && <Line points={[a.x, a.y, b.x, b.y]} stroke="#a7cef8" strokeWidth={wall.thickness_ft + 7 * stroke} listening={false} perfectDrawEnabled={false} shadowForStrokeEnabled={false} />}
-            <Line points={[a.x, a.y, b.x, b.y]} stroke={chosen ? '#234c76' : '#242628'} strokeWidth={wall.thickness_ft} hitStrokeWidth={Math.max(wall.thickness_ft, 12 * stroke)} lineCap="square" perfectDrawEnabled={false} shadowForStrokeEnabled={false} draggable={tool === 'select' && !wall.locked && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onClick={e => select(wall.id, e)} onTap={e => select(wall.id, e)} onDragStart={e => { e.cancelBubble = true; select(wall.id); wallDrag.current = { pointer: rawPoint(), a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y } } }} onDragMove={e => { e.cancelBubble = true; const drag = wallDrag.current; if (!drag) return; const pointer = rawPoint(); const p = snapped({ x: drag.a.x + pointer.x - drag.pointer.x, y: drag.a.y + pointer.y - drag.pointer.y }, null, a.id); const dx = p.x - drag.a.x, dy = p.y - drag.a.y; setPreview({ [a.id]: p, [b.id]: { x: drag.b.x + dx, y: drag.b.y + dy } }); e.target.position({ x: 0, y: 0 }) }} onDragEnd={e => { e.cancelBubble = true; const original = building.vertices.find(v => v.id === a.id)!; const p = preview[a.id] || a; onCommand([{ kind: 'move_wall', target_id: wall.id, params: { dx: p.x - original.x, dy: p.y - original.y } }]); e.target.position({ x: 0, y: 0 }); setPreview({}) }} />
+            <Line points={[a.x, a.y, b.x, b.y]} stroke={chosen ? '#234c76' : '#242628'} strokeWidth={wall.thickness_ft} hitStrokeWidth={Math.max(wall.thickness_ft, 12 * stroke)} lineCap="square" perfectDrawEnabled={false} shadowForStrokeEnabled={false} draggable={tool === 'select' && !wall.locked && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onClick={e => select(wall.id, e)} onTap={e => select(wall.id, e)} onDragStart={e => { e.cancelBubble = true; markInteract(); select(wall.id); wallDrag.current = { pointer: rawPoint(), a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y } } }} onDragMove={e => { e.cancelBubble = true; const drag = wallDrag.current; if (!drag) return; const pointer = rawPoint(); const p = snapped({ x: drag.a.x + pointer.x - drag.pointer.x, y: drag.a.y + pointer.y - drag.pointer.y }, null, a.id); const dx = p.x - drag.a.x, dy = p.y - drag.a.y; setPreview({ [a.id]: p, [b.id]: { x: drag.b.x + dx, y: drag.b.y + dy } }); e.target.position({ x: 0, y: 0 }) }} onDragEnd={e => { e.cancelBubble = true; const original = building.vertices.find(v => v.id === a.id)!; const p = preview[a.id] || a; onCommand([{ kind: 'move_wall', target_id: wall.id, params: { dx: p.x - original.x, dy: p.y - original.y } }]); e.target.position({ x: 0, y: 0 }); setPreview({}) }} />
             {chosen && !wall.locked && [a, b].map(v => <Circle key={v.id} x={v.x} y={v.y} radius={5 * stroke} fill="white" stroke="#397dbb" strokeWidth={1.5 * stroke} draggable onMouseDown={e => { e.cancelBubble = true }} onDragMove={e => { e.cancelBubble = true; const p = snapped(e.target.position(), v.id === a.id ? b : a, v.id); e.target.position(p); setPreview(old => ({ ...old, [v.id]: p })) }} onDragEnd={e => { e.cancelBubble = true; const p = snapped(e.target.position(), v.id === a.id ? b : a, v.id); onCommand([{ kind: 'move_vertex', target_id: v.id, params: p }]); setPreview({}) }} />)}
           </Group>
         })}
-        {building.openings.map(opening => {
-          const wall = walls.find(w => w.id === opening.wall_id), a = wall && vertexAt(wall.start_id), b = wall && vertexAt(wall.end_id)
-          if (!wall || !a || !b) return null
+        {openingsVisible && building.openings.map(opening => {
+          const wall = walls.find(w => w.id === opening.wall_id) || floorWalls.find(w => w.id === opening.wall_id), a = wall && vertexAt(wall.start_id), b = wall && vertexAt(wall.end_id)
+          if (!wall || !a || !b || (layerStop < 1 && wall.structural !== 'loadbearing')) return null
           const angle = Math.atan2(b.y - a.y, b.x - a.x), length = distance(a, b)
           const p = { x: a.x + Math.cos(angle) * opening.offset_ft, y: a.y + Math.sin(angle) * opening.offset_ft }
           const selected = selectedId === opening.id, color = selected ? '#2d81be' : '#282c31'
-          return <Group key={opening.id} x={p.x} y={p.y} rotation={angle * 180 / Math.PI} onClick={e => select(opening.id, e)} onTap={e => select(opening.id, e)} draggable={tool === 'select' && !wall.locked && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onDragEnd={e => { e.cancelBubble = true; const q = projectPoint(e.target.position(), a, b); onCommand([{ kind: 'update_opening', target_id: opening.id, params: { offset_ft: Math.max(0, Math.min(length - opening.width_ft, q.offset)) } }]); e.target.position(p) }}>
+          return <Group key={opening.id} x={p.x} y={p.y} rotation={angle * 180 / Math.PI} onClick={e => select(opening.id, e)} onTap={e => select(opening.id, e)} draggable={tool === 'select' && !wall.locked && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onDragStart={() => markInteract()} onDragEnd={e => { e.cancelBubble = true; const q = projectPoint(e.target.position(), a, b); onCommand([{ kind: 'update_opening', target_id: opening.id, params: { offset_ft: Math.max(0, Math.min(length - opening.width_ft, q.offset)) } }]); e.target.position(p) }}>
             <Rect x={0} y={-wall.thickness_ft / 2 - stroke} width={opening.width_ft} height={wall.thickness_ft + 2 * stroke} fill="white" stroke={selected ? color : undefined} strokeWidth={stroke} />
             {opening.kind === 'window' ? <><Line points={[0, -wall.thickness_ft / 2, opening.width_ft, -wall.thickness_ft / 2, opening.width_ft, wall.thickness_ft / 2, 0, wall.thickness_ft / 2]} closed stroke={color} strokeWidth={stroke} /><Line points={[0, 0, opening.width_ft, 0]} stroke={color} strokeWidth={stroke} /></> : <Group x={opening.hinge === 'right' ? opening.width_ft : 0} scaleX={opening.hinge === 'right' ? -1 : 1} scaleY={opening.swing === 'out' ? -1 : 1}><Line points={[0, 0, 0, opening.width_ft]} stroke={color} strokeWidth={1.5 * stroke} /><Shape stroke={color} strokeWidth={stroke} sceneFunc={(ctx, shape) => { ctx.beginPath(); ctx.arc(0, 0, opening.width_ft, 0, Math.PI / 2); ctx.strokeShape(shape) }} /></Group>}
           </Group>
         })}
-        {objects.map(object => <Group key={object.id} x={object.x} y={object.y} rotation={object.rotation_deg} draggable={tool === 'select' && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onClick={e => select(object.id, e)} onTap={e => select(object.id, e)} onDragEnd={e => { e.cancelBubble = true; const p = snapped(e.target.position()); onCommand([{ kind: 'update_object', target_id: object.id, params: { x: p.x, y: p.y } }]) }}>
+        {objects.map(object => <Group key={object.id} x={object.x} y={object.y} rotation={object.rotation_deg} draggable={tool === 'select' && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onClick={e => select(object.id, e)} onTap={e => select(object.id, e)} onDragStart={() => markInteract()} onDragEnd={e => { e.cancelBubble = true; const p = snapped(e.target.position()); onCommand([{ kind: 'update_object', target_id: object.id, params: { x: p.x, y: p.y } }]) }}>
           <Rect x={-object.width_ft / 2} y={-object.depth_ft / 2} width={object.width_ft} height={object.depth_ft} fill={selection.includes(object.id) ? '#e9f3ff' : '#fafafa'} stroke={selection.includes(object.id) ? '#4d91c9' : '#74787a'} strokeWidth={stroke} cornerRadius={object.asset_id === 'toilet' || object.asset_id === 'bath' ? Math.min(object.width_ft, object.depth_ft) * .22 : .08} />
           {object.asset_id === 'toilet' || object.asset_id === 'sink' || object.asset_id === 'bath' ? <Rect x={-object.width_ft * .35} y={-object.depth_ft * .32} width={object.width_ft * .7} height={object.depth_ft * .65} cornerRadius={object.width_ft * .25} stroke="#7b7e81" strokeWidth={stroke} /> : <Line points={[-object.width_ft / 2 + .15, -object.depth_ft / 2 + .2, object.width_ft / 2 - .15, -object.depth_ft / 2 + .2]} stroke="#929598" strokeWidth={stroke} />}
         </Group>)}
@@ -199,9 +550,9 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
         {measurement && <Group listening={false}><Line points={measurement.flatMap(p => [p.x, p.y])} stroke="#ad6498" strokeWidth={1.5 * stroke} dash={[5 * stroke, 3 * stroke]} /><Text x={(measurement[0].x + measurement[1].x) / 2} y={(measurement[0].y + measurement[1].y) / 2 - 20 * stroke} text={lengthLabel(distance(...measurement), units)} fontSize={12 * stroke} fill="#ad6498" /></Group>}
         {marquee && cursor && <Rect x={Math.min(marquee.x, cursor.x)} y={Math.min(marquee.y, cursor.y)} width={Math.abs(cursor.x - marquee.x)} height={Math.abs(cursor.y - marquee.y)} fill="#438aca18" stroke="#438aca" strokeWidth={stroke} listening={false} />}
       </Layer>
-      <Layer listening={false}>
+      <Layer listening={false} visible={showModel}>
         {rooms.map(room => { const center = interiorPoint(room.polygon); return <Group key={room.id}>
-          <Text x={center.x - 6} y={center.y - .7} width={12} text={room.name.toUpperCase() + (room.instance_count > 1 ? `  ×${room.instance_count}` : '')} align="center" fontFamily="Inter, -apple-system, sans-serif" fontSize={Math.max(.45, Math.min(.72, 12 / view.scale))} letterSpacing={.04} fill="#33383e" />
+          <Text x={center.x - 6} y={center.y - .7} width={12} text={room.name.toUpperCase() + ((room.instance_count || 0) > 1 ? `  ×${room.instance_count}` : '')} align="center" fontFamily="Inter, -apple-system, sans-serif" fontSize={Math.max(.45, Math.min(.72, 12 / view.scale))} letterSpacing={.04} fill="#33383e" />
           <Text x={center.x - 5} y={center.y + .2} width={10} text={`${(polygonArea(room.polygon) * (units === 'metric' ? .092903 : 1)).toFixed(1)} ${units === 'metric' ? 'm²' : 'sq ft'}${room.needs_review ? ' · review' : ''}`} align="center" fontSize={Math.max(.35, Math.min(.6, 10 / view.scale))} fill="#898e95" />
         </Group> })}
         {walls.map(wall => {
@@ -213,11 +564,19 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
         })}
       </Layer>
     </Stage>
+    {revealing && <PlotterOverlay segs={plotter.segs} labels={plotter.labels} fixtures={sheetFixtures} rooms={plotter.roomPolys} view={view} size={size} skip={reducedMotion()} />}
+    {!revealing && <PlanFx view={view} size={size} floorId={floorId} hatch={hatch} pings={pingRooms} flash={flash} fixtures={sheetFixtures} showFixtures={fixturesVisible} pinging={!!sonarKey && !sonarSettled} flashing={blastAt > 0 && blastHere.length > 0} />}
+    {blastAt > 0 && blastCheck && <div className="blast-hud" role="status">
+      <span className="blast-count">×{shownCount} units affected</span>
+      {otherFloors.length > 0 && <div className="blast-floors">{otherFloors.map(item => (
+        <button key={item.floor.id} type="button" onClick={() => onFloor?.(item.floor.id)}>{chipName(item.floor, item.i)} · {item.count}</button>
+      ))}</div>}
+    </div>}
     {(selectedWall || selectedOpening || selectedObject || selectedRoom) && <div className="editor-properties">
       {selectedWall && <><div className="editor-property-title">Wall properties {selectedWall.locked && <LockKeyhole size={12} />}</div><label>Thickness <DimensionInput value={selectedWall.thickness_ft} units={units} disabled={selectedWall.locked} onSave={value => onCommand([{ kind: 'update_wall', target_id: selectedWall.id, params: { thickness_ft: value } }])} /></label><label>Height <DimensionInput value={selectedWall.height_ft} units={units} disabled={selectedWall.locked} onSave={value => onCommand([{ kind: 'update_wall', target_id: selectedWall.id, params: { height_ft: value } }])} /></label><label>Length <DimensionInput value={distance(vertexAt(selectedWall.start_id)!, vertexAt(selectedWall.end_id)!)} units={units} disabled={selectedWall.locked} onSave={value => { const a = vertexAt(selectedWall.start_id)!, b = vertexAt(selectedWall.end_id)!, ratio = value / distance(a, b); onCommand([{ kind: 'move_vertex', target_id: b.id, params: { x: a.x + (b.x - a.x) * ratio, y: a.y + (b.y - a.y) * ratio } }]) }} /></label>{selectedWall.locked ? <button className="editor-text-action" onClick={() => setUnlock(true)}>Review and unlock…</button> : <span className="editor-property-muted">{selectedWall.structural}</span>}</>}
       {selectedOpening && <><div className="editor-property-title">{selectedOpening.kind === 'door' ? 'Door' : 'Window'}</div><label>Width <DimensionInput value={selectedOpening.width_ft} units={units} onSave={v => onCommand([{ kind: 'update_opening', target_id: selectedOpening.id, params: { width_ft: v } }])} /></label><label>Offset <DimensionInput value={selectedOpening.offset_ft} units={units} onSave={v => onCommand([{ kind: 'update_opening', target_id: selectedOpening.id, params: { offset_ft: v } }])} /></label>{selectedOpening.kind === 'door' && <button className="editor-text-action" onClick={() => onCommand([{ kind: 'update_opening', target_id: selectedOpening.id, params: { hinge: selectedOpening.hinge === 'left' ? 'right' : 'left' } }])}>Flip hinge</button>}</>}
       {selectedObject && <><div className="editor-property-title">Object transform</div><label>Width <DimensionInput value={selectedObject.width_ft} units={units} onSave={v => onCommand([{ kind: 'update_object', target_id: selectedObject.id, params: { width_ft: v } }])} /></label><label>Depth <DimensionInput value={selectedObject.depth_ft} units={units} onSave={v => onCommand([{ kind: 'update_object', target_id: selectedObject.id, params: { depth_ft: v } }])} /></label><label>Rotation <input key={`${selectedObject.id}-${selectedObject.rotation_deg}`} type="number" aria-label="Object rotation" defaultValue={selectedObject.rotation_deg} onBlur={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v !== selectedObject.rotation_deg) onCommand([{ kind: 'update_object', target_id: selectedObject.id, params: { rotation_deg: v } }]) }} /></label></>}
-      {selectedRoom && <><div className="editor-property-title">Room</div><input key={selectedRoom.id} aria-label="Room name" defaultValue={selectedRoom.name} onBlur={e => { if (e.target.value && e.target.value !== selectedRoom.name) onCommand((matching ? matchingRooms : [selectedRoom]).map(r => ({ kind: 'rename_room', target_id: r.id, params: { name: e.target.value } }))) }} />{selectedRoom.instance_count > 1 && <span className="editor-property-muted">×{selectedRoom.instance_count} units</span>}{matchingRooms.length > 1 && <label className="editor-match-label"><input type="checkbox" checked={matching} onChange={e => setMatching(e.target.checked)} />Apply to {matchingRooms.length} matching rooms</label>}<span className="editor-property-muted">{selectedRoom.needs_review ? 'Boundary needs review' : 'Shared partitions affect adjacent rooms'}</span></>}
+      {selectedRoom && <><div className="editor-property-title">Room</div><input key={selectedRoom.id} aria-label="Room name" defaultValue={selectedRoom.name} onBlur={e => { if (e.target.value && e.target.value !== selectedRoom.name) onCommand((matching ? matchingRooms : [selectedRoom]).map(r => ({ kind: 'rename_room', target_id: r.id, params: { name: e.target.value } }))) }} />{(selectedRoom.instance_count || 0) > 1 && <span className="editor-property-muted">×{selectedRoom.instance_count} units</span>}{matchingRooms.length > 1 && <label className="editor-match-label"><input type="checkbox" checked={matching} onChange={e => setMatching(e.target.checked)} />Apply to {matchingRooms.length} matching rooms</label>}<span className="editor-property-muted">{selectedRoom.needs_review ? 'Boundary needs review' : 'Shared partitions affect adjacent rooms'}</span></>}
     </div>}
     {unlock && selectedWall && <div className="editor-review-dialog" role="dialog" aria-label="Review wall classification"><strong>Review this wall</strong><p>Confirm the structural classification before enabling edits. Connected walls may still be locked.</p><select aria-label="Structural classification" value={structural} onChange={e => setStructural(e.target.value as typeof structural)}><option value="nonstructural">Nonstructural partition</option><option value="loadbearing">Load-bearing wall</option><option value="unknown">Unknown</option></select><textarea aria-label="Review reason" value={reason} onChange={e => setReason(e.target.value)} placeholder="Record the reason and drawing reference" /><div><button onClick={() => setUnlock(false)}>Cancel</button><button disabled={!reason.trim()} onClick={() => { onCommand([{ kind: 'unlock_wall', target_id: selectedWall.id, params: { structural, reason } }]); setUnlock(false); setReason('') }}>Save review and unlock</button></div></div>}
     <div className="editor-canvas-hint">{tool === 'wall' ? 'Click to start a wall, click to connect · Esc to finish' : tool === 'measure' ? 'Click two points to measure' : tool === 'pan' ? 'Drag to pan · Pinch to zoom' : 'Select to edit · Shift for multiple · Pinch to zoom'}</div>

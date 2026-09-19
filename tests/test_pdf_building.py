@@ -244,16 +244,38 @@ def test_room_tag_frame_captures_stacked_label():
     assert [tag.text for tag in tags] == ["STUDIO KING"]
 
 
-def test_cluster_door_fragments_uses_longest_straight_leaf():
+def test_cluster_door_fragments_uses_union_bbox_min_side():
     fragments = [
-        {"bbox": [0, 0, 0.2, 0.2], "segments": [([0, 0], [0.2, 0])]},
-        {"bbox": [0.1, 0, 3.1, 0.15], "segments": [([0.1, 0], [3.1, 0]), ([0.1, 0.15], [3.1, 0.15])]},
-        {"bbox": [0, 0, 1.5, 1.5], "segments": [([0, 0], [0.3, 0.4])]},
+        {"bbox": [0, 0, 3.6, 0.12], "segments": [([0, 0], [3.6, 0])]},
+        {"bbox": [0, 0, 3.6, 3.6], "segments": []},
     ]
-    doors = cluster_door_fragments(fragments, scale=1.0)
+    doors, rejected = cluster_door_fragments(fragments, scale=1.0)
+    assert rejected == 0
     assert len(doors) == 1
-    assert abs(doors[0]["width_ft"] - 3.0) < 1e-6
-    assert abs(doors[0]["xy"][0] - 1.6) < 0.2
+    assert abs(doors[0]["width_ft"] - 3.6) < 1e-6
+    assert abs(doors[0]["xy"][0] - 1.8) < 1e-6
+    assert abs(doors[0]["xy"][1] - 1.8) < 1e-6
+
+
+def test_cluster_door_fragments_rejects_out_of_range_and_keeps_apart():
+    tiny = [{"bbox": [0, 0, 0.4, 0.4]}]
+    doors, rejected = cluster_door_fragments(tiny, scale=1.0)
+    assert doors == []
+    assert rejected == 1
+    separate = [
+        {"bbox": [0, 0, 3.2, 3.2]},
+        {"bbox": [20, 0, 23.2, 3.2]},
+    ]
+    doors, rejected = cluster_door_fragments(separate, scale=1.0)
+    assert rejected == 0
+    assert len(doors) == 2
+
+
+def test_cluster_door_fragments_spatial_grid_is_subquadratic():
+    fragments = [{"bbox": [i * 12.0, 0, i * 12.0 + 3.2, 3.2]} for i in range(400)]
+    doors, rejected = cluster_door_fragments(fragments, scale=1.0)
+    assert rejected == 0
+    assert len(doors) == 400
 
 
 def test_openings_snap_to_nearest_wall():

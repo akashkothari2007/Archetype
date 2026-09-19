@@ -36,7 +36,7 @@ export function ImportOverview({summary, onOpen}: {summary: ImportSummary; onOpe
       </ul>
       <div className="import-overview-actions">
         <button className="primary" onClick={() => onOpen('open')}>Open the editor</button>
-        <button className="secondary" onClick={() => onOpen('source')}>Compare source and model</button>
+        <button className="secondary" onClick={() => onOpen('source')}>Overlay source and model</button>
       </div>
     </div>
   )
