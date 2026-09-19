@@ -170,3 +170,15 @@ class DesktopProject(BaseModel):
     can_undo: bool = False
     can_redo: bool = False
 
+
+class BuildingPatch(BaseModel):
+    """Delta returned by edit commands so the desktop can patch a local Building."""
+
+    revision: int
+    can_undo: bool = False
+    can_redo: bool = False
+    changed: dict[str, list[Any]] = Field(default_factory=dict)
+    removed_ids: list[str] = Field(default_factory=list)
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+    environment: dict[str, Any] | None = None
+

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Stage, Layer, Group, Line, Rect, Circle, Text, Shape } from 'react-konva'
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
@@ -26,7 +26,11 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const [reason, setReason] = useState('')
   const [structural, setStructural] = useState<'nonstructural' | 'loadbearing' | 'unknown'>('nonstructural')
   const [matching, setMatching] = useState(false)
-  const vertices = useMemo(() => new Map(building.vertices.map(v => [v.id, { ...v, ...(preview[v.id] || {}) }])), [building.vertices, preview])
+  const baseVertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
+  const vertexAt = useCallback((id: string) => {
+    const v = baseVertices.get(id); if (!v) return undefined
+    const p = preview[id]; return p ? { ...v, ...p } : v
+  }, [baseVertices, preview])
   const walls = building.walls.filter(w => w.floor_id === floorId)
   const rooms = building.rooms.filter(r => r.floor_id === floorId)
   const objects = building.objects.filter(o => o.floor_id === floorId)
@@ -72,13 +76,21 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   function snapped(p: Point, anchor?: Point | null, exclude?: string): Point {
     if (!snap) return p
     const threshold = 10 / view.scale
-    const exact = [...vertices.values()].filter(v => v.floor_id === floorId && v.id !== exclude).sort((a, b) => distance(a, p) - distance(b, p))[0]
-    if (exact && distance(exact, p) < threshold) return { x: exact.x, y: exact.y }
+    let exact: ReturnType<typeof vertexAt> | undefined
+    let best = Infinity
+    for (const v of baseVertices.values()) {
+      if (v.floor_id !== floorId || v.id === exclude) continue
+      const point = vertexAt(v.id)
+      if (!point) continue
+      const d = distance(point, p)
+      if (d < best) { best = d; exact = point }
+    }
+    if (exact && best < threshold) return { x: exact.x, y: exact.y }
     const step = units === 'metric' ? .1 / .3048 : .25
     let q = { x: Math.round(p.x / step) * step, y: Math.round(p.y / step) * step }
     if (anchor) { if (Math.abs(q.x - anchor.x) < threshold) q.x = anchor.x; if (Math.abs(q.y - anchor.y) < threshold) q.y = anchor.y }
     for (const wall of walls) {
-      const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id)
+      const a = vertexAt(wall.start_id), b = vertexAt(wall.end_id)
       if (!a || !b || wall.start_id === exclude || wall.end_id === exclude) continue
       const projection = projectPoint(q, a, b)
       if (projection.distance < threshold / 2) { q = { x: projection.x, y: projection.y }; break }
@@ -108,7 +120,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     if (marquee && cursor && distance(marquee, cursor) > 3 / view.scale) {
       const minX = Math.min(marquee.x, cursor.x), maxX = Math.max(marquee.x, cursor.x), minY = Math.min(marquee.y, cursor.y), maxY = Math.max(marquee.y, cursor.y)
       const contains = (p: Point) => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY
-      const ids = [...walls.filter(w => { const a = vertices.get(w.start_id), b = vertices.get(w.end_id); return a && b && contains(a) && contains(b) }).map(w => w.id), ...objects.filter(contains).map(o => o.id)]
+      const ids = [...walls.filter(w => { const a = vertexAt(w.start_id), b = vertexAt(w.end_id); return a && b && contains(a) && contains(b) }).map(w => w.id), ...objects.filter(contains).map(o => o.id)]
       onSelect(ids[0] || null); setSelection(ids)
     }
     setMarquee(null)
@@ -118,7 +130,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     setView({ scale, x: anchor.x - (anchor.x - view.x) * scale / view.scale, y: anchor.y - (anchor.y - view.y) * scale / view.scale })
   }
   function rotate(angle: number) {
-    const points = selection.flatMap(id => { const w = walls.find(w => w.id === id); return w ? [vertices.get(w.start_id), vertices.get(w.end_id)].filter(Boolean) as Point[] : objects.filter(o => o.id === id) })
+    const points = selection.flatMap(id => { const w = walls.find(w => w.id === id); return w ? [vertexAt(w.start_id), vertexAt(w.end_id)].filter(Boolean) as Point[] : objects.filter(o => o.id === id) })
     if (!points.length) return
     onCommand([{ kind: 'rotate_selection', target_id: '', params: { ids: selection, angle_deg: angle, cx: points.reduce((s, p) => s + p.x, 0) / points.length, cy: points.reduce((s, p) => s + p.y, 0) / points.length } }])
   }
@@ -145,7 +157,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     {selection.length > 0 && <div className="editor-selection-tools" role="toolbar" aria-label="Selection tools">
       <span>{selection.length > 1 ? `${selection.length} selected` : selectedWall ? 'Wall' : selectedOpening?.kind || selectedObject?.asset_id.replaceAll('_', ' ') || selectedRoom?.name || 'Selection'}</span>
       {(selectedWall || selectedObject) && <><button title="Rotate 15°" aria-label="Rotate selection 15 degrees" onClick={() => rotate(15)}><RotateCw size={14} /></button><button title="Duplicate" aria-label="Duplicate selection" onClick={() => onCommand(selection.map(id => ({ kind: 'duplicate', target_id: id, params: { dx: 2, dy: 2 } })))}><Copy size={14} /></button></>}
-      {selectedWall && <><button title="Split at midpoint" aria-label="Split wall at midpoint" onClick={() => { const a = vertices.get(selectedWall.start_id), b = vertices.get(selectedWall.end_id); if (a && b) onCommand([{ kind: 'split_wall', target_id: selectedWall.id, params: { offset_ft: distance(a, b) / 2 } }]) }}><Scissors size={14} /></button>{selection.length === 2 && <button title="Join selected walls" aria-label="Join selected walls" onClick={() => onCommand([{ kind: 'join_walls', target_id: selection[0], params: { other_id: selection[1] } }])}><Link size={14} /></button>}</>}
+      {selectedWall && <><button title="Split at midpoint" aria-label="Split wall at midpoint" onClick={() => { const a = vertexAt(selectedWall.start_id), b = vertexAt(selectedWall.end_id); if (a && b) onCommand([{ kind: 'split_wall', target_id: selectedWall.id, params: { offset_ft: distance(a, b) / 2 } }]) }}><Scissors size={14} /></button>{selection.length === 2 && <button title="Join selected walls" aria-label="Join selected walls" onClick={() => onCommand([{ kind: 'join_walls', target_id: selection[0], params: { other_id: selection[1] } }])}><Link size={14} /></button>}</>}
       {!selectedRoom && <button title="Delete" aria-label="Delete selection" onClick={() => onCommand(selection.map(id => ({ kind: 'delete', target_id: id, params: {} })))}><Trash2 size={14} /></button>}
       <button aria-label="Clear selection" onClick={() => onSelect(null)}><X size={13} /></button>
     </div>}
@@ -155,25 +167,21 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
         {gridY.map(y => <Line key={`y${y}`} points={[gx0, y, gx1, y]} stroke={Math.round(y / gridStep) % 5 ? '#eff0f1' : '#e6e8ea'} strokeWidth={stroke} />)}
       </Layer>
       <Layer>
-        {rooms.map(room => { const center = interiorPoint(room.polygon); return <Group key={room.id} onClick={e => select(room.id, e)} onTap={e => select(room.id, e)}>
-          <Line points={room.polygon.flat()} closed fill={selectedId === room.id ? '#eaf2fa' : '#ffffff'} opacity={.86} stroke={room.needs_review ? '#d3ad6a' : undefined} dash={room.needs_review ? [4 * stroke, 4 * stroke] : undefined} strokeWidth={stroke} listening={tool === 'select'} />
-          <Text x={center.x - 6} y={center.y - .7} width={12} text={room.name.toUpperCase()} align="center" fontFamily="Inter, -apple-system, sans-serif" fontSize={Math.max(.45, Math.min(.72, 12 / view.scale))} letterSpacing={.04} fill="#33383e" listening={false} />
-          <Text x={center.x - 5} y={center.y + .2} width={10} text={`${(polygonArea(room.polygon) * (units === 'metric' ? .092903 : 1)).toFixed(1)} ${units === 'metric' ? 'm²' : 'sq ft'}${room.needs_review ? ' · review' : ''}`} align="center" fontSize={Math.max(.35, Math.min(.6, 10 / view.scale))} fill="#898e95" listening={false} />
-        </Group> })}
+        {rooms.map(room => <Group key={room.id} onClick={e => select(room.id, e)} onTap={e => select(room.id, e)}>
+          <Line points={room.polygon.flat()} closed fill={selectedId === room.id ? '#eaf2fa' : '#ffffff'} opacity={.86} stroke={room.needs_review ? '#d3ad6a' : undefined} dash={room.needs_review ? [4 * stroke, 4 * stroke] : undefined} strokeWidth={stroke} listening={tool === 'select'} perfectDrawEnabled={false} shadowForStrokeEnabled={false} />
+        </Group>)}
         {walls.map(wall => {
-          const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id)
+          const a = vertexAt(wall.start_id), b = vertexAt(wall.end_id)
           if (!a || !b) return null
-          const chosen = selection.includes(wall.id), length = distance(a, b), angle = Math.atan2(b.y - a.y, b.x - a.x)
-          const normal = { x: -Math.sin(angle), y: Math.cos(angle) }
+          const chosen = selection.includes(wall.id)
           return <Group key={wall.id}>
-            {chosen && <Line points={[a.x, a.y, b.x, b.y]} stroke="#a7cef8" strokeWidth={wall.thickness_ft + 7 * stroke} listening={false} />}
-            <Line points={[a.x, a.y, b.x, b.y]} stroke={chosen ? '#234c76' : '#242628'} strokeWidth={wall.thickness_ft} hitStrokeWidth={Math.max(wall.thickness_ft, 12 * stroke)} lineCap="square" draggable={tool === 'select' && !wall.locked && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onClick={e => select(wall.id, e)} onTap={e => select(wall.id, e)} onDragStart={e => { e.cancelBubble = true; select(wall.id); wallDrag.current = { pointer: rawPoint(), a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y } } }} onDragMove={e => { e.cancelBubble = true; const drag = wallDrag.current; if (!drag) return; const pointer = rawPoint(); const p = snapped({ x: drag.a.x + pointer.x - drag.pointer.x, y: drag.a.y + pointer.y - drag.pointer.y }, null, a.id); const dx = p.x - drag.a.x, dy = p.y - drag.a.y; setPreview({ [a.id]: p, [b.id]: { x: drag.b.x + dx, y: drag.b.y + dy } }); e.target.position({ x: 0, y: 0 }) }} onDragEnd={e => { e.cancelBubble = true; const original = building.vertices.find(v => v.id === a.id)!; const p = preview[a.id] || a; onCommand([{ kind: 'move_wall', target_id: wall.id, params: { dx: p.x - original.x, dy: p.y - original.y } }]); e.target.position({ x: 0, y: 0 }); setPreview({}) }} />
-            {(chosen || length > 5) && <Group listening={false} x={(a.x + b.x) / 2 - normal.x * (wall.thickness_ft / 2 + .55)} y={(a.y + b.y) / 2 - normal.y * (wall.thickness_ft / 2 + .55)} rotation={angle * 180 / Math.PI + (angle > Math.PI / 2 || angle < -Math.PI / 2 ? 180 : 0)}><Text text={lengthLabel(length, units)} x={-3} y={-.27} width={6} align="center" fontSize={Math.max(.28, Math.min(.5, 10 / view.scale))} fill="#72777b" /></Group>}
+            {chosen && <Line points={[a.x, a.y, b.x, b.y]} stroke="#a7cef8" strokeWidth={wall.thickness_ft + 7 * stroke} listening={false} perfectDrawEnabled={false} shadowForStrokeEnabled={false} />}
+            <Line points={[a.x, a.y, b.x, b.y]} stroke={chosen ? '#234c76' : '#242628'} strokeWidth={wall.thickness_ft} hitStrokeWidth={Math.max(wall.thickness_ft, 12 * stroke)} lineCap="square" perfectDrawEnabled={false} shadowForStrokeEnabled={false} draggable={tool === 'select' && !wall.locked && !busy} onMouseDown={e => { if (tool === 'select') e.cancelBubble = true }} onClick={e => select(wall.id, e)} onTap={e => select(wall.id, e)} onDragStart={e => { e.cancelBubble = true; select(wall.id); wallDrag.current = { pointer: rawPoint(), a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y } } }} onDragMove={e => { e.cancelBubble = true; const drag = wallDrag.current; if (!drag) return; const pointer = rawPoint(); const p = snapped({ x: drag.a.x + pointer.x - drag.pointer.x, y: drag.a.y + pointer.y - drag.pointer.y }, null, a.id); const dx = p.x - drag.a.x, dy = p.y - drag.a.y; setPreview({ [a.id]: p, [b.id]: { x: drag.b.x + dx, y: drag.b.y + dy } }); e.target.position({ x: 0, y: 0 }) }} onDragEnd={e => { e.cancelBubble = true; const original = building.vertices.find(v => v.id === a.id)!; const p = preview[a.id] || a; onCommand([{ kind: 'move_wall', target_id: wall.id, params: { dx: p.x - original.x, dy: p.y - original.y } }]); e.target.position({ x: 0, y: 0 }); setPreview({}) }} />
             {chosen && !wall.locked && [a, b].map(v => <Circle key={v.id} x={v.x} y={v.y} radius={5 * stroke} fill="white" stroke="#397dbb" strokeWidth={1.5 * stroke} draggable onMouseDown={e => { e.cancelBubble = true }} onDragMove={e => { e.cancelBubble = true; const p = snapped(e.target.position(), v.id === a.id ? b : a, v.id); e.target.position(p); setPreview(old => ({ ...old, [v.id]: p })) }} onDragEnd={e => { e.cancelBubble = true; const p = snapped(e.target.position(), v.id === a.id ? b : a, v.id); onCommand([{ kind: 'move_vertex', target_id: v.id, params: p }]); setPreview({}) }} />)}
           </Group>
         })}
         {building.openings.map(opening => {
-          const wall = walls.find(w => w.id === opening.wall_id), a = wall && vertices.get(wall.start_id), b = wall && vertices.get(wall.end_id)
+          const wall = walls.find(w => w.id === opening.wall_id), a = wall && vertexAt(wall.start_id), b = wall && vertexAt(wall.end_id)
           if (!wall || !a || !b) return null
           const angle = Math.atan2(b.y - a.y, b.x - a.x), length = distance(a, b)
           const p = { x: a.x + Math.cos(angle) * opening.offset_ft, y: a.y + Math.sin(angle) * opening.offset_ft }
@@ -191,9 +199,22 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
         {measurement && <Group listening={false}><Line points={measurement.flatMap(p => [p.x, p.y])} stroke="#ad6498" strokeWidth={1.5 * stroke} dash={[5 * stroke, 3 * stroke]} /><Text x={(measurement[0].x + measurement[1].x) / 2} y={(measurement[0].y + measurement[1].y) / 2 - 20 * stroke} text={lengthLabel(distance(...measurement), units)} fontSize={12 * stroke} fill="#ad6498" /></Group>}
         {marquee && cursor && <Rect x={Math.min(marquee.x, cursor.x)} y={Math.min(marquee.y, cursor.y)} width={Math.abs(cursor.x - marquee.x)} height={Math.abs(cursor.y - marquee.y)} fill="#438aca18" stroke="#438aca" strokeWidth={stroke} listening={false} />}
       </Layer>
+      <Layer listening={false}>
+        {rooms.map(room => { const center = interiorPoint(room.polygon); return <Group key={room.id}>
+          <Text x={center.x - 6} y={center.y - .7} width={12} text={room.name.toUpperCase()} align="center" fontFamily="Inter, -apple-system, sans-serif" fontSize={Math.max(.45, Math.min(.72, 12 / view.scale))} letterSpacing={.04} fill="#33383e" />
+          <Text x={center.x - 5} y={center.y + .2} width={10} text={`${(polygonArea(room.polygon) * (units === 'metric' ? .092903 : 1)).toFixed(1)} ${units === 'metric' ? 'm²' : 'sq ft'}${room.needs_review ? ' · review' : ''}`} align="center" fontSize={Math.max(.35, Math.min(.6, 10 / view.scale))} fill="#898e95" />
+        </Group> })}
+        {walls.map(wall => {
+          const a = vertexAt(wall.start_id), b = vertexAt(wall.end_id)
+          if (!a || !b) return null
+          const chosen = selection.includes(wall.id), length = distance(a, b), angle = Math.atan2(b.y - a.y, b.x - a.x)
+          const normal = { x: -Math.sin(angle), y: Math.cos(angle) }
+          return (chosen || length > 5) ? <Group key={wall.id} x={(a.x + b.x) / 2 - normal.x * (wall.thickness_ft / 2 + .55)} y={(a.y + b.y) / 2 - normal.y * (wall.thickness_ft / 2 + .55)} rotation={angle * 180 / Math.PI + (angle > Math.PI / 2 || angle < -Math.PI / 2 ? 180 : 0)}><Text text={lengthLabel(length, units)} x={-3} y={-.27} width={6} align="center" fontSize={Math.max(.28, Math.min(.5, 10 / view.scale))} fill="#72777b" /></Group> : null
+        })}
+      </Layer>
     </Stage>
     {(selectedWall || selectedOpening || selectedObject || selectedRoom) && <div className="editor-properties">
-      {selectedWall && <><div className="editor-property-title">Wall properties {selectedWall.locked && <LockKeyhole size={12} />}</div><label>Thickness <DimensionInput value={selectedWall.thickness_ft} units={units} disabled={selectedWall.locked} onSave={value => onCommand([{ kind: 'update_wall', target_id: selectedWall.id, params: { thickness_ft: value } }])} /></label><label>Height <DimensionInput value={selectedWall.height_ft} units={units} disabled={selectedWall.locked} onSave={value => onCommand([{ kind: 'update_wall', target_id: selectedWall.id, params: { height_ft: value } }])} /></label><label>Length <DimensionInput value={distance(vertices.get(selectedWall.start_id)!, vertices.get(selectedWall.end_id)!)} units={units} disabled={selectedWall.locked} onSave={value => { const a = vertices.get(selectedWall.start_id)!, b = vertices.get(selectedWall.end_id)!, ratio = value / distance(a, b); onCommand([{ kind: 'move_vertex', target_id: b.id, params: { x: a.x + (b.x - a.x) * ratio, y: a.y + (b.y - a.y) * ratio } }]) }} /></label>{selectedWall.locked ? <button className="editor-text-action" onClick={() => setUnlock(true)}>Review and unlock…</button> : <span className="editor-property-muted">{selectedWall.structural}</span>}</>}
+      {selectedWall && <><div className="editor-property-title">Wall properties {selectedWall.locked && <LockKeyhole size={12} />}</div><label>Thickness <DimensionInput value={selectedWall.thickness_ft} units={units} disabled={selectedWall.locked} onSave={value => onCommand([{ kind: 'update_wall', target_id: selectedWall.id, params: { thickness_ft: value } }])} /></label><label>Height <DimensionInput value={selectedWall.height_ft} units={units} disabled={selectedWall.locked} onSave={value => onCommand([{ kind: 'update_wall', target_id: selectedWall.id, params: { height_ft: value } }])} /></label><label>Length <DimensionInput value={distance(vertexAt(selectedWall.start_id)!, vertexAt(selectedWall.end_id)!)} units={units} disabled={selectedWall.locked} onSave={value => { const a = vertexAt(selectedWall.start_id)!, b = vertexAt(selectedWall.end_id)!, ratio = value / distance(a, b); onCommand([{ kind: 'move_vertex', target_id: b.id, params: { x: a.x + (b.x - a.x) * ratio, y: a.y + (b.y - a.y) * ratio } }]) }} /></label>{selectedWall.locked ? <button className="editor-text-action" onClick={() => setUnlock(true)}>Review and unlock…</button> : <span className="editor-property-muted">{selectedWall.structural}</span>}</>}
       {selectedOpening && <><div className="editor-property-title">{selectedOpening.kind === 'door' ? 'Door' : 'Window'}</div><label>Width <DimensionInput value={selectedOpening.width_ft} units={units} onSave={v => onCommand([{ kind: 'update_opening', target_id: selectedOpening.id, params: { width_ft: v } }])} /></label><label>Offset <DimensionInput value={selectedOpening.offset_ft} units={units} onSave={v => onCommand([{ kind: 'update_opening', target_id: selectedOpening.id, params: { offset_ft: v } }])} /></label>{selectedOpening.kind === 'door' && <button className="editor-text-action" onClick={() => onCommand([{ kind: 'update_opening', target_id: selectedOpening.id, params: { hinge: selectedOpening.hinge === 'left' ? 'right' : 'left' } }])}>Flip hinge</button>}</>}
       {selectedObject && <><div className="editor-property-title">Object transform</div><label>Width <DimensionInput value={selectedObject.width_ft} units={units} onSave={v => onCommand([{ kind: 'update_object', target_id: selectedObject.id, params: { width_ft: v } }])} /></label><label>Depth <DimensionInput value={selectedObject.depth_ft} units={units} onSave={v => onCommand([{ kind: 'update_object', target_id: selectedObject.id, params: { depth_ft: v } }])} /></label><label>Rotation <input key={`${selectedObject.id}-${selectedObject.rotation_deg}`} type="number" aria-label="Object rotation" defaultValue={selectedObject.rotation_deg} onBlur={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v !== selectedObject.rotation_deg) onCommand([{ kind: 'update_object', target_id: selectedObject.id, params: { rotation_deg: v } }]) }} /></label></>}
       {selectedRoom && <><div className="editor-property-title">Room</div><input key={selectedRoom.id} aria-label="Room name" defaultValue={selectedRoom.name} onBlur={e => { if (e.target.value && e.target.value !== selectedRoom.name) onCommand((matching ? matchingRooms : [selectedRoom]).map(r => ({ kind: 'rename_room', target_id: r.id, params: { name: e.target.value } }))) }} />{matchingRooms.length > 1 && <label className="editor-match-label"><input type="checkbox" checked={matching} onChange={e => setMatching(e.target.checked)} />Apply to {matchingRooms.length} matching rooms</label>}<span className="editor-property-muted">{selectedRoom.needs_review ? 'Boundary needs review' : 'Shared partitions affect adjacent rooms'}</span></>}

@@ -1,4 +1,4 @@
-import { Component, Suspense, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { Component, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, TransformControls, GizmoHelper, GizmoViewcube, useGLTF } from '@react-three/drei'
 import * as THREE from 'three'
@@ -88,7 +88,13 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, walking, ob
       const rect = gl.domElement.getBoundingClientRect(), pointer = new THREE.Vector2((clientX - rect.left) / rect.width * 2 - 1, -(clientY - rect.top) / rect.height * 2 + 1)
       const ray = new THREE.Raycaster(); ray.setFromCamera(pointer, camera)
       const hits = ray.intersectObjects(scene.children, true)
-      for (const hit of hits) { let object: THREE.Object3D | null = hit.object; while (object && !object.userData.entityId) object = object.parent; if (object?.userData.entityId) return { id: object.userData.entityId, kind: object.userData.kind, point: { x: hit.point.x, y: hit.point.z } } }
+      for (const hit of hits) {
+        if (hit.object.userData.kind === 'wall-instances' && hit.instanceId != null) {
+          const id = (hit.object.userData.instanceIds as string[] | undefined)?.[hit.instanceId]
+          if (id) return { id, kind: 'wall', point: { x: hit.point.x, y: hit.point.z } }
+        }
+        let object: THREE.Object3D | null = hit.object; while (object && !object.userData.entityId) object = object.parent; if (object?.userData.entityId) return { id: object.userData.entityId, kind: object.userData.kind, point: { x: hit.point.x, y: hit.point.z } }
+      }
       const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3())
       return point && point.x >= bounds.minX - 2 && point.x <= bounds.maxX + 2 && point.z >= bounds.minY - 2 && point.z <= bounds.maxY + 2 ? { id: '', kind: 'ground', point: { x: point.x, y: point.z } } : null
     }
@@ -165,7 +171,7 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, walking, ob
     <directionalLight position={[bounds.cx + Math.cos(azimuth) * 80, 15 + elevation * 100, bounds.cy + Math.sin(azimuth) * 80]} intensity={.4 + daylight * 2.5} color={dayColor} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-Math.max(bounds.width, bounds.height)} shadow-camera-right={Math.max(bounds.width, bounds.height)} shadow-camera-top={Math.max(bounds.width, bounds.height)} shadow-camera-bottom={-Math.max(bounds.width, bounds.height)} shadow-camera-far={350} shadow-bias={-.0002} />
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[bounds.cx, -.15, bounds.cy]} receiveShadow><planeGeometry args={[Math.max(bounds.width * 4, 150), Math.max(bounds.height * 4, 150)]} /><meshStandardMaterial color="#e9e6df" roughness={1} /></mesh>
     {rooms.map(room => <RoomFloor key={room.id} room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} />)}
-    {walls.map(wall => { const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id); return a && b ? <WallMesh key={wall.id} wall={wall} a={a} b={b} openings={building.openings.filter(o => o.wall_id === wall.id)} faded={dragTarget === wall.id} selected={selectedId === wall.id} onSelect={onSelect} /> : null })}
+    <Walls3D walls={walls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} />
     {objects.map(object => <PlacedEntity key={object.id} object={object} selected={selectedId === object.id} walking={walking} tool={objectTool} onSelect={onSelect} onCommand={onCommand} />)}
     {!walking && <OrbitControls ref={controls} makeDefault minDistance={3} maxDistance={Math.max(bounds.width, bounds.height) * 6} maxPolarAngle={Math.PI * .49} enableDamping dampingFactor={.09} />}
     {!walking && <GizmoHelper alignment="top-right" margin={[58, 65]}><GizmoViewcube color="#eeefef" hoverColor="#c8d6df" textColor="#64727b" strokeColor="#e0e1e1" opacity={.8} /></GizmoHelper>}
@@ -178,6 +184,73 @@ function PlacedEntity({ object, selected, walking, tool, onSelect, onCommand }: 
     {object.kind === 'furniture' && furniture.some(a => a.id === object.asset_id) ? <Suspense fallback={<LoadingObject object={object} />}><FurnitureModel object={object} selected={selected} /></Suspense> : <FixtureModel object={object} selected={selected} />}
   </group>
   return selected && !walking ? <TransformControls mode={tool} showX={tool === 'translate'} showY={tool === 'rotate'} showZ={tool === 'translate'} size={.7} translationSnap={.25} rotationSnap={Math.PI / 12} onMouseUp={() => { const node = ref.current; if (!node) return; const rotation = -node.rotation.y * 180 / Math.PI; if (Math.abs(node.position.x - object.x) + Math.abs(node.position.z - object.y) + Math.abs(rotation - object.rotation_deg) < .001) return; onCommand([{ kind: 'update_object', target_id: object.id, params: { x: node.position.x, y: node.position.z, rotation_deg: rotation } }]) }}>{node}</TransformControls> : node
+}
+
+function Walls3D({ walls, vertices, openings, selectedId, dragTarget, onSelect }: { walls: Wall[]; vertices: Map<string, { id: string; x: number; y: number }>; openings: Building['openings']; selectedId: string | null; dragTarget: string | null; onSelect: (id: string) => void }) {
+  const byWall = useMemo(() => {
+    const map = new Map<string, Building['openings']>()
+    for (const opening of openings) {
+      const list = map.get(opening.wall_id)
+      if (list) list.push(opening)
+      else map.set(opening.wall_id, [opening])
+    }
+    return map
+  }, [openings])
+  const { solid, holed } = useMemo(() => {
+    const solidWalls: Wall[] = []
+    const holedWalls: Wall[] = []
+    for (const wall of walls) {
+      if (byWall.get(wall.id)?.length) holedWalls.push(wall)
+      else solidWalls.push(wall)
+    }
+    return { solid: solidWalls, holed: holedWalls }
+  }, [walls, byWall])
+  return <>
+    <InstancedWalls walls={solid} vertices={vertices} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} />
+    {holed.map(wall => { const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id); return a && b ? <WallMesh key={wall.id} wall={wall} a={a} b={b} openings={byWall.get(wall.id) || []} faded={dragTarget === wall.id} selected={selectedId === wall.id} onSelect={onSelect} /> : null })}
+  </>
+}
+
+function InstancedWalls({ walls, vertices, selectedId, dragTarget, onSelect }: { walls: Wall[]; vertices: Map<string, { id: string; x: number; y: number }>; selectedId: string | null; dragTarget: string | null; onSelect: (id: string) => void }) {
+  const mesh = useRef<THREE.InstancedMesh>(null)
+  const ids = useMemo(() => walls.map(w => w.id), [walls])
+  const count = walls.length
+  useLayoutEffect(() => {
+    const node = mesh.current
+    if (!node || !count) return
+    const dummy = new THREE.Object3D()
+    const color = new THREE.Color()
+    const highlight = new THREE.Color('#3d5c78')
+    for (let i = 0; i < walls.length; i++) {
+      const wall = walls[i]
+      const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id)
+      if (!a || !b) {
+        dummy.scale.set(0, 0, 0)
+        dummy.updateMatrix()
+        node.setMatrixAt(i, dummy.matrix)
+        continue
+      }
+      const length = Math.hypot(b.x - a.x, b.y - a.y)
+      const angle = Math.atan2(b.y - a.y, b.x - a.x)
+      dummy.position.set((a.x + b.x) / 2, wall.height_ft / 2, (a.y + b.y) / 2)
+      dummy.rotation.set(0, -angle, 0)
+      dummy.scale.set(Math.max(length, .01), wall.height_ft, Math.max(wall.thickness_ft, .05))
+      dummy.updateMatrix()
+      node.setMatrixAt(i, dummy.matrix)
+      color.set(colors[wall.material] || '#eeeae2')
+      if (selectedId === wall.id) color.lerp(highlight, .45)
+      if (dragTarget === wall.id) color.multiplyScalar(.45)
+      node.setColorAt(i, color)
+    }
+    node.instanceMatrix.needsUpdate = true
+    if (node.instanceColor) node.instanceColor.needsUpdate = true
+    node.userData = { kind: 'wall-instances', instanceIds: ids }
+  }, [walls, vertices, selectedId, dragTarget, count, ids])
+  if (!count) return null
+  return <instancedMesh key={count} ref={mesh} args={[undefined, undefined, count]} castShadow receiveShadow frustumCulled={false} userData={{ kind: 'wall-instances', instanceIds: ids }} onClick={e => { e.stopPropagation(); const id = ids[e.instanceId ?? -1]; if (id) onSelect(id) }}>
+    <boxGeometry args={[1, 1, 1]} />
+    <meshStandardMaterial roughness={.8} />
+  </instancedMesh>
 }
 
 function WallMesh({ wall, a, b, openings, faded, selected, onSelect }: { wall: Wall; a: Point; b: Point; openings: Building['openings']; faded: boolean; selected: boolean; onSelect: (id: string) => void }) {

@@ -5,7 +5,7 @@ import {FloorPlan} from './components/FloorPlan';
 import {ModelView} from './components/ModelView';
 import {AssetLibrary} from './components/AssetLibrary';
 import type {DesktopProject,DesignBrief,ModelCommand,Job,ProjectSummary} from './types';
-import {api,base,waitJob} from './api';
+import {api,applyPatch,base,isDesktopProject,waitJob} from './api';
 const Context=createContext<any>(null);
 const useApp=()=>useContext(Context);
 const initial:DesignBrief={name:'Willow House',building_use:'Home',floors:'2',rooms:'3 bedrooms, 2 bathrooms, kitchen, living room',area:'2,400 sq ft',style:'Warm minimal'};
@@ -25,7 +25,7 @@ useEffect(()=>{if(file&&project&&!file.name.toLowerCase().endsWith('.pdf'))fetch
 async function open(id:string){try{const p=await api<DesktopProject>('/projects/'+id);setProject(p);setFloor(p.building.floors[0]?.id||'');setSelected(null);setMessages([]);setProposal(null);setIntake(false)}catch(e){setError(String(e))}}
 function newProject(){setProject(null);setIntake(true);setStep(0);setBrief(initial)}
 async function generate(){try{const {job_id}=await api('/generate',brief);const result=await waitJob(job_id,setJob);await refresh();await open(result.project_id)}catch(e){setError(String(e))}finally{setJob(null)}}
-async function command(commands:ModelCommand[]){const p=current.current;if(!p||saving)return;setSaving(true);try{const updated=await api<DesktopProject>(`/projects/${p.project_id}/commands`,{expected_revision:p.revision,commands});setProject(updated);setProposal(null)}catch(e){setError(String(e))}finally{setSaving(false)}}
+async function command(commands:ModelCommand[]){const p=current.current;if(!p||saving)return;setSaving(true);try{const updated=await api(`/projects/${p.project_id}/commands`,{expected_revision:p.revision,commands});setProject(isDesktopProject(updated)?updated:applyPatch(p,updated));setProposal(null)}catch(e){setError(String(e))}finally{setSaving(false)}}
 async function history(direction:string){if(!project||saving)return;setSaving(true);try{setProject(await api(`/projects/${project.project_id}/${direction}`,{expected_revision:project.revision}));setProposal(null)}catch(e){setError(String(e))}finally{setSaving(false)}}
 useEffect(()=>{const key=(e:KeyboardEvent)=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes((e.target as HTMLElement)?.tagName)){e.preventDefault();history(e.shiftKey?'redo':'undo')}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[project,saving]);
 async function chat(text:string){if(!project||job)return;setMessages(m=>[...m,{role:'user',text}]);setProposal(null);try{const {job_id}=await api(`/projects/${project.project_id}/agent`,{expected_revision:project.revision,message:text,context:mode,selected_ids:selected?[selected]:[]});const result=await waitJob(job_id,setJob);setMessages(m=>[...m,{role:'assistant',text:result.message}]);if(result.commands?.length||result.blocked?.length)setProposal(result)}catch(e){setError(String(e))}finally{setJob(null)}}

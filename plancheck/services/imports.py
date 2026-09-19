@@ -8,6 +8,7 @@ from plancheck.core.building import Building,Floor,Vertex,BuildingWall,Opening,R
 from plancheck.core.schemas import Sheet,Project,SheetGeometry,Model,ModelOrigin,Level,SpaceType,Space
 from plancheck.core.settings import get_settings
 from plancheck.services.repository import atomic_json
+from plancheck.services.wall_collapse import DEFAULT_THICKNESS_FT,CollapsedWall,collapse_wall_segments,snap_point
 
 GAP_BRIDGE_FT = 3.0
 MIN_ROOM_AREA_FT2 = 40.0
@@ -45,21 +46,35 @@ def _project_point(px,py,ax,ay,bx,by):
     qx,qy=ax+t_clamp*dx,ay+t_clamp*dy
     return t_clamp*length,math.hypot(px-qx,py-qy),length
 
-def from_segments(segments,floor_id,name,source:Source,thickness=.35,room_names=None):
+def from_segments(segments,floor_id,name,source:Source,thickness=DEFAULT_THICKNESS_FT,room_names=None,collapse=True):
     b=Building(floors=[Floor(id=floor_id,name=name)])
     known={};edges=set()
-    for start,end,structural in segments:
+    if collapse:
+        collapsed=collapse_wall_segments(segments)
+    else:
+        collapsed=[]
+        for item in segments:
+            start,end=item[0],item[1]
+            structural=item[2] if len(item)>2 else 'unknown'
+            thick=float(item[3]) if len(item)>3 else thickness
+            assumed=bool(item[4]) if len(item)>4 else True
+            collapsed.append(CollapsedWall(start,end,structural,thick,assumed))
+    for wall in collapsed:
+        start,end=wall.start,wall.end
         if math.dist(start,end)<.04:continue
         keys=[]
         for p in [start,end]:
-            coord=(round(p[0],4),round(p[1],4))
+            coord=snap_point(p)
             if coord not in known:
                 key=f'{floor_id}-v{len(known)}';known[coord]=key;b.vertices.append(Vertex(id=key,floor_id=floor_id,x=coord[0],y=coord[1]))
             keys.append(known[coord])
+        if keys[0]==keys[1]:continue
         edge=tuple(sorted(keys))
         if edge in edges:continue
-        edges.add(edge);b.walls.append(BuildingWall(id=f'{floor_id}-w{len(b.walls)}',floor_id=floor_id,start_id=keys[0],end_id=keys[1],thickness_ft=thickness,structural=structural,locked=structural!='nonstructural',confidence=.65,source=source))
-    usable=[(start,end) for start,end,_ in segments if math.dist(start,end)>.04]
+        edges.add(edge)
+        wall_source=source.model_copy(update={'assumed':wall.assumed})
+        b.walls.append(BuildingWall(id=f'{floor_id}-w{len(b.walls)}',floor_id=floor_id,start_id=keys[0],end_id=keys[1],thickness_ft=wall.thickness_ft or thickness,structural=wall.structural,locked=wall.structural!='nonstructural',confidence=.65,source=wall_source))
+    usable=[(wall.start,wall.end) for wall in collapsed if math.dist(wall.start,wall.end)>.04]
     if usable:
         # Doorway gaps break raw polygonize; extend along each segment, then keep the bridged face.
         bridged=[LineString(_extend_segment(start,end)) for start,end in usable]
@@ -170,11 +185,15 @@ def retarget_storey(building:Building,floor_id:str,name:str,elevation_ft:float)-
     b.type_catalogue=[]
     return b
 
-def _convert_walls(geom:SheetGeometry,point,bbox=None):
+def _convert_walls(geom:SheetGeometry,point,bbox=None,scale=None):
+    scale=scale or geom.scale_pts_per_ft
     walls=[]
     for w in geom.walls:
         if bbox and not (_in_bbox(w.a,bbox,pad=1) and _in_bbox(w.b,bbox,pad=1)):continue
-        walls.append((point(w.a),point(w.b),_structural(w.cls)))
+        thick=DEFAULT_THICKNESS_FT;assumed=True
+        if w.thickness_pt and scale:
+            thick=w.thickness_pt/scale;assumed=False
+        walls.append((point(w.a),point(w.b),_structural(w.cls),thick,assumed))
     return walls
 
 def _extract_plan(geom:SheetGeometry,sheet:Sheet|None,source:Source,origin=(0.0,0.0),scale=None,bbox=None,floor_id=None,name=None):
@@ -183,7 +202,7 @@ def _extract_plan(geom:SheetGeometry,sheet:Sheet|None,source:Source,origin=(0.0,
     def point(p,x0=x0,y0=y0,scale=scale):return ((p[0]-x0)/scale,(p[1]-y0)/scale)
     fid=floor_id or f'{geom.sheet_id}-src'
     label=name or (sheet.title if sheet else geom.sheet_id)
-    building=from_segments(_convert_walls(geom,point,bbox),fid,label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags])
+    building=from_segments(_convert_walls(geom,point,bbox,scale),fid,label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False)
     attach_openings(building,geom,point,source,bbox=bbox)
     return building
 
@@ -204,7 +223,7 @@ def _catalogue_from_unit_plan(geom:SheetGeometry,sheet:Sheet,source:Source)->Bui
         def point(p,x0=x0,y0=y0,scale=scale):return ((p[0]-x0)/scale,(p[1]-y0)/scale)
         name=region.get('name') or geom.sheet_id
         label=('Reference · ' if region.get('kind')=='unit' else '')+name
-        scratch=from_segments(_convert_walls(geom,point,bbox),region['id'],label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags])
+        scratch=from_segments(_convert_walls(geom,point,bbox,scale),region['id'],label,source,room_names=[(t.text,point(t.xy)) for t in geom.room_tags],collapse=False)
         if not scratch.rooms:
             result.review.extend(scratch.review);continue
         room=max(scratch.rooms,key=lambda r:Polygon(r.polygon).area)

@@ -3,10 +3,10 @@ from __future__ import annotations
 import json,uuid,time,asyncio,shutil
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
-from fastapi import APIRouter,Body,UploadFile,File,Form,HTTPException
+from fastapi import APIRouter,Body,UploadFile,File,Form,HTTPException,Query
 from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,Field
-from plancheck.core.building import Building,DesignBrief,CommandBatch,RevisionRequest,DesktopProject
+from plancheck.core.building import Building,DesignBrief,CommandBatch,RevisionRequest,DesktopProject,BuildingPatch
 from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json
 from plancheck.services.commands import apply_commands,validate_building
 from plancheck.services.compliance import check_building
@@ -17,6 +17,22 @@ _import_pool=ProcessPoolExecutor(max_workers=2)
 def repo():return FileProjectRepository()
 def load(pid):return repo().load(pid)
 def recheck(snapshot):snapshot['checks']=check_building(Building.model_validate(snapshot['building']),snapshot.get('rules',[]));return snapshot
+
+_COLLECTIONS=('vertices','walls','rooms','openings','objects')
+
+def building_patch(before:DesktopProject,after:DesktopProject)->dict:
+    changed={}
+    removed=[]
+    for name in _COLLECTIONS:
+        prev={e.id:e.model_dump(mode='json') for e in getattr(before.building,name)}
+        nxt={e.id:e.model_dump(mode='json') for e in getattr(after.building,name)}
+        updates=[nxt[i] for i in nxt if prev.get(i)!=nxt[i]]
+        if updates:changed[name]=updates
+        removed.extend(i for i in prev if i not in nxt)
+    payload={'revision':after.revision,'can_undo':after.can_undo,'can_redo':after.can_redo,'changed':changed,'removed_ids':removed,'checks':after.checks}
+    if before.building.environment.model_dump()!=after.building.environment.model_dump():
+        payload['environment']=after.building.environment.model_dump(mode='json')
+    return payload
 
 @router.get('/health')
 def health():return {'status':'ready','schema_version':2,'agent_provider':'mock','generation_provider':'demo'}
@@ -39,11 +55,13 @@ def generate(brief:DesignBrief):
 @router.get('/projects/{pid}',response_model=DesktopProject)
 def project(pid:str):return load(pid)
 
-@router.post('/projects/{pid}/commands',response_model=DesktopProject)
-def commands(pid:str,batch:CommandBatch):
+@router.post('/projects/{pid}/commands')
+def commands(pid:str,batch:CommandBatch,full:bool=Query(False)):
+    before=load(pid)
     def update(s):
         s['building']=apply_commands(Building.model_validate(s['building']),batch.commands).model_dump(mode='json');return recheck(s)
-    return repo().commit(pid,batch.expected_revision,update)
+    after=repo().commit(pid,batch.expected_revision,update)
+    return after if full else BuildingPatch.model_validate(building_patch(before,after))
 
 @router.post('/projects/{pid}/undo',response_model=DesktopProject)
 def undo(pid:str,body:RevisionRequest):return repo().history(pid,body.expected_revision,'undo')

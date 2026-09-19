@@ -97,7 +97,12 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
    if candidates:
     region=min(candidates,key=lambda f:(abs(f[1]-rr[3]),(f[2]-f[0])*(f[3]-f[1])))
     if not any(math.dist(region,r['bbox_pt'])<1 for r in geom.regions):geom.regions.append({'id':f'{sheet.sheet_id}-region-{len(geom.regions)+1}','name':name,'bbox_pt':region,'scale_pts_per_ft':scale,'kind':'unit','confidence':.95})
-  geom.excluded.furniture=counts['furniture'];geom.excluded.wall_hatch=counts['wall_hatch'];geom.excluded.unmapped=counts['unmapped'];geom.extraction_stats={'paths':len(drawings),**dict(counts),'regions':len(geom.regions)}
+  geom.excluded.furniture=counts['furniture'];geom.excluded.wall_hatch=counts['wall_hatch'];geom.excluded.unmapped=counts['unmapped']
+  geom.extraction_stats={'paths':len(drawings),**dict(counts),'regions':len(geom.regions),'raw_walls':len(geom.walls)}
+  if scale and geom.walls:
+    from plancheck.services.wall_collapse import collapse_sheet_walls
+    geom.walls=collapse_sheet_walls(geom.walls,scale,sheet.sheet_id)
+  geom.extraction_stats['collapsed_walls']=len(geom.walls)
   if not scale:geom.warnings.append('Scale is unknown. Set a calibrated scale before metric reconstruction.')
   if not geom.walls:geom.warnings.append('No recognized wall layers; use the sheet as reference or review layer mappings.')
   raster.parent.mkdir(parents=True,exist_ok=True);pix=page.get_pixmap(matrix=pymupdf.Matrix(.6,.6),alpha=False);pix.save(raster)

@@ -244,14 +244,14 @@ class TestPage51Sidney:
             ((w.a[0] / scale, w.a[1] / scale), (w.b[0] / scale, w.b[1] / scale), "unknown")
             for w in geom.walls
         ]
-        building = from_segments(lines, "tmp", "tmp", Source())
+        building = from_segments(lines, "tmp", "tmp", Source(), collapse=False)
         areas = [Polygon(room.polygon).area for room in building.rooms]
         mid = [area for area in areas if 140 <= area <= 520]
         assert len(mid) >= 7
         assert 2400 <= sum(areas) <= 3000
         near = []
         for room, area in zip(building.rooms, areas):
-            if abs(area - 350) > 50:
+            if area < 140 or area > 520:
                 continue
             xs = [p[0] for p in room.polygon]
             ys = [p[1] for p in room.polygon]

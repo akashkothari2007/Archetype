@@ -37,7 +37,13 @@ def test_api_complete_workflow(monkeypatch,tmp_path):
         time.sleep(.05)
     assert j['state']=='done',j
     pid=j['result']['project_id'];p=c.get('/api/desktop/projects/'+pid).json();assert len(p['building']['floors'])==2
-    r=c.post(f'/api/desktop/projects/{pid}/commands',json={'expected_revision':p['revision'],'commands':[{'kind':'set_environment','params':{'time':18}}]});assert r.status_code==200,r.text
+    r=c.post(f'/api/desktop/projects/{pid}/commands?full=true',json={'expected_revision':p['revision'],'commands':[{'kind':'set_environment','params':{'time':18}}]});assert r.status_code==200,r.text
     assert r.json()['building']['environment']['time']==18
+    wall=p['building']['walls'][0]['id']
+    material=c.post(f'/api/desktop/projects/{pid}/commands',json={'expected_revision':r.json()['revision'],'commands':[{'kind':'set_material','target_id':wall,'params':{'material':'sage'}}]})
+    assert material.status_code==200,material.text
+    assert len(material.content)<50_000
+    assert 'floors' not in material.json().get('building',{})
+    assert any(item['id']==wall and item['material']=='sage' for item in material.json()['changed']['walls'])
     stale=c.post(f'/api/desktop/projects/{pid}/commands',json={'expected_revision':p['revision'],'commands':[{'kind':'set_environment','params':{'time':8}}]});assert stale.status_code==409
-    assert c.post(f'/api/desktop/projects/{pid}/undo',json={'expected_revision':r.json()['revision']}).status_code==200
+    assert c.post(f'/api/desktop/projects/{pid}/undo',json={'expected_revision':material.json()['revision']}).status_code==200
