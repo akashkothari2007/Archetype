@@ -1,0 +1,11 @@
+.git
+.venv
+node_modules
+apps
+local-data
+work
+*.pdf
+*.PDF
+*.zip
+.env
+__pycache__

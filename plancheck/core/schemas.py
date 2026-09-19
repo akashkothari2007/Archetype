@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+from plancheck.core.building import Building
 
 Point2 = Annotated[list[float], Field(min_length=2, max_length=2)]
 BBox4 = Annotated[list[float], Field(min_length=4, max_length=4)]
@@ -37,7 +38,7 @@ AxisDir = Literal["x", "y"]
 DimensionSource = Literal["metric_bracket", "imperial"]
 MismatchSeverity = Literal["fail", "warn", "cannot_verify"]
 ScaleSource = Literal["title_block", "none", "user"]
-JobState = Literal["queued", "running", "done", "error"]
+JobState = Literal["queued", "running", "done", "error", "cancelled"]
 SpaceCategory = Literal[
     "guestroom",
     "circulation",
@@ -225,6 +226,11 @@ class SheetGeometry(BaseModel):
     size_pt: Point2
     scale_pts_per_ft: float
     coordinate_system: CoordinateSystem = Field(default_factory=CoordinateSystem)
+    doc_id: str = ""
+    source_rotation: int = 0
+    regions: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    extraction_stats: dict[str, int] = Field(default_factory=dict)
     layer_map: dict[str, str] = Field(default_factory=dict)
     walls: list[Wall] = Field(default_factory=list)
     doors: list[Door] = Field(default_factory=list)
@@ -236,6 +242,11 @@ class SheetGeometry(BaseModel):
     clear_spaces: list[ClearSpace] = Field(default_factory=list)
     excluded: ExcludedSummary = Field(default_factory=ExcludedSummary)
     raster: RasterRef = Field(default_factory=RasterRef)
+    doc_id: str = ""
+    source_rotation: int = 0
+    regions: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    extraction_stats: dict[str, int] = Field(default_factory=dict)
 
 
 class BBoxFt(BaseModel):
@@ -337,6 +348,7 @@ class Model(BaseModel):
     levels: list[Level] = Field(default_factory=list)
     space_types: list[SpaceType] = Field(default_factory=list)
     spaces: list[Space] = Field(default_factory=list)
+    building: Building | None = None
 
 
 class Rule(BaseModel):
@@ -350,6 +362,13 @@ class Rule(BaseModel):
     source_page: int
     source_text: str
     extraction: str = "stub"
+    status: Literal["pending", "approved", "rejected"] = "pending"
+    scope: Literal["room", "opening", "opening_pair"] = "room"
+    target_ids: list[str] = Field(default_factory=list)
+    source_label: str = ""
+    source_section: str = ""
+    qualifiers: list[str] = Field(default_factory=list)
+    supported: bool = True
 
 
 class Ruleset(BaseModel):
@@ -374,6 +393,10 @@ class Mismatch(BaseModel):
     source_page: int | None = None
     source_text: str = ""
     model_confidence: float = 1.0
+    entity_id: str = ""
+    entity_ids: list[str] = Field(default_factory=list)
+    source_doc: str = ""
+    source_label: str = ""
 
 
 class CheckResult(BaseModel):
@@ -399,6 +422,9 @@ class ProposedEdits(BaseModel):
 
 
 class JobStatus(BaseModel):
+    phase: str = "queued"
+    result: dict[str, Any] | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
     job_id: str
     state: JobState
     progress: float = 0.0

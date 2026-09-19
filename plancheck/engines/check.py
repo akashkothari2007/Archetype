@@ -1,16 +1,39 @@
-"""Check model.json against rules.json. Stub only."""
+"""Verify approved rules using deterministic canonical geometry measurements."""
 
 from __future__ import annotations
 
 import argparse
+import math
 
-from plancheck.core.schemas import CheckResult, Model, Ruleset
-from plancheck.engines.base import invoke, load_fixture, not_implemented
+from plancheck.core.schemas import CheckResult, Mismatch, Model, Ruleset
+from plancheck.core.building import Building, Floor, Room
+from plancheck.engines.base import invoke, load_fixture
+from plancheck.services.compliance import check_building
 
 
 def run_real(model: Model, rules: Ruleset) -> CheckResult:
-    not_implemented("check")
-    raise AssertionError("unreachable")
+    building = model.building
+    if building is None:
+        # Backwards-compatible read projection; the v2 editor always supplies
+        # its canonical building. Never trust cached legacy area/bbox numbers.
+        building = Building(floors=[Floor(id=f"level-{l.index}",name=l.name) for l in model.levels])
+        types = {t.type_id:t for t in model.space_types}
+        for space in model.spaces:
+            template = types.get(space.type_ref)
+            if template is None: continue
+            angle = math.radians(space.rotation_deg)
+            def point(p):
+                x,y = p
+                if space.mirrored: x=-x
+                return (space.origin_ft[0]+x*math.cos(angle)-y*math.sin(angle),
+                        space.origin_ft[1]+x*math.sin(angle)+y*math.cos(angle))
+            for room_type in [template,*template.children]:
+                building.rooms.append(Room(id=space.space_id+("/"+room_type.type_id if room_type is not template else ""),
+                    floor_id=f"level-{space.level}",name=room_type.name,category=room_type.category,
+                    type_ref=room_type.type_id,polygon=[point(p) for p in room_type.boundary_ft],
+                    confidence=min(room_type.confidence,space.confidence)))
+    checks = check_building(building,[r.model_dump() for r in rules.rules])
+    return CheckResult(mismatches=[Mismatch.model_validate(c) for c in checks if c["status"] != "pass"])
 
 
 def run_stub(model: Model, rules: Ruleset) -> CheckResult:

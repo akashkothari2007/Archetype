@@ -39,8 +39,8 @@ def write_placeholder_raster(
 def run_real(
     sheet: Sheet, pdf_path: Path, raster_path: Path
 ) -> SheetGeometry:
-    not_implemented("extract")
-    raise AssertionError("unreachable")
+    from plancheck.services.pdf_extract import extract
+    return extract(sheet, pdf_path, raster_path)
 
 
 def run_stub(

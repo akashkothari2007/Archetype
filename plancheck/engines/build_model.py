@@ -17,8 +17,10 @@ def _rewrite_source_sheet(types: list[SpaceType], sheet_id: str) -> None:
 def run_real(
     project: Project, geometries: list[SheetGeometry]
 ) -> Model:
-    not_implemented("model")
-    raise AssertionError("unreachable")
+    from plancheck.services.imports import build_from_sheets
+    from plancheck.core.schemas import ModelOrigin
+    building = build_from_sheets(project, geometries)
+    return Model(units="feet", origin=ModelOrigin(grid_x="source", grid_y="source"), building=building)
 
 
 def run_stub(

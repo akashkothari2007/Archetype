@@ -1,0 +1,155 @@
+[
+  {
+    "id": "sofa_02",
+    "name": "Sofa 02",
+    "source": "https://polyhaven.com/a/sofa_02",
+    "license": "CC0-1.0",
+    "license_url": "https://polyhaven.com/license",
+    "authors": {
+      "Kirill Sannikov": "All"
+    },
+    "resolution": "1k",
+    "path": "assets/sofa_02/sofa_02.gltf",
+    "preview": "assets/sofa_02/preview.png",
+    "files": [
+      {
+        "path": "sofa_02.gltf",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/1k/sofa_02/sofa_02_1k.gltf",
+        "md5": "ec2590dc8433a523d0fe9e507766c16f",
+        "bytes": 4183
+      },
+      {
+        "path": "textures/sofa_02_diff_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/sofa_02/sofa_02_diff_1k.jpg",
+        "md5": "0452c7d8dd3ef414d5ed3055085028a1",
+        "bytes": 86514
+      },
+      {
+        "path": "textures/sofa_02_arm_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/sofa_02/sofa_02_arm_1k.jpg",
+        "md5": "78799d978a1117ba83dbffed9af0fa33",
+        "bytes": 121752
+      },
+      {
+        "path": "textures/sofa_02_nor_gl_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/sofa_02/sofa_02_nor_gl_1k.jpg",
+        "md5": "968528a369bced172d34275dba5aebf1",
+        "bytes": 139858
+      },
+      {
+        "path": "sofa_02.bin",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/4k/sofa_02/sofa_02.bin",
+        "md5": "024d6f57a7c2ee7915430cd6e1c2651e",
+        "bytes": 74864
+      }
+    ]
+  },
+  {
+    "id": "modern_arm_chair_01",
+    "name": "Modern Arm Chair 01",
+    "source": "https://polyhaven.com/a/modern_arm_chair_01",
+    "license": "CC0-1.0",
+    "license_url": "https://polyhaven.com/license",
+    "authors": {
+      "Vibrant Nordic": "All"
+    },
+    "resolution": "1k",
+    "path": "assets/modern_arm_chair_01/modern_arm_chair_01.gltf",
+    "preview": "assets/modern_arm_chair_01/preview.png",
+    "files": [
+      {
+        "path": "modern_arm_chair_01.gltf",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/1k/modern_arm_chair_01/modern_arm_chair_01_1k.gltf",
+        "md5": "a5ce303bc2962fe98b733fcdfa5a842b",
+        "bytes": 5121
+      },
+      {
+        "path": "textures/modern_arm_chair_01_pillow_nor_gl_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_arm_chair_01/modern_arm_chair_01_pillow_nor_gl_1k.jpg",
+        "md5": "6804f34108fcc755f0c84dd3c638270c",
+        "bytes": 302377
+      },
+      {
+        "path": "textures/modern_arm_chair_01_legs_nor_gl_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_arm_chair_01/modern_arm_chair_01_legs_nor_gl_1k.jpg",
+        "md5": "7cece7eccf75588af5b5df9b095d2c97",
+        "bytes": 560864
+      },
+      {
+        "path": "textures/modern_arm_chair_01_pillow_arm_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_arm_chair_01/modern_arm_chair_01_pillow_arm_1k.jpg",
+        "md5": "772495ddbf26ca3de4b31298f10113b9",
+        "bytes": 321223
+      },
+      {
+        "path": "textures/modern_arm_chair_01_legs_diff_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_arm_chair_01/modern_arm_chair_01_legs_diff_1k.jpg",
+        "md5": "778f1897e07ff81b2bc338f3d463ad1f",
+        "bytes": 460937
+      },
+      {
+        "path": "textures/modern_arm_chair_01_legs_arm_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_arm_chair_01/modern_arm_chair_01_legs_arm_1k.jpg",
+        "md5": "9c69cb001df175bddf6d1c2436567fb7",
+        "bytes": 577931
+      },
+      {
+        "path": "modern_arm_chair_01.bin",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/8k/modern_arm_chair_01/modern_arm_chair_01.bin",
+        "md5": "5a8f2ea1c79ea484140e484b2a621670",
+        "bytes": 240728
+      },
+      {
+        "path": "textures/modern_arm_chair_01_pillow_diff_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_arm_chair_01/modern_arm_chair_01_pillow_diff_1k.jpg",
+        "md5": "2e4f64c633c3cb1656ad3eabdb3f0607",
+        "bytes": 228851
+      }
+    ]
+  },
+  {
+    "id": "modern_coffee_table_01",
+    "name": "Modern Coffee Table 01",
+    "source": "https://polyhaven.com/a/modern_coffee_table_01",
+    "license": "CC0-1.0",
+    "license_url": "https://polyhaven.com/license",
+    "authors": {
+      "Amin": "All"
+    },
+    "resolution": "1k",
+    "path": "assets/modern_coffee_table_01/modern_coffee_table_01.gltf",
+    "preview": "assets/modern_coffee_table_01/preview.png",
+    "files": [
+      {
+        "path": "modern_coffee_table_01.gltf",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/1k/modern_coffee_table_01/modern_coffee_table_01_1k.gltf",
+        "md5": "f1c079ab5bc307630258cf3b40910511",
+        "bytes": 2771
+      },
+      {
+        "path": "modern_coffee_table_01.bin",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/gltf/8k/modern_coffee_table_01/modern_coffee_table_01.bin",
+        "md5": "6e8f65bff935af308eab9eff062f6daa",
+        "bytes": 154864
+      },
+      {
+        "path": "textures/modern_coffee_table_01_rough_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_coffee_table_01/modern_coffee_table_01_rough_1k.jpg",
+        "md5": "6ccbc448fa0e2bed32eac52511e84e2c",
+        "bytes": 403959
+      },
+      {
+        "path": "textures/modern_coffee_table_01_diff_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_coffee_table_01/modern_coffee_table_01_diff_1k.jpg",
+        "md5": "356014e027b59c21b3c99ac112e645f9",
+        "bytes": 410569
+      },
+      {
+        "path": "textures/modern_coffee_table_01_nor_gl_1k.jpg",
+        "source": "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/modern_coffee_table_01/modern_coffee_table_01_nor_gl_1k.jpg",
+        "md5": "d263e6131abc518760d6771390bc5066",
+        "bytes": 359134
+      }
+    ]
+  }
+]

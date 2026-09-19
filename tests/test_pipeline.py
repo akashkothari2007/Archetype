@@ -8,7 +8,7 @@ from plancheck.core.schemas import (
     SheetGeometry,
 )
 from plancheck.demo import run_pipeline, write_sample_drawings, write_sample_standards
-from plancheck.engines.classify import assign_role
+from plancheck.engines.classify import assign_role, parse_levels
 
 
 def test_assign_role_rules():
@@ -18,6 +18,13 @@ def test_assign_role_rules():
     assert assign_role("A.301", "ELEVATION", 9.0) == "elevation"
     assert assign_role("A.701", "SCHEDULE", None) == "schedule"
     assert assign_role("S.201", "EDGE OF SLAB", 9.0) == "slab_edge"
+
+
+def test_parse_levels_from_sheet_titles():
+    assert parse_levels("GROUND FLOOR PLAN") == ["1"]
+    assert parse_levels("TYPICAL FLOOR PLAN (2nd to 3rd)") == ["2", "3"]
+    assert parse_levels("LEVEL 4 FLOOR PLAN") == ["4"]
+    assert parse_levels("FLOOR PLAN") == []
 
 
 def test_stub_pipeline_end_to_end(tmp_path):

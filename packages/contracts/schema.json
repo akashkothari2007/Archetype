@@ -1,0 +1,898 @@
+{
+  "$defs": {
+    "Building": {
+      "properties": {
+        "schema_version": {
+          "const": 2,
+          "default": 2,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "units": {
+          "const": "feet",
+          "default": "feet",
+          "title": "Units",
+          "type": "string"
+        },
+        "floors": {
+          "items": {
+            "$ref": "#/$defs/Floor"
+          },
+          "title": "Floors",
+          "type": "array"
+        },
+        "vertices": {
+          "items": {
+            "$ref": "#/$defs/Vertex"
+          },
+          "title": "Vertices",
+          "type": "array"
+        },
+        "walls": {
+          "items": {
+            "$ref": "#/$defs/BuildingWall"
+          },
+          "title": "Walls",
+          "type": "array"
+        },
+        "openings": {
+          "items": {
+            "$ref": "#/$defs/Opening"
+          },
+          "title": "Openings",
+          "type": "array"
+        },
+        "rooms": {
+          "items": {
+            "$ref": "#/$defs/Room"
+          },
+          "title": "Rooms",
+          "type": "array"
+        },
+        "objects": {
+          "items": {
+            "$ref": "#/$defs/PlacedObject"
+          },
+          "title": "Objects",
+          "type": "array"
+        },
+        "type_catalogue": {
+          "items": {
+            "$ref": "#/$defs/TypeCatalogueEntry"
+          },
+          "title": "Type Catalogue",
+          "type": "array"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "review": {
+          "items": {
+            "$ref": "#/$defs/ReviewItem"
+          },
+          "title": "Review",
+          "type": "array"
+        }
+      },
+      "title": "Building",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "units",
+        "floors",
+        "vertices",
+        "walls",
+        "openings",
+        "rooms",
+        "objects",
+        "type_catalogue",
+        "environment",
+        "review"
+      ]
+    },
+    "BuildingWall": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "floor_id": {
+          "title": "Floor Id",
+          "type": "string"
+        },
+        "start_id": {
+          "title": "Start Id",
+          "type": "string"
+        },
+        "end_id": {
+          "title": "End Id",
+          "type": "string"
+        },
+        "thickness_ft": {
+          "default": 0.5,
+          "exclusiveMinimum": 0,
+          "maximum": 10,
+          "title": "Thickness Ft",
+          "type": "number"
+        },
+        "height_ft": {
+          "default": 9,
+          "exclusiveMinimum": 0,
+          "maximum": 100,
+          "title": "Height Ft",
+          "type": "number"
+        },
+        "structural": {
+          "default": "unknown",
+          "enum": [
+            "loadbearing",
+            "nonstructural",
+            "unknown"
+          ],
+          "title": "Structural",
+          "type": "string"
+        },
+        "locked": {
+          "default": true,
+          "title": "Locked",
+          "type": "boolean"
+        },
+        "material": {
+          "default": "plaster",
+          "title": "Material",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 1,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "id",
+        "floor_id",
+        "start_id",
+        "end_id",
+        "thickness_ft",
+        "height_ft",
+        "structural",
+        "locked",
+        "material",
+        "confidence",
+        "source"
+      ],
+      "title": "BuildingWall",
+      "type": "object"
+    },
+    "CatalogueFixture": {
+      "properties": {
+        "kind": {
+          "default": "unknown",
+          "title": "Kind",
+          "type": "string"
+        },
+        "x": {
+          "default": 0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "default": 0,
+          "title": "Y",
+          "type": "number"
+        },
+        "asset_id": {
+          "default": "",
+          "title": "Asset Id",
+          "type": "string"
+        }
+      },
+      "title": "CatalogueFixture",
+      "type": "object",
+      "required": [
+        "kind",
+        "x",
+        "y",
+        "asset_id"
+      ]
+    },
+    "DesignBrief": {
+      "properties": {
+        "name": {
+          "default": "Untitled project",
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "building_use": {
+          "default": "Home",
+          "title": "Building Use",
+          "type": "string"
+        },
+        "floors": {
+          "default": "2",
+          "title": "Floors",
+          "type": "string"
+        },
+        "rooms": {
+          "default": "3 bedrooms, 2 bathrooms, kitchen, living room",
+          "title": "Rooms",
+          "type": "string"
+        },
+        "area": {
+          "default": "2,400 sq ft",
+          "title": "Area",
+          "type": "string"
+        },
+        "style": {
+          "default": "Warm minimal",
+          "title": "Style",
+          "type": "string"
+        }
+      },
+      "title": "DesignBrief",
+      "type": "object",
+      "required": [
+        "name",
+        "building_use",
+        "floors",
+        "rooms",
+        "area",
+        "style"
+      ]
+    },
+    "DesktopProject": {
+      "properties": {
+        "project_id": {
+          "title": "Project Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "integer"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "string"
+        },
+        "brief": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DesignBrief"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "building": {
+          "$ref": "#/$defs/Building"
+        },
+        "rules": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "checks": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Checks",
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "can_undo": {
+          "default": false,
+          "title": "Can Undo",
+          "type": "boolean"
+        },
+        "can_redo": {
+          "default": false,
+          "title": "Can Redo",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project_id",
+        "name",
+        "revision",
+        "created_at",
+        "updated_at",
+        "brief",
+        "building",
+        "rules",
+        "checks",
+        "files",
+        "can_undo",
+        "can_redo"
+      ],
+      "title": "DesktopProject",
+      "type": "object"
+    },
+    "Environment": {
+      "properties": {
+        "sun_azimuth": {
+          "default": 135,
+          "title": "Sun Azimuth",
+          "type": "number"
+        },
+        "time": {
+          "default": 14,
+          "maximum": 24,
+          "minimum": 0,
+          "title": "Time",
+          "type": "number"
+        },
+        "season": {
+          "default": "summer",
+          "enum": [
+            "spring",
+            "summer",
+            "autumn",
+            "winter"
+          ],
+          "title": "Season",
+          "type": "string"
+        }
+      },
+      "title": "Environment",
+      "type": "object",
+      "required": [
+        "sun_azimuth",
+        "time",
+        "season"
+      ]
+    },
+    "Floor": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "elevation_ft": {
+          "default": 0,
+          "title": "Elevation Ft",
+          "type": "number"
+        },
+        "height_ft": {
+          "default": 9,
+          "exclusiveMinimum": 0,
+          "title": "Height Ft",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "elevation_ft",
+        "height_ft"
+      ],
+      "title": "Floor",
+      "type": "object"
+    },
+    "ModelCommand": {
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_id": {
+          "default": "",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ModelCommand",
+      "type": "object"
+    },
+    "Opening": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "wall_id": {
+          "title": "Wall Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "door",
+            "window"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "offset_ft": {
+          "minimum": 0,
+          "title": "Offset Ft",
+          "type": "number"
+        },
+        "width_ft": {
+          "exclusiveMinimum": 0,
+          "title": "Width Ft",
+          "type": "number"
+        },
+        "height_ft": {
+          "default": 7,
+          "exclusiveMinimum": 0,
+          "title": "Height Ft",
+          "type": "number"
+        },
+        "sill_ft": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Sill Ft",
+          "type": "number"
+        },
+        "hinge": {
+          "default": "left",
+          "enum": [
+            "left",
+            "right"
+          ],
+          "title": "Hinge",
+          "type": "string"
+        },
+        "swing": {
+          "default": "in",
+          "enum": [
+            "in",
+            "out"
+          ],
+          "title": "Swing",
+          "type": "string"
+        },
+        "clear_width_ft": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clear Width Ft"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "id",
+        "wall_id",
+        "kind",
+        "offset_ft",
+        "width_ft",
+        "height_ft",
+        "sill_ft",
+        "hinge",
+        "swing",
+        "clear_width_ft",
+        "source"
+      ],
+      "title": "Opening",
+      "type": "object"
+    },
+    "PlacedObject": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "floor_id": {
+          "title": "Floor Id",
+          "type": "string"
+        },
+        "asset_id": {
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "furniture",
+          "title": "Kind",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "rotation_deg": {
+          "default": 0,
+          "title": "Rotation Deg",
+          "type": "number"
+        },
+        "width_ft": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Width Ft",
+          "type": "number"
+        },
+        "depth_ft": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Depth Ft",
+          "type": "number"
+        },
+        "height_ft": {
+          "default": 2,
+          "exclusiveMinimum": 0,
+          "title": "Height Ft",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "floor_id",
+        "asset_id",
+        "kind",
+        "x",
+        "y",
+        "rotation_deg",
+        "width_ft",
+        "depth_ft",
+        "height_ft"
+      ],
+      "title": "PlacedObject",
+      "type": "object"
+    },
+    "ReviewItem": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "document_id": {
+          "default": "",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "sheet_id": {
+          "default": "",
+          "title": "Sheet Id",
+          "type": "string"
+        },
+        "entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Ids",
+          "type": "array"
+        },
+        "status": {
+          "default": "pending",
+          "enum": [
+            "pending",
+            "resolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "message",
+        "document_id",
+        "sheet_id",
+        "entity_ids",
+        "status"
+      ],
+      "title": "ReviewItem",
+      "type": "object"
+    },
+    "Room": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "floor_id": {
+          "title": "Floor Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "category": {
+          "default": "other",
+          "title": "Category",
+          "type": "string"
+        },
+        "type_ref": {
+          "default": "",
+          "title": "Type Ref",
+          "type": "string"
+        },
+        "polygon": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array",
+            "items": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "title": "Polygon",
+          "type": "array"
+        },
+        "wall_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Wall Ids",
+          "type": "array"
+        },
+        "floor_material": {
+          "default": "oak",
+          "title": "Floor Material",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 1,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "needs_review": {
+          "default": false,
+          "title": "Needs Review",
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "id",
+        "floor_id",
+        "name",
+        "category",
+        "type_ref",
+        "polygon",
+        "wall_ids",
+        "floor_material",
+        "confidence",
+        "needs_review",
+        "source"
+      ],
+      "title": "Room",
+      "type": "object"
+    },
+    "Source": {
+      "properties": {
+        "document_id": {
+          "default": "",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "sheet_id": {
+          "default": "",
+          "title": "Sheet Id",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "method": {
+          "default": "user",
+          "title": "Method",
+          "type": "string"
+        },
+        "assumed": {
+          "default": false,
+          "title": "Assumed",
+          "type": "boolean"
+        }
+      },
+      "title": "Source",
+      "type": "object",
+      "required": [
+        "document_id",
+        "sheet_id",
+        "page",
+        "method",
+        "assumed"
+      ]
+    },
+    "TypeCatalogueEntry": {
+      "description": "A unit-plan room type. Not a storey \u2014 instances live on floor-plan rooms.",
+      "properties": {
+        "type_ref": {
+          "title": "Type Ref",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "category": {
+          "default": "other",
+          "title": "Category",
+          "type": "string"
+        },
+        "polygon": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array",
+            "items": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "title": "Polygon",
+          "type": "array"
+        },
+        "area_sqft": {
+          "default": 0,
+          "title": "Area Sqft",
+          "type": "number"
+        },
+        "aspect_ratio": {
+          "default": 0,
+          "title": "Aspect Ratio",
+          "type": "number"
+        },
+        "fixtures": {
+          "items": {
+            "$ref": "#/$defs/CatalogueFixture"
+          },
+          "title": "Fixtures",
+          "type": "array"
+        },
+        "instance_count": {
+          "default": 0,
+          "title": "Instance Count",
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "type_ref",
+        "name",
+        "label",
+        "category",
+        "polygon",
+        "area_sqft",
+        "aspect_ratio",
+        "fixtures",
+        "instance_count",
+        "source"
+      ],
+      "title": "TypeCatalogueEntry",
+      "type": "object"
+    },
+    "Vertex": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "floor_id": {
+          "title": "Floor Id",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "floor_id",
+        "x",
+        "y"
+      ],
+      "title": "Vertex",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "building": {
+      "$ref": "#/$defs/Building"
+    },
+    "project": {
+      "$ref": "#/$defs/DesktopProject"
+    },
+    "command": {
+      "$ref": "#/$defs/ModelCommand"
+    }
+  },
+  "required": [
+    "building",
+    "project",
+    "command"
+  ],
+  "title": "Contracts",
+  "type": "object"
+}

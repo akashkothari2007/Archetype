@@ -1,62 +1,59 @@
-"""In-process background job runner. Frontend polls GET /api/jobs/{id}."""
-
+"""Bounded, persisted local jobs with cooperative cancellation and progress history."""
 from __future__ import annotations
-
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
-
 from plancheck.core.schemas import JobStatus
+from plancheck.core.settings import get_settings
+from plancheck.services.repository import atomic_json
+ProgressFn=Callable[...,None]
+_lock=threading.RLock();_jobs={};_cancel={};_pool=ThreadPoolExecutor(max_workers=4,thread_name_prefix='archetype-job')
+class JobCancelled(Exception):pass
 
-ProgressFn = Callable[..., None]
+def _path(jid):
+    if not jid.isalnum():raise ValueError('Invalid job identifier')
+    return get_settings().data_dir/'_jobs'/f'{jid}.json'
 
-_lock = threading.Lock()
-_jobs: dict[str, JobStatus] = {}
-
-
-def get_job(job_id: str) -> JobStatus | None:
+def get_job(job_id):
     with _lock:
-        job = _jobs.get(job_id)
-        return job.model_copy() if job else None
+        if job_id in _jobs:return _jobs[job_id].model_copy(deep=True)
+        path=_path(job_id)
+        if not path.exists():return None
+        job=JobStatus.model_validate_json(path.read_text())
+        if job.state in ['running','queued']:
+            job.state='error';job.phase='interrupted';job.error='The application restarted before this job finished.';job.message='Interrupted — run again to retry'
+            atomic_json(path,job.model_dump())
+        _jobs[job_id]=job
+        return job.model_copy(deep=True)
 
-
-def _update(job_id: str, **kwargs: Any) -> None:
+def _update(jid,**kw):
     with _lock:
-        current = _jobs[job_id]
-        _jobs[job_id] = current.model_copy(update=kwargs)
+        current=_jobs[jid];kw={k:v for k,v in kw.items() if k in JobStatus.model_fields}
+        current=current.model_copy(update=kw)
+        if 'message' in kw:current.events=(current.events+[{'message':current.message,'phase':current.phase,'progress':current.progress}])[-100:]
+        _jobs[jid]=current;atomic_json(_path(jid),current.model_dump())
 
+def cancel(job_id):
+    job=get_job(job_id)
+    if job is None:raise KeyError(job_id)
+    if job.state in ['done','error','cancelled']:return job
+    with _lock:_cancel.setdefault(job_id,threading.Event()).set()
+    return job
 
-def submit(
-    fn: Callable[[ProgressFn], Any],
-    message: str = "queued",
-) -> str:
-    job_id = uuid4().hex[:12]
-    with _lock:
-        _jobs[job_id] = JobStatus(
-            job_id=job_id,
-            state="queued",
-            progress=0.0,
-            message=message,
-            error=None,
-        )
-
-    def report(**kwargs: Any) -> None:
-        _update(job_id, **kwargs)
-
-    def runner() -> None:
+def submit(fn:Callable[[ProgressFn],Any],message='Queued'):
+    jid=uuid4().hex[:12]
+    with _lock:_jobs[jid]=JobStatus(job_id=jid,state='queued',message=message);_cancel[jid]=threading.Event();atomic_json(_path(jid),_jobs[jid].model_dump())
+    def report(**kw):
+        if _cancel[jid].is_set():raise JobCancelled()
+        _update(jid,**kw)
+    def run():
         try:
-            report(state="running", message=message)
-            fn(report)
-            latest = get_job(job_id)
-            if latest is not None and latest.state != "error":
-                report(
-                    state="done",
-                    progress=1.0,
-                    message=latest.message or "done",
-                )
-        except Exception as exc:  # noqa: BLE001 — surface any engine failure
-            report(state="error", error=str(exc), message="failed")
-
-    threading.Thread(target=runner, daemon=True).start()
-    return job_id
+            report(state='running',phase='working',message=message)
+            result=fn(report)
+            # fn performs a final cancellation check before any transactional commit.
+            _update(jid,state='done',phase='completed',progress=1,result=result if isinstance(result,dict) else None)
+        except JobCancelled:_update(jid,state='cancelled',phase='cancelled',message='Cancelled; committed project preserved')
+        except Exception as exc:_update(jid,state='error',phase='failed',error=str(exc),message=str(exc))
+    _pool.submit(run);return jid

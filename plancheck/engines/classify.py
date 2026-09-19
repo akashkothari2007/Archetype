@@ -29,6 +29,10 @@ SHEET_TITLE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 LEVEL_RE = re.compile(r"\bLEVEL\s+(\d+)\b", re.IGNORECASE)
+LEVEL_RANGE_RE = re.compile(
+    r"(\d+)\s*(?:st|nd|rd|th)?\s*(?:to|-|–|&)\s*(\d+)\s*(?:st|nd|rd|th)?",
+    re.IGNORECASE,
+)
 DIM_TOKEN_RE = re.compile(r"""\d+'\-\d+"|\[\d{3,5}\]""")
 
 # Phrase patterns so "PROOF" ≠ "ROOF" and "ON SITE" is weaker than "SITE PLAN".
@@ -166,6 +170,34 @@ def first_title_keyword(text: str) -> str | None:
     return None if best is None else best[1]
 
 
+def sheet_title_field(title_block: str) -> str | None:
+    field = SHEET_TITLE_RE.search(title_block)
+    return field.group(1).strip() if field else None
+
+
+def parse_levels(title: str | None) -> list[str]:
+    """Storeys named in a sheet title: GROUND → 1, (2nd to 3rd) → 2, 3."""
+    if not title:
+        return []
+    found: list[str] = []
+
+    def add(level: int) -> None:
+        if level >= 1 and str(level) not in found:
+            found.append(str(level))
+
+    for start, end in LEVEL_RANGE_RE.findall(title):
+        lo, hi = int(start), int(end)
+        for level in range(min(lo, hi), max(lo, hi) + 1):
+            add(level)
+    for match in LEVEL_RE.finditer(title):
+        add(int(match.group(1)))
+    if not found and re.search(r"\bGROUND\b", title, re.I):
+        add(1)
+    if not found and re.search(r"\bFIRST\s+FLOOR\b", title, re.I):
+        add(1)
+    return found
+
+
 def parse_title(title_block: str, full_text: str) -> str | None:
     """Prefer the Sheet Title: field; otherwise first keyword in TB, then page."""
     field = SHEET_TITLE_RE.search(title_block)
@@ -232,7 +264,7 @@ def classify_page(
     title = parse_title(title_block, text)
     role = assign_role(sheet_no, title, pts_per_ft)
     use = role in USABLE_ROLES
-    levels = [m.group(1) for m in LEVEL_RE.finditer(text)]
+    levels = parse_levels(sheet_title_field(title_block)) or parse_levels(title)
 
     page_no = page_index + 1
     return Sheet(

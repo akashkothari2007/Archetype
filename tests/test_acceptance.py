@@ -63,6 +63,13 @@ class TestClassify:
         assert row.scale_pts_per_ft == pytest.approx(pts_per_ft)
         assert row.use is use
 
+    def test_floor_plan_levels(self, classified) -> None:
+        _document, sheets = classified
+        ground = next(s for s in sheets if s.sheet_no == "A.201")
+        typical = next(s for s in sheets if s.sheet_no == "A.202")
+        assert ground.levels == ["1"]
+        assert typical.levels == ["2", "3"]
+
     @pytest.mark.parametrize("page", range(10, 17))
     def test_slab_edge_pages_are_excluded_with_a_reason(
         self, classified, page

@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = PACKAGE_DIR / "data" / "projects"
 DEFAULT_ENGINES = (
-    "classify:real,extract:stub,model:stub,rules:stub,check:stub,agent:stub"
+    "classify:real,extract:real,model:real,rules:real,check:real,agent:stub"
 )
 ENGINE_NAMES = ("classify", "extract", "model", "rules", "check", "agent")
 
@@ -20,11 +20,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="PLANCHECK_",
         extra="ignore",
+        env_file=".env",
     )
 
     data_dir: Path = Field(default=DEFAULT_DATA_DIR)
     stub_delay_ms: int = Field(default=400)
     engines: str = Field(default=DEFAULT_ENGINES)
+    agent_provider: str = "mock"
+    agent_api_key: str = ""
+    agent_model: str = ""
+    generation_provider: str = "demo"
+    use_enlarged: bool = False
+    session_token: str = ""
+    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
 
     def engine_modes(self) -> dict[str, str]:
         modes = {name: "stub" for name in ENGINE_NAMES}
