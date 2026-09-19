@@ -102,6 +102,7 @@ export type Floors1 = string;
 export type Rooms1 = string;
 export type Area = string;
 export type Style = string;
+export type Prompt = string;
 export type Rules = {
   [k: string]: unknown;
 }[];
@@ -268,6 +269,7 @@ export interface DesignBrief {
   rooms: Rooms1;
   area: Area;
   style: Style;
+  prompt: Prompt;
   [k: string]: unknown;
 }
 export interface ModelCommand {

@@ -7,6 +7,7 @@ from fastapi import APIRouter,Body,UploadFile,File,Form,HTTPException,Query
 from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,Field
 from plancheck.core.building import Building,DesignBrief,CommandBatch,RevisionRequest,DesktopProject,BuildingPatch
+from plancheck.core.settings import get_settings
 from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json
 from plancheck.services.commands import apply_commands,validate_building
 from plancheck.services.compliance import check_building
@@ -35,7 +36,17 @@ def building_patch(before:DesktopProject,after:DesktopProject)->dict:
     return payload
 
 @router.get('/health')
-def health():return {'status':'ready','schema_version':2,'agent_provider':'mock','generation_provider':'demo'}
+def health():
+    settings=get_settings()
+    live=settings.agent_live()
+    return {
+        'status':'ready',
+        'schema_version':2,
+        'agent_provider':'baseten' if live else 'mock',
+        'generation_provider':settings.generation_provider,
+        'orchestrator_model':settings.orchestrator_slug() if live else None,
+        'subagent_model':settings.subagent_slug() if live else None,
+    }
 
 @router.get('/projects')
 def projects():return repo().list()
@@ -43,11 +54,13 @@ def projects():return repo().list()
 @router.post('/generate')
 def generate(brief:DesignBrief):
     def work(report):
-        from plancheck.mocks.generation import demo_home,demo_rules
-        for i,message in enumerate(['Reading your design brief','Arranging the two-storey demo layout','Connecting walls and openings','Preparing materials and fixtures','Validating editable geometry']):
-            report(phase=['analyzing','planning','working','working','validating'][i],progress=.1+i*.16,message=message);time.sleep(.32)
-        building=demo_home();report(phase='saving',progress=.94,message='Saving your editable project')
-        project=repo().create(brief.name,building,demo_rules(),brief)
+        from plancheck.generation import generate_from_brief
+        result=generate_from_brief(brief,report)
+        report(phase='saving',progress=.94,message='Saving your editable project')
+        project=repo().create(brief.name,result.building,result.rules,brief)
+        if result.program:
+            # Keep the interpretation of the prompt auditable next to the geometry.
+            atomic_json(repo().path(project.project_id)/'program.json',{'program':result.program,'layouts':result.layouts,'notes':result.notes,'llm_calls':result.llm_calls,'recovered_from':result.recovered_from})
         project=repo().commit(project.project_id,project.revision,recheck)
         return {'project_id':project.project_id}
     return {'job_id':jobs.submit(work,'Preparing your project')}
@@ -79,7 +92,7 @@ def agent(pid:str,body:ChatRequest):
     project=load(pid)
     if project.revision!=body.expected_revision:raise RevisionConflict('The project changed before the repair started')
     def work(report):
-        from plancheck.mocks.agent_provider import respond
+        from plancheck.services.agent import respond
         report(phase='analyzing',progress=.08,message='Reading the selected model and approved requirements');time.sleep(.3)
         report(phase='planning',progress=.18,message='Assigning bounded tasks to geometry workers');time.sleep(.3)
         result=respond(project.building,project.rules,body.message,body.context,body.selected_ids,report)
@@ -92,7 +105,7 @@ def agent(pid:str,body:ChatRequest):
 @router.post('/projects/{pid}/repairs/{run_id}/apply',response_model=DesktopProject)
 def apply_repair(pid:str,run_id:str,body:RevisionRequest):
     if not run_id.isalnum():raise ValueError('Invalid repair identifier')
-    proposal=json.loads((repo().path(pid)/'repairs'/f'{run_id}.json').read_text())
+    proposal=json.loads((repo().path(pid)/'repairs'/f'{run_id}.json').read_text(encoding='utf8'))
     if proposal['expected_revision']!=body.expected_revision:raise RevisionConflict('This preview is stale. Run the request again.')
     if not proposal['commands']:raise ValueError('This preview has no changes to apply')
     def update(s):

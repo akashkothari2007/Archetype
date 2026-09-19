@@ -140,6 +140,7 @@ class DesignBrief(BaseModel):
     rooms: str = "3 bedrooms, 2 bathrooms, kitchen, living room"
     area: str = "2,400 sq ft"
     style: str = "Warm minimal"
+    prompt: str = Field(default="", max_length=4000)
 
 
 class ModelCommand(BaseModel):
