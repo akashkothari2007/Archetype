@@ -1,5 +1,5 @@
 import {useEffect, useMemo, useRef, useState} from 'react'
-import {Stage, Layer, Line, Image as KonvaImage, Group, Text} from 'react-konva'
+import {Stage, Layer, Line, Image as KonvaImage, Group} from 'react-konva'
 import type {KonvaEventObject} from 'konva/lib/Node'
 import {base} from '../api'
 import type {DesktopProject, SheetCard} from '../types'
@@ -7,6 +7,8 @@ import './editor-view.css'
 
 type Geom = {walls?: {a: number[]; b: number[]}[]; size_pt?: number[]; scale_pts_per_ft?: number}
 type Mode = 'overlay' | 'wipe' | 'split'
+
+const ROLE_PRIORITY = ['floor_plan', 'unit_plan', 'enlarged_plan'] as const
 
 function loadImage(url: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -30,6 +32,39 @@ function bbox(lines: number[][]) {
   return {minX, minY, maxX, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2}
 }
 
+function hasCompareData(sheet: SheetCard) {
+  return Boolean(sheet.raster_url && sheet.geometry_url)
+}
+
+function shortTitle(sheet: SheetCard) {
+  const raw = (sheet.title || '').replace(/\s+/g, ' ').trim()
+  if (!raw) return (sheet.role || 'sheet').replaceAll('_', ' ')
+  const head = raw.split(/[(\[]/)[0].trim() || raw
+  const clipped = head.length > 42 ? `${head.slice(0, 40).trim()}…` : head
+  if (clipped !== clipped.toUpperCase()) return clipped
+  return clipped.toLowerCase().replace(/\b([a-z0-9])/g, ch => ch.toUpperCase())
+}
+
+function emptyLabel(sheet: SheetCard) {
+  const title = shortTitle(sheet)
+  const words = title.split(' ')
+  const brief = words.length > 4 ? words.slice(0, 2).join(' ') : title
+  return `${sheet.sheet_no} ${brief}`
+}
+
+function optionLabel(sheet: SheetCard) {
+  return `${sheet.sheet_no} · ${shortTitle(sheet)} · ${(sheet.walls || 0).toLocaleString()} walls`
+}
+
+function pickDefault(sheets: SheetCard[]) {
+  for (const role of ROLE_PRIORITY) {
+    const group = sheets.filter(sheet => sheet.role === role)
+    if (!group.length) continue
+    return group.slice().sort((a, b) => (b.walls || 0) - (a.walls || 0))[0]
+  }
+  return sheets[0]
+}
+
 export function SourceCompare({project}: {project: DesktopProject}) {
   const host = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({width: 900, height: 520})
@@ -37,12 +72,20 @@ export function SourceCompare({project}: {project: DesktopProject}) {
   const [fade, setFade] = useState(0.46)
   const [wipe, setWipe] = useState(0.5)
   const [mode, setMode] = useState<Mode>('overlay')
-  const [sheetId, setSheetId] = useState(project.sheets?.find(s => s.extracted)?.sheet_id || project.sheets?.[0]?.sheet_id || '')
+  const comparable = useMemo(() => (project.sheets || []).filter(hasCompareData), [project.sheets])
+  const fallback = useMemo(() => pickDefault(comparable), [comparable])
+  const [sheetId, setSheetId] = useState(fallback?.sheet_id || '')
   const [raster, setRaster] = useState<HTMLImageElement | null>(null)
   const [geom, setGeom] = useState<Geom | null>(null)
+  const [rasterError, setRasterError] = useState('')
+  const [geomError, setGeomError] = useState('')
+  const [loading, setLoading] = useState(false)
   const draggingWipe = useRef(false)
-  const sheets = project.sheets || []
-  const sheet = sheets.find(s => s.sheet_id === sheetId) || sheets.find(s => s.extracted) || sheets[0]
+  const sheet = comparable.find(item => item.sheet_id === sheetId) || fallback
+  useEffect(() => {
+    if (sheetId && comparable.some(item => item.sheet_id === sheetId)) return
+    if (fallback?.sheet_id) setSheetId(fallback.sheet_id)
+  }, [comparable, fallback?.sheet_id, sheetId])
   useEffect(() => {
     if (!host.current) return
     const observer = new ResizeObserver(([entry]) => setSize({width: entry.contentRect.width, height: entry.contentRect.height}))
@@ -50,13 +93,22 @@ export function SourceCompare({project}: {project: DesktopProject}) {
     return () => observer.disconnect()
   }, [])
   useEffect(() => {
-    if (!sheet?.raster_url) { setRaster(null); setGeom(null); return }
+    if (!sheet) { setRaster(null); setGeom(null); setRasterError(''); setGeomError(''); setLoading(false); return }
     let live = true
-    loadImage(`${base}/projects/${project.project_id}/files/${sheet.raster_url}`).then(img => { if (live) setRaster(img) }).catch(() => { if (live) setRaster(null) })
-    if (sheet.geometry_url) fetch(`${base}/projects/${project.project_id}/files/${sheet.geometry_url}`).then(r => r.json()).then((data: Geom) => { if (live) setGeom(data) }).catch(() => { if (live) setGeom(null) })
-    else setGeom(null)
+    setRaster(null); setGeom(null); setRasterError(''); setGeomError(''); setLoading(true)
+    const tasks: Promise<unknown>[] = []
+    if (sheet.raster_url) {
+      tasks.push(loadImage(`${base}/projects/${project.project_id}/files/${sheet.raster_url}`).then(img => { if (live) setRaster(img) }).catch(() => { if (live) setRasterError(`Could not load the drawing raster for ${sheet.sheet_no}.`) }))
+    } else if (live) setRasterError(`No raster for ${sheet.sheet_no}.`)
+    if (sheet.geometry_url) {
+      tasks.push(fetch(`${base}/projects/${project.project_id}/files/${sheet.geometry_url}`).then(response => {
+        if (!response.ok) throw new Error('geometry')
+        return response.json()
+      }).then((data: Geom) => { if (live) setGeom(data) }).catch(() => { if (live) setGeomError(`Could not load geometry for ${sheet.sheet_no}.`) }))
+    }
+    Promise.all(tasks).finally(() => { if (live) setLoading(false) })
     return () => { live = false }
-  }, [sheet?.sheet_id, sheet?.raster_url, sheet?.geometry_url, project.project_id])
+  }, [sheet?.sheet_id, sheet?.raster_url, sheet?.geometry_url, sheet?.sheet_no, project.project_id])
   const scale = sheet?.scale_pts_per_ft || geom?.scale_pts_per_ft || 1
   const sizePt = sheet?.size_pt || geom?.size_pt || [100, 80]
   const world = {width: sizePt[0] / scale, height: sizePt[1] / scale}
@@ -88,7 +140,7 @@ export function SourceCompare({project}: {project: DesktopProject}) {
   const stageH = size.height - 52
   useEffect(() => {
     if (size.width < 80) return
-    const next = Math.max(.02, Math.min((pane - 48) / world.width, (stageH - 48) / world.height, 40))
+    const next = Math.max(.02, Math.min((pane - 48) / Math.max(world.width, 1), (stageH - 48) / Math.max(world.height, 1), 40))
     setView({scale: next, x: 36, y: 28})
   }, [sheetId, size.width, size.height, world.width, world.height, pane, stageH, mode])
   function panZoom(event: KonvaEventObject<WheelEvent>) {
@@ -108,6 +160,14 @@ export function SourceCompare({project}: {project: DesktopProject}) {
     if (!rect) return
     setWipe(Math.max(0.02, Math.min(0.98, (clientX - rect.left) / rect.width)))
   }
+  const emptyMessage = (() => {
+    if (!comparable.length) return 'No extracted drawings to compare.'
+    if (loading || !sheet) return ''
+    if (rasterError) return rasterError
+    if (geomError) return geomError
+    if (raster && sheetWalls.length === 0) return `${emptyLabel(sheet)} — no plan geometry on this sheet`
+    return ''
+  })()
   function drawStage(sourceOpacity: number, modelOpacity: number, wipeMode = false) {
     const clipLeft = wipeMode ? (ctx: {rect: (x: number, y: number, w: number, h: number) => void}) => ctx.rect(-1e4, -1e4, cut + 1e4, 2e4) : undefined
     const clipRight = wipeMode ? (ctx: {rect: (x: number, y: number, w: number, h: number) => void}) => ctx.rect(cut, -1e4, 1e5, 2e4) : undefined
@@ -120,7 +180,6 @@ export function SourceCompare({project}: {project: DesktopProject}) {
           <Group opacity={modelOpacity} clipFunc={clipRight} listening={false}>
             {modelWalls.map((pts, i) => <Line key={`m${i}`} points={pts} stroke="#1c1e1b" strokeWidth={Math.max(stroke, .12)} lineCap="square" perfectDrawEnabled={false} shadowForStrokeEnabled={false} />)}
           </Group>
-          {!raster && !modelWalls.length && <Text text={sheet?.reason || 'No geometry for this sheet'} fontSize={12 * stroke} fill="#7d8478" />}
         </Layer>
       </Stage>
     )
@@ -128,28 +187,33 @@ export function SourceCompare({project}: {project: DesktopProject}) {
   return (
     <div ref={host} className="source-compare">
       <div className="source-toolbar">
-        <select aria-label="Drawing sheet" value={sheet?.sheet_id || ''} onChange={e => setSheetId(e.target.value)}>
-          {sheets.map((item: SheetCard) => <option key={item.sheet_id} value={item.sheet_id}>{item.sheet_no} · {item.title || item.role}</option>)}
+        <select aria-label="Drawing sheet" value={sheet?.sheet_id || ''} onChange={e => setSheetId(e.target.value)} disabled={!comparable.length}>
+          {comparable.map((item: SheetCard) => <option key={item.sheet_id} value={item.sheet_id}>{optionLabel(item)}</option>)}
         </select>
         <div className="source-modes" role="tablist" aria-label="Compare mode">
           {([['overlay', 'Overlay'], ['wipe', 'Wipe'], ['split', 'Split']] as const).map(([id, label]) => (
             <button key={id} role="tab" aria-selected={mode === id} className={mode === id ? 'active' : ''} onClick={() => setMode(id)}>{label}</button>
           ))}
         </div>
-        {mode === 'overlay' && (
+        {mode === 'overlay' && !emptyMessage && (
           <label className="source-fade">Raster
             <input type="range" min="0" max="100" value={Math.round(fade * 100)} onChange={e => setFade(Number(e.target.value) / 100)} aria-label="Crossfade between raster and reconstructed geometry" />
             Model
           </label>
         )}
-        {mode === 'wipe' && <span className="source-fade">Drag the divider · PDF left, model right</span>}
+        {mode === 'wipe' && !emptyMessage && <span className="source-fade">Drag the divider · PDF left, model right</span>}
       </div>
-      {offset && (
+      {offset && !emptyMessage && (
         <div className="source-offset" role="status">
           Registration offset {offset.dx >= 0 ? '+' : ''}{offset.dx.toFixed(2)} ft x, {offset.dy >= 0 ? '+' : ''}{offset.dy.toFixed(2)} ft y · drawn uncorrected
         </div>
       )}
-      {mode === 'split' ? (
+      {emptyMessage ? (
+        <div className={'source-empty' + (rasterError || geomError ? ' error' : '')} role="status">
+          {raster && !rasterError && <img src={raster.src} alt="" />}
+          <p>{emptyMessage}</p>
+        </div>
+      ) : mode === 'split' ? (
         <div className="source-panes">
           {[{label: 'Source', source: 1, model: 0}, {label: 'Model', source: 0, model: 1}].map(paneView => (
             <div key={paneView.label} className="source-pane">

@@ -207,6 +207,7 @@ export interface Room {
   confidence: Confidence1;
   needs_review: NeedsReview;
   instance_count?: InstanceCount;
+  parent_room_id?: string;
   reliability?: 'ok' | 'suspect';
   reliability_reason?: string;
   source: Source;

@@ -199,7 +199,8 @@ def get_file(pid:str,relative:str):
     base=repo().path(pid).resolve();path=(base/relative).resolve()
     if not path.is_relative_to(base) or path.suffix.lower() not in ['.json','.md','.pdf','.png','.dxf','.ifc','.splat','.ply','.spz']:raise HTTPException(403,'File is outside this project')
     if not path.is_file():raise HTTPException(404,'File not found')
-    return FileResponse(path)
+    types={'.pdf':'application/pdf','.png':'image/png','.json':'application/json','.md':'text/markdown; charset=utf-8','.dxf':'application/dxf','.ifc':'application/octet-stream'}
+    return FileResponse(path,media_type=types.get(path.suffix.lower(),'application/octet-stream'),content_disposition_type='inline',filename=path.name)
 
 @router.post('/import-native',response_model=DesktopProject)
 def import_native(body:dict=Body(...)):

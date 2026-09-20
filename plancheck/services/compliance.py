@@ -9,7 +9,9 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import math
+from collections import defaultdict
 from itertools import combinations
+from statistics import median
 from typing import Any
 
 from shapely.geometry import Polygon, JOIN_STYLE
@@ -105,6 +107,90 @@ def _room_polygon(room: Room) -> Polygon:
 
 def room_area(room: Room) -> float:
     return float(_room_polygon(room).area)
+
+
+def _safe_area(room: Room) -> float:
+    try:
+        return room_area(room)
+    except ValueError:
+        return 0.0
+
+
+def _centroid(room: Room) -> tuple[float, float]:
+    points = polygon_points(room)
+    if not points:
+        return 0.0, 0.0
+    return sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points)
+
+
+def _part_role(room: Room, parent: Room) -> str:
+    if room.id == parent.id:
+        return "bedroom" if parent.category == "guestroom" else (parent.category or "room")
+    name = room.name or ""
+    suffix = name[len(parent.name) :].strip().lower() if parent.name and name.startswith(parent.name) else ""
+    if suffix in {"bath", "bathroom"} or room.category == "bathroom":
+        return "bath"
+    if suffix in {"closet", "storage"} or room.category == "storage":
+        return "closet"
+    return suffix or room.category or "room"
+
+
+def index_unit_children(building: Building) -> dict[str, list[Room]]:
+    """Map guestroom id → child rooms via parent_room_id, else name prefix + nearest parent."""
+    by_id = {room.id: room for room in building.rooms}
+    index: dict[str, list[Room]] = defaultdict(list)
+    claimed: set[str] = set()
+    for room in building.rooms:
+        parent = by_id.get(room.parent_room_id)
+        if parent is None or parent.category != "guestroom":
+            continue
+        index[parent.id].append(room)
+        claimed.add(room.id)
+    parents = [room for room in building.rooms if room.category == "guestroom"]
+    for child in building.rooms:
+        if child.id in claimed:
+            continue
+        candidates = [
+            parent
+            for parent in parents
+            if parent.id != child.id
+            and parent.floor_id == child.floor_id
+            and parent.name
+            and child.name.startswith(parent.name + " ")
+        ]
+        if not candidates:
+            continue
+        longest = max(len(parent.name) for parent in candidates)
+        candidates = [parent for parent in candidates if len(parent.name) == longest]
+        cx, cy = _centroid(child)
+        best = min(candidates, key=lambda parent: math.hypot(_centroid(parent)[0] - cx, _centroid(parent)[1] - cy))
+        index[best.id].append(child)
+        claimed.add(child.id)
+    return index
+
+
+def guestroom_unit_area(room: Room, building: Building, children_by_parent: dict[str, list[Room]] | None = None) -> tuple[float, list[dict[str, Any]]]:
+    """Whole-key area for a guestroom: parent polygon plus named children."""
+    kids = (children_by_parent or {}).get(room.id, []) if room.category == "guestroom" else []
+    if children_by_parent is None and room.category == "guestroom":
+        kids = index_unit_children(building).get(room.id, [])
+    parts = []
+    total = 0.0
+    for item in [room, *kids]:
+        area = _safe_area(item)
+        total += area
+        parts.append({"id": item.id, "role": _part_role(item, room), "area_ft2": area})
+    return total, parts
+
+
+def _composite_area_message(room: Room, actual: float, unit: str, expected: float, operator: str, parts: list[dict[str, Any]]) -> str:
+    total_ft = sum(float(part["area_ft2"]) for part in parts)
+    bits = " + ".join(f"{float(part['area_ft2']):.0f} {part['role']}" for part in parts)
+    return (
+        f"{room.name}: area {actual:.3f} {unit} "
+        f"({total_ft:.0f} sq ft = {bits}); "
+        f"required {operator} {expected:g} {unit}."
+    )
 
 
 def rectangle_sides(room: Room) -> tuple[float, float]:
@@ -388,6 +474,10 @@ def _result(
         "pinch_polygon": _geom_coords(pinch),
         "superseded_by": superseded_by,
         "origin": rule.get("origin", ""),
+        "contributing_room_ids": list(ids),
+        "area_parts": [],
+        "reason": "",
+        "reliability_reason": "",
     }
     return payload
 
@@ -405,9 +495,19 @@ def _opening_room(opening: Opening, building: Building, rule: dict) -> Room | No
     return rooms[0] if rooms else None
 
 
-def _candidates(building: Building, rule: dict, metric: str) -> list[Any]:
+def _candidates(building: Building, rule: dict, metric: str, children_by_parent: dict[str, list[Room]] | None = None) -> list[Any]:
     if metric in {"area", "min_side"}:
-        return [room for room in building.rooms if matches_room(room, rule)]
+        rooms = [room for room in building.rooms if matches_room(room, rule)]
+        if metric == "area" and children_by_parent:
+            child_to_parent = {child.id: parent_id for parent_id, kids in children_by_parent.items() for child in kids}
+            by_id = {room.id: room for room in building.rooms}
+            rooms = [
+                room
+                for room in rooms
+                if room.id not in child_to_parent
+                or not matches_room(by_id[child_to_parent[room.id]], rule)
+            ]
+        return rooms
     if metric in {"aperture_width", "clear_width"}:
         return [opening for opening in building.openings if opening.kind == "door" and matches_opening(opening, building, rule)]
     selected = [opening for opening in building.openings if matches_opening(opening, building, rule)]
@@ -418,11 +518,12 @@ def _candidates(building: Building, rule: dict, metric: str) -> list[Any]:
     return pairs
 
 
-def _measure(building: Building, rule: dict, entity: Any) -> dict:
+def _measure(building: Building, rule: dict, entity: Any, children_by_parent: dict[str, list[Room]] | None = None) -> dict:
     metric = metric_name(rule)
     assumption = ""
     pinch = None
     room = entity if isinstance(entity, Room) else None
+    area_parts: list[dict[str, Any]] = []
     if isinstance(entity, tuple):
         ids = [item.id for item in entity]
     elif isinstance(entity, Opening):
@@ -436,7 +537,11 @@ def _measure(building: Building, rule: dict, entity: Any) -> dict:
         if isinstance(entity, Room) and (not entity.polygon or len(entity.polygon) < 3):
             raise ValueError(_unverified_reason(entity, metric))
         if room and metric == "area":
-            value = room_area(room)
+            if room.category == "guestroom":
+                value, area_parts = guestroom_unit_area(room, building, children_by_parent)
+                ids = [part["id"] for part in area_parts] or ids
+            else:
+                value = room_area(room)
         elif room and metric == "min_side":
             required_ft = from_rule_units(float(rule.get("value") or 0), str(rule.get("unit") or ""), False)
             value, _unused = min_clear_width_ft(room)
@@ -449,6 +554,18 @@ def _measure(building: Building, rule: dict, entity: Any) -> dict:
             value = entity.width_ft
         actual = to_rule_units(value, rule.get("unit", ""), metric == "area")
         result = _result(rule, ids, actual, room=room, building=building, assumption=assumption, pinch=pinch)
+        if area_parts:
+            result["contributing_room_ids"] = [part["id"] for part in area_parts]
+            result["area_parts"] = area_parts
+            if len(area_parts) > 1 and result["status"] in {"pass", "fail"}:
+                result["message"] = _composite_area_message(
+                    room,
+                    actual,
+                    str(rule.get("unit") or ""),
+                    float(rule.get("value") or 0),
+                    str(rule.get("operator") or ">="),
+                    area_parts,
+                )
         if metric == "min_side" and room:
             # Morphological opening at the rule threshold is the pass/fail source of truth.
             required_ft = from_rule_units(float(rule.get("value") or 0), str(rule.get("unit") or ""), False)
@@ -470,6 +587,7 @@ def _measure(building: Building, rule: dict, entity: Any) -> dict:
             result["status"] = "quarantined"
             result["severity"] = "quarantined"
             result["reliability"] = "suspect"
+            result["reason"] = reason
             result["reliability_reason"] = reason
             measured = f"{result['actual']:.3f} {result['unit']}" if result.get("actual") is not None else "unmeasured"
             result["message"] = (
@@ -522,29 +640,95 @@ def _split_checks(checks: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
+SCOPE_REVIEW_REASON = "threshold is more than 10× the median area of matched rooms."
+
+
+def _area_scope_reason(rule: dict, building: Building) -> str:
+    if metric_name(rule) != "area":
+        return ""
+    if str(rule.get("operator") or ">=") not in {">=", ">"}:
+        return ""
+    rooms = [room for room in building.rooms if matches_room(room, rule)]
+    areas = [area for area in (_safe_area(room) for room in rooms) if area > EPS]
+    if not areas:
+        return ""
+    try:
+        threshold = from_rule_units(float(rule.get("value") or 0), str(rule.get("unit") or ""), True)
+    except (ValueError, TypeError, ZeroDivisionError):
+        return ""
+    med = float(median(areas))
+    if med <= EPS or threshold <= 10 * med:
+        return ""
+    unit = str(rule.get("unit") or "")
+    return (
+        f"{SCOPE_REVIEW_REASON} "
+        f"Required {rule.get('value'):g} {unit}; median matched area {to_rule_units(med, unit, True):.3f} {unit}."
+    )
+
+
+def _set_rule_status(rule: dict, original: Any, status: str, reason: str = "") -> None:
+    rule["status"] = status
+    if reason:
+        rule["scope_review_reason"] = reason
+    elif "scope_review_reason" in rule:
+        del rule["scope_review_reason"]
+    if isinstance(original, dict):
+        original["status"] = status
+        if reason:
+            original["scope_review_reason"] = reason
+        else:
+            original.pop("scope_review_reason", None)
+    elif original is not None and hasattr(original, "status"):
+        original.status = status
+
+
 def evaluate_building(building: Building, rules: list[Any]) -> dict[str, Any]:
-    parsed = [_as_dict(rule) for rule in rules]
+    originals = list(rules)
+    parsed = [_as_dict(rule) for rule in originals]
+    originals_by_id = {
+        str(parsed_rule.get("rule_id") or ""): raw
+        for raw, parsed_rule in zip(originals, parsed)
+        if parsed_rule.get("rule_id")
+    }
+    children_by_parent = index_unit_children(building)
     runnable: list[dict] = []
+    unmatched: list[dict[str, str]] = []
     for rule in parsed:
-        if rule.get("status", "pending") != "approved":
+        status = str(rule.get("status") or "pending")
+        if status not in {"approved", "needs_scope_review"}:
             continue
         if rule.get("superseded_by"):
             continue
         metric = metric_name(rule)
         if not rule.get("supported", True) or metric not in SUPPORTED_METRICS:
             continue
+        reason = _area_scope_reason(rule, building)
+        original = originals_by_id.get(str(rule.get("rule_id") or ""))
+        if reason:
+            _set_rule_status(rule, original, "needs_scope_review", reason)
+            unmatched.append(
+                {
+                    "rule_id": str(rule.get("rule_id") or ""),
+                    "applies_to": str(rule.get("applies_to") or ""),
+                    "reason": reason,
+                    "status": "needs_scope_review",
+                }
+            )
+            continue
+        if status == "needs_scope_review":
+            _set_rule_status(rule, original, "approved")
         runnable.append(rule)
 
     groups: dict[tuple[str, str], list[tuple[dict, Any]]] = {}
     matched: set[str] = set()
     for rule in runnable:
         metric = metric_name(rule)
-        for entity in _candidates(building, rule, metric):
+        for entity in _candidates(building, rule, metric, children_by_parent):
             entity_id = entity[0].id + "|" + entity[1].id if isinstance(entity, tuple) else entity.id
             groups.setdefault((entity_id, metric), []).append((rule, entity))
             matched.add(str(rule.get("rule_id")))
 
-    unmatched = [
+    unmatched.extend(
         {
             "rule_id": str(rule.get("rule_id") or ""),
             "applies_to": str(rule.get("applies_to") or ""),
@@ -552,7 +736,7 @@ def evaluate_building(building: Building, rules: list[Any]) -> dict[str, Any]:
         }
         for rule in runnable
         if str(rule.get("rule_id")) not in matched
-    ]
+    )
 
     checks = []
     for items in groups.values():
@@ -563,7 +747,7 @@ def evaluate_building(building: Building, rules: list[Any]) -> dict[str, Any]:
         )
         winner, entity = ranked[0]
         loser = str(ranked[1][0].get("rule_id") or "") if len(ranked) > 1 else ""
-        check = _measure(building, winner, entity)
+        check = _measure(building, winner, entity, children_by_parent)
         if loser:
             check["superseded_by"] = loser
         checks.append(check)

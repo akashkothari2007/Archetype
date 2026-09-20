@@ -352,6 +352,7 @@ def _inherit_nested_rooms(rooms,fixtures)->set[str]:
                 kid.name=f'{parent.name} Bath';kid.category='bathroom'
             else:
                 kid.name=f'{parent.name} Closet';kid.category='storage'
+            kid.parent_room_id=parent.id
             nested.add(kid.id)
     return nested
 

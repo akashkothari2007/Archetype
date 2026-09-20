@@ -52,6 +52,9 @@ def test_outlier_studio_is_quarantined_not_a_violation():
     assert result["coverage"]["quarantined"] == 1
     assert len(result["quarantined"]) == 1
     assert result["quarantined"][0]["status"] == "quarantined"
+    assert result["quarantined"][0]["reason"]
+    assert "median" in result["quarantined"][0]["reason"]
+    assert result["quarantined"][0]["reason"] == building.rooms[-1].reliability_reason
     assert result["violations"] == []
     assert all(item["status"] != "fail" for item in result["checks"] if item["entity_id"] == "r-bad")
 
@@ -64,7 +67,7 @@ def test_opening_width_outlier_is_quarantined():
     building = Building(floors=[Floor(id="f1", name="Ground")], openings=openings)
     apply_reliability(building)
     assert building.openings[-1].reliability == "suspect"
-    assert "median" in building.openings[-1].reliability_reason
+    assert building.openings[-1].reliability_reason == "implausibly narrow (0.50 ft)"
     result = evaluate_building(
         building,
         [_rule(rule_id="door", applies_to="door", metric="aperture_width", value=0.8, unit="m", scope="opening")],
@@ -72,5 +75,42 @@ def test_opening_width_outlier_is_quarantined():
     tiny = [item for item in result["checks"] if item["entity_id"] == "d-tiny"]
     assert tiny
     assert tiny[0]["status"] == "quarantined"
+    assert tiny[0]["reason"] == "implausibly narrow (0.50 ft)"
+    assert "implausibly narrow" in tiny[0]["reliability_reason"]
     assert result["coverage"]["quarantined"] >= 1
     assert all(item["entity_id"] != "d-tiny" for item in result["violations"])
+
+
+def test_identical_narrow_closets_are_quarantined():
+    """MAD cannot catch a group that is uniformly impossible; physics can."""
+    closets = [
+        _room(
+            f"c{i}",
+            0.472,
+            45,
+            name="STUDIO KING Closet",
+            category="storage",
+            type_ref="storage.studio_king_closet",
+        )
+        for i in range(5)
+    ]
+    building = Building(floors=[Floor(id="f1", name="Ground")], rooms=closets)
+    apply_reliability(building)
+    assert all(room.reliability == "suspect" for room in building.rooms)
+    assert all(room.reliability_reason == "implausibly narrow (0.14 m)" for room in building.rooms)
+    result = evaluate_building(
+        building,
+        [_rule(rule_id="closet-side", applies_to="*Closet*", metric="min_side", value=0.6, unit="m")],
+    )
+    assert result["violations"] == []
+    assert result["coverage"]["quarantined"] == 5
+    assert all(item["status"] == "quarantined" for item in result["checks"])
+    assert all(item["reason"] == "implausibly narrow (0.14 m)" for item in result["checks"])
+
+
+def test_uniformly_wide_openings_are_quarantined():
+    openings = [Opening(id=f"d{i}", wall_id="w1", kind="door", offset_ft=1, width_ft=10.0) for i in range(6)]
+    building = Building(floors=[Floor(id="f1", name="Ground")], openings=openings)
+    apply_reliability(building)
+    assert all(item.reliability == "suspect" for item in building.openings)
+    assert all(item.reliability_reason == "implausibly wide (10.00 ft)" for item in building.openings)

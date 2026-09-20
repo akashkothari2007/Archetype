@@ -1,5 +1,9 @@
 import type {Building,DesktopProject,Job} from './types';
 export const base='http://127.0.0.1:8000/api/desktop';
+export function projectFileUrl(projectId:string,relative:string){
+  const encoded=(relative||'').split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  return `${base}/projects/${projectId}/files/${encoded}`;
+}
 export type BuildingPatch = {
   revision:number
   can_undo:boolean

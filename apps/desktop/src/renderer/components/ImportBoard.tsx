@@ -1,4 +1,5 @@
-import {base} from '../api'
+import {useState} from 'react'
+import {projectFileUrl} from '../api'
 import type {Job} from '../types'
 
 const PHASES = [
@@ -13,6 +14,12 @@ function phaseIndex(job: Job) {
   const text = `${job.phase || ''} ${job.message || ''}`
   const found = PHASES.findIndex(p => p.match.test(text))
   return found < 0 ? 0 : found
+}
+
+function Thumb({src, fallback}: {src: string; fallback: string}) {
+  const [failed, setFailed] = useState(false)
+  if (failed) return <span>{fallback}</span>
+  return <img src={src} alt="" onError={() => setFailed(true)} />
 }
 
 export function ImportBoard({job, projectId}: {job: Job; projectId?: string | null}) {
@@ -44,11 +51,11 @@ export function ImportBoard({job, projectId}: {job: Job; projectId?: string | nu
       </header>
       <div className="import-grid">
         {sheets.length ? sheets.map(sheet => {
-          const thumb = sheet.extracted && sheet.thumb_url && projectId ? `${base}/projects/${projectId}/files/${sheet.thumb_url}?p=${sheet.page}` : ''
+          const thumb = sheet.extracted && sheet.thumb_url && projectId ? projectFileUrl(projectId, sheet.thumb_url) : ''
           return (
             <article key={sheet.sheet_id} className={'import-card' + (sheet.extracted ? ' extracted' : ' skipped')}>
               <div className="import-thumb">
-                {thumb ? <img src={thumb} alt="" /> : <span>{sheet.sheet_no}</span>}
+                {thumb ? <Thumb src={thumb} fallback={sheet.sheet_no} /> : <span>{sheet.sheet_no}</span>}
               </div>
               <div className="import-card-meta">
                 <strong>{sheet.sheet_no}</strong>

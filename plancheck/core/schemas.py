@@ -362,7 +362,7 @@ class Rule(BaseModel):
     source_page: int | None = None
     source_text: str = ""
     extraction: str = "stub"
-    status: Literal["pending", "approved", "rejected"] = "pending"
+    status: Literal["pending", "approved", "rejected", "needs_scope_review"] = "pending"
     scope: Literal["room", "opening", "opening_pair"] = "room"
     target_ids: list[str] = Field(default_factory=list)
     source_label: str = ""
@@ -405,6 +405,10 @@ class Mismatch(BaseModel):
     assumption: str = ""
     pinch_polygon: list[list[float]] | None = None
     superseded_by: str = ""
+    contributing_room_ids: list[str] = Field(default_factory=list)
+    area_parts: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = ""
+    reliability_reason: str = ""
 
 
 class CheckResult(BaseModel):

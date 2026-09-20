@@ -37,6 +37,13 @@
 .blast-floors button{border:1px solid #e4e7e9;background:rgba(255,255,255,.94);border-radius:999px;font:inherit;font-size:10px;color:#5c676e;padding:3px 9px;cursor:pointer}
 .blast-floors button:hover{border-color:#c9b4ae;color:#8a5146}
 .source-toolbar{flex-wrap:wrap;row-gap:8px}
+.source-toolbar select{min-width:280px;max-width:min(560px,70vw)}
+.source-stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.source-stage>small{position:absolute;bottom:10px;left:12px;color:#9aa190;font-size:9px;pointer-events:none;z-index:2}
+.source-empty{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:28px;text-align:center;color:#6f7868}
+.source-empty img{max-width:min(420px,70%);max-height:42%;object-fit:contain;opacity:.35;filter:grayscale(.2);border:1px solid #e4e6de;border-radius:6px;background:#fff}
+.source-empty p{margin:0;max-width:420px;font-size:13px;line-height:1.55;color:#5c6560}
+.source-empty.error p{color:#8a5a42}
 .source-stage{flex:1;min-height:0;position:relative;overflow:hidden}
 .source-stage>small{position:absolute;bottom:10px;left:12px;color:#9aa190;font-size:9px;pointer-events:none;z-index:2}
 .source-modes{display:flex;gap:2px;background:#eceee6;border-radius:6px;padding:2px;flex-shrink:0}

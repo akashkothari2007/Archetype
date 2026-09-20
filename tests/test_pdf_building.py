@@ -131,6 +131,8 @@ def test_nested_fixture_room_inherits_bath_name():
     baths = [room for room in building.rooms if room.category == "bathroom"]
     assert baths
     assert any(room.name.endswith("Bath") for room in baths)
+    parent = next(room for room in building.rooms if room.name == "STUDIO KING")
+    assert all(room.parent_room_id == parent.id for room in baths)
 
 
 def test_named_rooms_share_a_type_ref():

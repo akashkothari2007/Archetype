@@ -69,6 +69,7 @@ class Room(Entity):
     confidence: float = Field(default=1, ge=0, le=1)
     needs_review: bool = False
     instance_count: int = 0
+    parent_room_id: str = ""
     reliability: Literal["ok", "suspect"] = "ok"
     reliability_reason: str = ""
     source: Source = Field(default_factory=Source)

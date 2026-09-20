@@ -214,6 +214,126 @@ def test_baseline_alone_is_checkable_on_a_generated_home():
     assert result["coverage"]["rules_total"] == len(BASELINE_RULES)
 
 
+def test_guestroom_area_sums_named_children():
+    parent = _room(
+        id="g1",
+        name="STUDIO KING",
+        type_ref="guestroom.studio_king",
+        polygon=[(0, 0), (15, 0), (15, 14), (0, 14)],
+    )
+    bath = _room(
+        id="b1",
+        name="STUDIO KING Bath",
+        category="bathroom",
+        type_ref="bathroom.studio_king_bath",
+        polygon=[(15, 0), (25, 0), (25, 8), (15, 8)],
+        parent_room_id="g1",
+    )
+    closet = _room(
+        id="c1",
+        name="STUDIO KING Closet",
+        category="storage",
+        type_ref="storage.studio_king_closet",
+        polygon=[(15, 8), (20, 8), (20, 12), (15, 12)],
+        parent_room_id="g1",
+    )
+    results = check_building(_building([parent, bath, closet]), [_rule(value=20, unit="m2")])
+    guest = next(item for item in results if item["entity_id"] == "g1")
+    assert guest["status"] == "pass"
+    assert 25 <= guest["actual"] <= 35
+    assert set(guest["contributing_room_ids"]) == {"g1", "b1", "c1"}
+    assert "bedroom" in guest["message"]
+    assert "bath" in guest["message"]
+    assert "closet" in guest["message"]
+    parent_only = to_rule_units(15 * 14, "m2", True)
+    assert parent_only < 20
+
+
+def test_guestroom_child_prefix_fallback_uses_nearest_parent():
+    left = _room(id="g-left", name="STUDIO KING", type_ref="guestroom.studio_king", polygon=[(0, 0), (16, 0), (16, 12), (0, 12)])
+    right = _room(id="g-right", name="STUDIO KING", type_ref="guestroom.studio_king", polygon=[(40, 0), (56, 0), (56, 12), (40, 12)])
+    left_bath = _room(
+        id="b-left",
+        name="STUDIO KING Bath",
+        category="bathroom",
+        polygon=[(16, 0), (24, 0), (24, 8), (16, 8)],
+    )
+    right_bath = _room(
+        id="b-right",
+        name="STUDIO KING Bath",
+        category="bathroom",
+        polygon=[(56, 0), (64, 0), (64, 8), (56, 8)],
+    )
+    results = check_building(_building([left, right, left_bath, right_bath]), [_rule(value=20, unit="m2")])
+    by_id = {item["entity_id"]: item for item in results}
+    assert "b-left" in by_id["g-left"]["contributing_room_ids"]
+    assert "b-right" not in by_id["g-left"]["contributing_room_ids"]
+    assert "b-right" in by_id["g-right"]["contributing_room_ids"]
+    assert "b-left" not in by_id["g-right"]["contributing_room_ids"]
+
+
+def test_guestroom_children_are_not_checked_when_parent_matches_area_rule():
+    parent = _room(id="g1", name="STUDIO KING", type_ref="guestroom.studio_king", polygon=[(0, 0), (15, 0), (15, 14), (0, 14)])
+    bath = _room(
+        id="b1",
+        name="STUDIO KING Bath",
+        category="bathroom",
+        polygon=[(15, 0), (25, 0), (25, 8), (15, 8)],
+        parent_room_id="g1",
+    )
+    closet = _room(
+        id="c1",
+        name="STUDIO KING Closet",
+        category="storage",
+        polygon=[(15, 8), (20, 8), (20, 12), (15, 12)],
+        parent_room_id="g1",
+    )
+    results = check_building(_building([parent, bath, closet]), [_rule(applies_to="*", value=20, unit="m2")])
+    ids = {item["entity_id"] for item in results}
+    assert "g1" in ids
+    assert "b1" not in ids
+    assert "c1" not in ids
+    assert next(item for item in results if item["entity_id"] == "g1")["status"] == "pass"
+
+
+def test_oversized_area_rule_is_needs_scope_review_not_a_violation():
+    corridor = _room(
+        id="corr",
+        name="CORRIDOR",
+        category="circulation",
+        type_ref="circulation.corridor",
+        polygon=[(0, 0), (40, 0), (40, 3.3567), (0, 3.3567)],
+    )
+    rule = _rule(rule_id="rule-page-61", applies_to="CORRIDOR*", metric="area", value=127, unit="m2", source_page=61)
+    result = evaluate_building(_building([corridor]), [rule])
+    assert result["violations"] == []
+    assert all(item["rule_id"] != "rule-page-61" for item in result["checks"])
+    scoped = [item for item in result["coverage"]["unmatched_rules"] if item["rule_id"] == "rule-page-61"]
+    assert scoped
+    assert scoped[0]["status"] == "needs_scope_review"
+    assert "10" in scoped[0]["reason"]
+    assert rule["status"] == "needs_scope_review"
+
+
+def test_wildcard_ballroom_area_does_not_fail_corridors():
+    rooms = [
+        _room(id="corr", name="CORRIDOR", category="circulation", polygon=[(0, 0), (40, 0), (40, 3.3567), (0, 3.3567)]),
+        *[
+            _room(
+                id=f"cl{i}",
+                name="STUDIO KING Closet",
+                category="storage",
+                polygon=[(100 + i * 6, 0), (105 + i * 6, 0), (105 + i * 6, 4), (100 + i * 6, 4)],
+            )
+            for i in range(8)
+        ],
+    ]
+    rule = _rule(rule_id="rule-page-61", applies_to="*", metric="area", value=127, unit="m2", source_page=61)
+    result = evaluate_building(_building(rooms), [rule])
+    assert all(item["status"] != "fail" or item["rule_id"] != "rule-page-61" for item in result["checks"])
+    assert any(item["rule_id"] == "rule-page-61" and item.get("status") == "needs_scope_review" for item in result["coverage"]["unmatched_rules"])
+
+
 def test_auto_approve_writes_source_backed_checks(tmp_path):
     from plancheck.api.routes.desktop import recheck
     from plancheck.core.settings import get_settings
