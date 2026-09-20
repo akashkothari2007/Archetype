@@ -397,6 +397,6 @@ def complete_json(
     if finish_reason == "length":
         raise LLMError(
             "The JSON was cut off before it was complete. "
-            "Return a smaller program: at most 8 spaces per storey, 40 spaces total."
+            "Return a smaller program: at most 16 spaces per storey, 48 spaces total."
         )
     raise last_exc or LLMError("Model reply was not JSON")

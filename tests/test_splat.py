@@ -11,16 +11,17 @@ SPLAT_BYTES = b"\x00\x01splat-payload"
 
 
 def test_auth_header_per_provider():
-    assert splat_service._auth("https://queue.fal.run/tripo3d/triposplat", "k") == "Key k"
     assert splat_service._auth("https://model-1.api.baseten.co/environments/production/predict", "k") == "Api-Key k"
     assert splat_service._auth("https://splat.internal/predict", "k") == "Bearer k"
 
 
-def test_reason_surfaces_fal_balance_message():
-    body = json.dumps({"detail": "User is locked. Reason: Exhausted balance."})
-    message = splat_service._reason(403, body)
-    assert "Exhausted balance" in message
-    assert "403" not in message
+def test_reason_surfaces_api_error():
+    body = json.dumps({"error": "Internal Server Error (in model/chainlet)."})
+    message = splat_service._reason(500, body)
+    assert "Internal Server Error" in message
+    assert splat_service._reason(401, json.dumps({"detail": "unauthorized"})).startswith("TripoSplat rejected")
+    assert "payment method" in splat_service._reason(400, json.dumps({"message": "You must add a payment method to deploy models."})).lower()
+    assert "turned off" in splat_service._reason(400, json.dumps({"error": "Model version 3m4v82k is deactivated. It needs to be activated before running predictions"})).lower()
 
 
 def test_generate_splat_uses_self_hosted_endpoint(monkeypatch):
@@ -55,7 +56,6 @@ def test_generate_splat_uses_self_hosted_endpoint(monkeypatch):
 def test_generate_splat_without_any_endpoint(monkeypatch):
     monkeypatch.setenv("PLANCHECK_SPLAT_URL", "")
     monkeypatch.setenv("PLANCHECK_SPLAT_API_KEY", "")
-    monkeypatch.delenv("FAL_KEY", raising=False)
     reset_settings()
     with pytest.raises(splat_service.SplatError, match="not configured"):
         splat_service.generate_splat(b"\x89PNG fake")
@@ -64,3 +64,4 @@ def test_generate_splat_without_any_endpoint(monkeypatch):
 def test_splat_filename_tracks_format():
     assert splat_service.splat_filename(b"ply\nformat ascii 1.0\n") == "appearance.ply"
     assert splat_service.splat_filename(SPLAT_BYTES) == "appearance.splat"
+    assert splat_service.splat_filename(SPLAT_BYTES, "furniture/object-1") == "furniture/object-1.splat"

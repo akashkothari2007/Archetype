@@ -1,4 +1,6 @@
 import type { Building, ModelCommand } from '../types'
+import furnitureCatalog from '../furniture-catalog.json'
+import { surfacePreview, surfaces } from './material-catalog'
 
 export type Point = { x: number; y: number }
 export type EditorProps = {
@@ -10,6 +12,7 @@ export type EditorProps = {
   units: 'metric' | 'imperial'
   busy?: boolean
   projectId?: string
+  onFloor?: (id: string) => void
 }
 export const assetMime = 'application/archetype-asset'
 export type Asset = { id: string; label: string; kind: 'fixture' | 'furniture' | 'door' | 'window' | 'material'; width: number; depth: number; height: number; preview?: string; model?: string; color?: string }
@@ -23,17 +26,31 @@ export const fixtures: Asset[] = [
   { id: 'counter', label: 'Counter', kind: 'fixture', width: 5, depth: 2, height: 3 },
   { id: 'shower', label: 'Shower', kind: 'fixture', width: 3, depth: 3, height: .3 },
 ]
-export const furniture: Asset[] = [
-  { id: 'sofa_02', label: 'Leather sofa', kind: 'furniture', width: 7, depth: 3.2, height: 2.7 },
-  { id: 'modern_arm_chair_01', label: 'Lounge chair', kind: 'furniture', width: 2.8, depth: 3, height: 2.9 },
-  { id: 'modern_coffee_table_01', label: 'Coffee table', kind: 'furniture', width: 3.8, depth: 2, height: 1.5 },
-].map(a => ({ ...a, kind: 'furniture' as const, preview: `assets/${a.id}/preview.png`, model: `assets/${a.id}/${a.id}.gltf` }))
-export const materials: Asset[] = [
-  { id: 'plaster', label: 'Chalk white', color: '#f3efe7' }, { id: 'sage', label: 'Soft sage', color: '#a7b09d' },
-  { id: 'clay', label: 'Warm clay', color: '#c7a28f' }, { id: 'slate', label: 'Slate', color: '#535d63' },
-  { id: 'oak', label: 'Natural oak', color: '#c7aa7f' }, { id: 'walnut', label: 'Walnut', color: '#7f593e' },
-  { id: 'tile', label: 'Limestone', color: '#d5d0c3' }, { id: 'concrete', label: 'Concrete', color: '#a8a8a2' },
-].map(a => ({ ...a, kind: 'material' as const, width: 0, depth: 0, height: 0 }))
+export const furniture: Asset[] = furnitureCatalog.map(a => ({
+  id: a.id,
+  label: a.label,
+  kind: 'furniture' as const,
+  width: a.width,
+  depth: a.depth,
+  height: a.height,
+  preview: `assets/${a.id}/preview.png`,
+  model: `assets/${a.id}/${a.id}.gltf`,
+}))
+export function catalogAsset(id?: string | null): Asset | undefined {
+  if (!id) return undefined
+  return furniture.find(item => item.id === id) || fixtures.find(item => item.id === id)
+}
+
+export const materials: Asset[] = surfaces.map(surface => ({
+  id: surface.id,
+  label: surface.label,
+  kind: 'material' as const,
+  width: 0,
+  depth: 0,
+  height: 0,
+  color: surface.color,
+  preview: surface.tint ? undefined : surfacePreview(surface),
+}))
 export const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y)
 export function projectPoint(p: Point, a: Point, b: Point) {
   const length = distance(a, b)
@@ -67,6 +84,27 @@ export function interiorPoint(polygon: number[][]): Point {
   }
   return best
 }
+
+export function roomLookYaw(polygon: number[][], from: Point) {
+  const n = polygon.length
+  if (n < 2) return Math.PI
+  const cx = polygon.reduce((s, p) => s + p[0], 0) / n, cy = polygon.reduce((s, p) => s + p[1], 0) / n
+  let xx = 0, xy = 0, yy = 0
+  for (const [x, y] of polygon) { const dx = x - cx, dy = y - cy; xx += dx * dx; xy += dx * dy; yy += dy * dy }
+  const axis = .5 * Math.atan2(2 * xy, xx - yy)
+  const yawOf = (dir: number) => Math.atan2(-Math.cos(dir), -Math.sin(dir))
+  const clearance = (yaw: number) => {
+    const dx = -Math.sin(yaw), dy = -Math.cos(yaw)
+    let dist = 0
+    for (let t = .25; t <= 80; t += .25) {
+      if (!pointInPolygon({ x: from.x + dx * t, y: from.y + dy * t }, polygon)) break
+      dist = t
+    }
+    return dist
+  }
+  const a = yawOf(axis), b = yawOf(axis + Math.PI)
+  return clearance(a) >= clearance(b) ? a : b
+}
 export function wallExterior(a: Point, b: Point, rooms: { polygon: number[][] }[]) {
   const length = Math.hypot(b.x - a.x, b.y - a.y)
   if (length < 0.01 || !rooms.length) return null
@@ -91,12 +129,16 @@ export function wallExterior(a: Point, b: Point, rooms: { polygon: number[][] }[
   return { length, center, angle: Math.atan2(b.y - a.y, b.x - a.x), sign, outward: { x: nx * sign, y: ny * sign } }
 }
 
-export function floorBounds(building: Building, floorId: string) {
-  const points = building.vertices.filter(v => v.floor_id === floorId)
+export function floorsBounds(building: Building, floorIds: string[]) {
+  const ids = new Set(floorIds)
+  const points = building.vertices.filter(v => ids.has(v.floor_id))
   if (!points.length) return { minX: 0, maxX: 40, minY: 0, maxY: 30, width: 40, height: 30, cx: 20, cy: 15 }
   const minX = Math.min(...points.map(p => p.x)), maxX = Math.max(...points.map(p => p.x))
   const minY = Math.min(...points.map(p => p.y)), maxY = Math.max(...points.map(p => p.y))
   return { minX, maxX, minY, maxY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 }
+}
+export function floorBounds(building: Building, floorId: string) {
+  return floorsBounds(building, [floorId])
 }
 export function lengthLabel(ft: number, units: 'metric' | 'imperial') {
   if (units === 'metric') return `${(ft * .3048).toFixed(2)} m`
@@ -118,4 +160,10 @@ export function placementCommand(asset: Asset, p: Point, building: Building, flo
     return { kind: 'place_opening', target_id: '', params: { wall_id: nearest.wall.id, kind: asset.kind, offset_ft: Math.max(0, Math.min(nearest.length - asset.width, nearest.offset - asset.width / 2)), width_ft: asset.width, height_ft: asset.height, sill_ft: asset.kind === 'window' ? 3 : 0 } }
   }
   return { kind: 'place_object', target_id: '', params: { floor_id: floorId, asset_id: asset.id, kind: asset.kind, x: p.x, y: p.y, rotation_deg: 0, width_ft: asset.width, depth_ft: asset.depth, height_ft: asset.height } }
+}
+
+export function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
 }

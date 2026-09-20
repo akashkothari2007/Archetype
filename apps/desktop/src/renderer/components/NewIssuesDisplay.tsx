@@ -115,7 +115,7 @@ export function NewIssuesDisplay({
           margin-top: 16px;
           padding: 14px;
           background: #fef3c7;
-          border: 1px solid #fcd34d;
+          border: 0;
           border-radius: 8px;
         }
 

@@ -18,6 +18,15 @@ BuildingUse = Literal["home", "office", "retail", "mixed"]
 GRID_FT = 0.5
 MIN_ROOM_SIDE_FT = 4.0
 _ID_STRIP = re.compile(r"[^a-z0-9]+")
+_BATH_TOKEN = re.compile(
+    r"bath|wc|washroom|restroom|toilet|ensuite|powder|lavator|ablution|\bloo\b",
+    re.I,
+)
+BATHROOM_CATEGORIES = {
+    "bathroom", "wc", "restroom", "toilet", "ensuite", "powder",
+    "washroom", "lavatory", "ablution",
+}
+KITCHEN_CATEGORIES = {"kitchen", "pantry", "scullery"}
 _USE_ALIASES: dict[str, BuildingUse] = {
     "house": "home", "home": "home", "residential": "home", "apartment": "home",
     "villa": "home", "cabin": "home", "duplex": "home", "dwelling": "home",
@@ -133,9 +142,58 @@ class SpaceSpec(BaseModel):
             self.circulation = True
         if self.category in {"circulation", "corridor", "lobby", "landing", "foyer", "hall"}:
             self.circulation = True
-        if self.category in {"bathroom", "wc", "restroom", "toilet", "ensuite", "powder"}:
+        if self.category in BATHROOM_CATEGORIES or _BATH_TOKEN.search(self.category.replace("_", " ")):
             self.needs_plumbing = True
+            if self.category not in BATHROOM_CATEGORIES:
+                self.category = "bathroom"
         return self
+
+
+def is_bathroom(space: SpaceSpec) -> bool:
+    if space.category in BATHROOM_CATEGORIES:
+        return True
+    if _BATH_TOKEN.search(space.category.replace("_", " ")):
+        return True
+    if space.category in KITCHEN_CATEGORIES or space.category in {
+        "bedroom", "living", "dining", "office", "classroom", "lobby",
+        "circulation", "stair", "sales", "warehouse", "gym",
+    }:
+        return False
+    return bool(_BATH_TOKEN.search(space.name))
+
+
+def is_kitchen(space: SpaceSpec) -> bool:
+    return space.category in KITCHEN_CATEGORIES or "kitchen" in space.category or "kitchen" in space.name.lower()
+
+
+def ensure_wet_rooms(program: BuildingProgram) -> BuildingProgram:
+    """Every storey gets a washroom if the planner left it out."""
+    spaces = list(program.spaces)
+    used = {space.id for space in spaces}
+    added = False
+    for storey in program.storeys:
+        floor = [space for space in spaces if space.floor_id == storey.id]
+        if any(is_bathroom(space) for space in floor):
+            continue
+        sid = "wc"
+        n = 2
+        while sid in used:
+            sid = f"wc_{n}"
+            n += 1
+        used.add(sid)
+        spaces.append(
+            SpaceSpec(
+                id=sid,
+                name="Washroom",
+                floor_id=storey.id,
+                category="bathroom",
+                target_area_sqft=60,
+                min_side_ft=6,
+                needs_plumbing=True,
+            )
+        )
+        added = True
+    return program.model_copy(update={"spaces": spaces}) if added else program
 
 
 class BuildingProgram(BaseModel):

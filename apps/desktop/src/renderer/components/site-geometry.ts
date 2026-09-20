@@ -6,6 +6,19 @@ export const GOOGLE_TILES_ASSET_ID = 2275207
 export const ionToken: string = import.meta.env.VITE_CESIUM_ION_TOKEN || ''
 export const emptySite = { lat: null as number | null, lon: null as number | null, rotation_deg: 0, ground_offset_ft: 0, address: '' }
 
+/** Hover used until terrain is probed. Higher than Everest so inland cities are not underground. */
+export const SITE_APPROACH_HOVER_M = 12_000
+
+/** Camera distance that frames the building lot. Terrain height is ellipsoid height in metres. */
+export function siteCameraOffset(spanM: number, groundM: number | null) {
+  const framed = groundM != null
+  return {
+    terrain: groundM ?? 0,
+    hover: framed ? Math.max(spanM * 1.85, 24) : SITE_APPROACH_HOVER_M,
+    lookUp: framed ? spanM * 0.18 : 0,
+  }
+}
+
 export type LatLon = { lat: number; lon: number }
 
 /** Plan extent of the whole building, across every storey, in feet. */
@@ -103,6 +116,16 @@ export function formatLatLon({ lat, lon }: LatLon) {
   return `${Math.abs(lat).toFixed(5)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(5)}° ${lon >= 0 ? 'E' : 'W'}`
 }
 
+/** Great-circle distance in metres. Used to decide whether the globe camera should jump. */
+export function haversineMeters(a: LatLon, b: LatLon) {
+  const earth = 6371000
+  const dLat = (b.lat - a.lat) * Math.PI / 180
+  const dLon = (b.lon - a.lon) * Math.PI / 180
+  const lat1 = a.lat * Math.PI / 180, lat2 = b.lat * Math.PI / 180
+  const chord = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2
+  return 2 * earth * Math.asin(Math.min(1, Math.sqrt(chord)))
+}
+
 export function parseLatLon(text: string): LatLon | null {
   const match = text.trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/)
   if (!match) return null
@@ -113,16 +136,67 @@ export function parseLatLon(text: string): LatLon | null {
 
 export type Place = { name: string; lat: number; lon: number }
 
-/** Cesium ion's geocoder. Free on a Community token with the geocode scope. */
+export type SiteSun = { east: number; north: number; up: number; altitude: number; azimuth: number }
+
+/**
+ * Direction toward the sun in an east-north-up frame.
+ * Azimuth is clockwise from north. Hour is local solar time.
+ */
+export function siteSunFrom(latDeg: number, dayOfYear: number, solarHour: number): SiteSun {
+  const lat = latDeg * Math.PI / 180
+  const decl = 23.44 * Math.PI / 180 * Math.sin(2 * Math.PI * (dayOfYear - 81) / 365)
+  const hourAngle = (solarHour - 12) * 15 * Math.PI / 180
+  const sinAlt = Math.sin(lat) * Math.sin(decl) + Math.cos(lat) * Math.cos(decl) * Math.cos(hourAngle)
+  const altitude = Math.asin(Math.max(-1, Math.min(1, sinAlt)))
+  let azimuth = Math.atan2(
+    Math.sin(hourAngle),
+    Math.cos(hourAngle) * Math.sin(lat) - Math.tan(decl) * Math.cos(lat),
+  ) + Math.PI
+  if (azimuth < 0) azimuth += Math.PI * 2
+  if (azimuth >= Math.PI * 2) azimuth -= Math.PI * 2
+  const sky = Math.cos(altitude)
+  return { east: Math.sin(azimuth) * sky, north: Math.cos(azimuth) * sky, up: Math.sin(altitude), altitude, azimuth }
+}
+
+/** Mid-afternoon in local summer, the window photogrammetry is usually flown. */
+export function siteSun(latDeg: number) {
+  return siteSunFrom(latDeg, latDeg >= 0 ? 172 : 355, 14)
+}
+
+/** Light position in the site building's Y-up frame (X east, Y up, Z south). */
+export function siteSunLightPosition(latDeg: number, reach = 120) {
+  const sun = siteSun(latDeg)
+  return { x: sun.east * reach, y: sun.up * reach, z: -sun.north * reach }
+}
+
+/** Cesium ion geocoder (Pelias). Worldwide — no country filter. */
+export function geocodeSearchUrl(query: string) {
+  return `https://api.cesium.com/v1/geocode/search?text=${encodeURIComponent(query)}`
+}
+
+/** Prefer the feature point so an address does not jump to the middle of a huge bbox. */
+export function placesFromGeocode(body: { features?: any[] } | null | undefined, query = ''): Place[] {
+  return (body?.features || []).flatMap((feature: any) => {
+    const coords = feature.geometry?.type === 'Point' ? feature.geometry.coordinates : null
+    const box = feature.bbox
+    let lon: number | undefined
+    let lat: number | undefined
+    if (Array.isArray(coords) && coords.length >= 2) {
+      lon = Number(coords[0])
+      lat = Number(coords[1])
+    } else if (Array.isArray(box) && box.length >= 4) {
+      lon = (Number(box[0]) + Number(box[2])) / 2
+      lat = (Number(box[1]) + Number(box[3])) / 2
+    }
+    if (lon == null || lat == null || !isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return []
+    return [{ name: String(feature.properties?.label || feature.properties?.name || query), lon, lat }]
+  }).slice(0, 6)
+}
+
 export async function geocode(query: string, signal?: AbortSignal): Promise<Place[]> {
   if (!ionToken) throw new Error('Set VITE_CESIUM_ION_TOKEN in .env to search for a location.')
-  const url = `https://api.cesium.com/v1/geocode/search?text=${encodeURIComponent(query)}`
+  const url = geocodeSearchUrl(query)
   const response = await fetch(url, { headers: { Authorization: `Bearer ${ionToken}` }, signal })
   if (!response.ok) throw new Error(response.status === 401 ? 'The Cesium ion token was rejected. Check it has the geocode scope.' : `Search failed (${response.status}).`)
-  const body = await response.json()
-  return (body.features || []).flatMap((feature: any) => {
-    const box = feature.bbox
-    if (!Array.isArray(box) || box.length < 4) return []
-    return [{ name: String(feature.properties?.label || feature.properties?.name || query), lon: (box[0] + box[2]) / 2, lat: (box[1] + box[3]) / 2 }]
-  }).slice(0, 6)
+  return placesFromGeocode(await response.json(), query)
 }

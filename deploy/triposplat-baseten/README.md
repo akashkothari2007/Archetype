@@ -3,7 +3,7 @@
 Sparkles needs an image-to-3D-Gaussian endpoint. Baseten's model catalog has no such
 model, so this Truss deploys [TripoSplat](https://github.com/VAST-AI-Research/TripoSplat)
 (MIT, weights on [Hugging Face](https://huggingface.co/VAST-AI/TripoSplat)) into your own
-workspace. It replaces fal, so generations bill against Baseten GPU credits instead.
+workspace. Generations bill against Baseten GPU credits.
 
 ```
 config.yaml                    L4 GPU, pinned weights mounted at /models/triposplat
@@ -33,9 +33,8 @@ PLANCHECK_SPLAT_URL=https://model-<id>.api.baseten.co/environments/production/pr
 PLANCHECK_SPLAT_API_KEY=<baseten api key>
 ```
 
-`PLANCHECK_SPLAT_URL` wins over `FAL_KEY`, and the client sends Baseten's
-`Authorization: Api-Key` header automatically. Recreate the backend so the container
-picks up the new values:
+Sparkles talks only to this Baseten endpoint (Flux stays on its own Baseten
+deployment). Recreate the backend so the container picks up the new values:
 
 ```bash
 docker compose up -d --force-recreate backend
@@ -50,7 +49,7 @@ Request (what `plancheck/services/splat.py` sends):
 ```
 
 `image_url` also works with an `http(s)` URL. `num_gaussians` is clamped to
-32768–262144. Response matches fal's shape apart from the inline file:
+32768–262144. Response:
 
 ```json
 { "model_mesh": { "content": "<base64 .splat>", "file_name": "output.splat" } }

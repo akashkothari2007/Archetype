@@ -3,9 +3,9 @@ import { useTexture } from '@react-three/drei'
 import { useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { useAppearance } from './appearance-context'
+import { surfaceOf, type SurfaceKind } from './material-catalog'
 
-type Finish = 'plaster' | 'wood' | 'grass' | 'stone'
-const names = { plaster: 'plaster_grey_04', wood: 'wood_floor', grass: 'grass_ground', stone: 'plaster_grey_04' }
+type SurfaceProps = { finish: string; color?: string; selected?: boolean; faded?: boolean; photoreal?: boolean; matchStyle?: boolean }
 
 function parseHex(value: string | undefined, fallback: string) {
   if (!value) return fallback
@@ -17,12 +17,21 @@ function glslColor(hex: string) {
   return `vec3(${color.r.toFixed(4)}, ${color.g.toFixed(4)}, ${color.b.toFixed(4)})`
 }
 
+function sample(kind: SurfaceKind, sampler: string) {
+  return kind === 'wood' || kind === 'metal' ? `texture2D(${sampler}, surfaceUV)` : `naturalSample(${sampler}, surfaceUV)`
+}
+
 // World-space mapping keeps texture scale constant on long walls, instanced walls,
 // thin reveals and floor polygons. Albedo, normals and roughness share coordinates.
-export function SurfaceMaterial({ finish, color = '#ffffff', selected = false, faded = false, photoreal = false, matchStyle = true }: { finish: Finish; color?: string; selected?: boolean; faded?: boolean; photoreal?: boolean; matchStyle?: boolean }) {
+export function SurfaceMaterial(props: SurfaceProps) {
+  return <MappedSurface key={surfaceOf(props.finish).folder} {...props} />
+}
+
+function MappedSurface({ finish, color = '#ffffff', selected = false, faded = false, photoreal = false, matchStyle = true }: SurfaceProps) {
   const gl = useThree(state => state.gl)
   const look = useAppearance()
-  const maps = useTexture(['Diffuse', 'nor_gl', 'Rough'].map(kind => `assets/landscape/${names[finish]}/${kind}.jpg`))
+  const surface = surfaceOf(finish)
+  const maps = useTexture(['Diffuse', 'nor_gl', 'Rough'].map(kind => `assets/${surface.folder}/${kind}.jpg`))
   const textures = useMemo(() => {
     maps.forEach((map, i) => { map.wrapS = map.wrapT = THREE.RepeatWrapping; map.anisotropy = Math.min(8, gl.capabilities.getMaxAnisotropy()); map.colorSpace = i === 0 ? THREE.SRGBColorSpace : THREE.NoColorSpace; map.needsUpdate = true })
     return { map: maps[0], normalMap: maps[1], roughnessMap: maps[2] }
@@ -31,11 +40,12 @@ export function SurfaceMaterial({ finish, color = '#ffffff', selected = false, f
   const brick = parseHex(look.palette?.primary, '#8a5a3a')
   const grout = parseHex(look.palette?.secondary, '#d8d0c4')
   const roof = parseHex(look.palette?.floor, '#6a6560')
-  const tint = clad ? '#ffffff' : !matchStyle || !look.palette || finish === 'grass'
-    ? color
-    : parseHex(finish === 'wood' || finish === 'stone' ? look.palette.floor : look.palette.secondary, color)
+  const painted = !!surface.tint
+  const tint = clad ? '#ffffff' : !matchStyle || !look.apply || !look.palette || surface.kind === 'grass'
+    ? (painted ? color : '#ffffff')
+    : painted ? parseHex(surface.kind === 'wood' || surface.kind === 'stone' ? look.palette.floor : look.palette.secondary, color) : '#ffffff'
   const compile = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => {
-    const scale = finish === 'wood' ? .105 : finish === 'grass' ? .19 : finish === 'stone' ? .22 : .38
+    const { kind, scale, stylize, planks } = surface
     shader.vertexShader = `varying vec3 vSurfacePosition; varying vec3 vSurfaceNormal;\n${shader.vertexShader}`
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         mat4 surfaceMatrix = modelMatrix;
@@ -58,13 +68,13 @@ export function SurfaceMaterial({ finish, color = '#ffffff', selected = false, f
       .replace('#include <map_fragment>', `
         vec3 sn = abs(normalize(vSurfaceNormal));
         vec2 surfaceUV = (sn.y > max(sn.x,sn.z) ? vSurfacePosition.xz : (sn.x > sn.z ? vSurfacePosition.zy : vSurfacePosition.xy)) * ${scale};
-        ${finish === 'wood' ? `
+        ${planks ? `
           float row = floor(surfaceUV.y * 8.0);
           surfaceUV.x += surfaceHash(vec2(row, 9.0)).x;
         ` : ''}
-        vec4 surfaceColor = ${finish !== 'wood' ? 'naturalSample(map, surfaceUV)' : 'texture2D(map, surfaceUV)'};
-        ${finish === 'grass' ? 'surfaceColor.rgb *= vec3(.84, 1.12, .72) * (0.93 + 0.07 * sin(vSurfacePosition.x * .035 + sin(vSurfacePosition.z * .05)));' : ''}
-        ${clad && finish === 'plaster' ? `
+        vec4 surfaceColor = ${sample(kind, 'map')};
+        ${kind === 'grass' ? 'surfaceColor.rgb *= vec3(.84, 1.12, .72) * (0.93 + 0.07 * sin(vSurfacePosition.x * .035 + sin(vSurfacePosition.z * .05)));' : ''}
+        ${clad && kind === 'plaster' ? `
           vec2 masonry = sn.y > max(sn.x, sn.z) ? vSurfacePosition.xz : (sn.x > sn.z ? vec2(vSurfacePosition.z, vSurfacePosition.y) : vec2(vSurfacePosition.x, vSurfacePosition.y));
           float courses = 4.55;
           float ratio = 2.55;
@@ -77,8 +87,8 @@ export function SurfaceMaterial({ finish, color = '#ffffff', selected = false, f
           vec3 brickCol = ${glslColor(brick)} * mix(vec3(0.78, 0.74, 0.7), surfaceColor.rgb, 0.32) * (0.84 + 0.24 * speck);
           vec3 groutCol = ${glslColor(grout)} * mix(vec3(1.0), surfaceColor.rgb, 0.18);
           surfaceColor.rgb = mix(brickCol, groutCol, groutMask);
-        ` : finish === 'plaster' ? 'surfaceColor.rgb = mix(vec3(.83, .80, .76), surfaceColor.rgb, .82);' : ''}
-        ${clad && finish === 'stone' ? `
+        ` : kind === 'plaster' ? 'surfaceColor.rgb = mix(vec3(.83, .80, .76), surfaceColor.rgb, .82);' : ''}
+        ${clad && kind === 'stone' && stylize ? `
           vec2 shingle = sn.y > 0.55 ? vSurfacePosition.xz : (sn.x > sn.z ? vSurfacePosition.zy : vSurfacePosition.xy);
           vec2 tileId = floor(shingle * vec2(1.15, 2.4));
           vec2 tileUv = fract(shingle * vec2(1.15, 2.4) + vec2(mod(tileId.y, 2.0) * 0.5, 0.0));
@@ -86,11 +96,12 @@ export function SurfaceMaterial({ finish, color = '#ffffff', selected = false, f
           float wear = surfaceHash(tileId).x;
           surfaceColor.rgb = mix(${glslColor(roof)} * (0.72 + 0.3 * wear), ${glslColor(grout)} * 0.55, gap);
           surfaceColor.rgb *= mix(vec3(1.0), naturalSample(map, surfaceUV).rgb, 0.28);
-        ` : finish === 'stone' ? 'surfaceColor.rgb = mix(vec3(.62, .60, .57), surfaceColor.rgb, .74);' : ''}
+        ` : stylize && kind === 'stone' ? 'surfaceColor.rgb = mix(vec3(.62, .60, .57), surfaceColor.rgb, .74);' : ''}
         diffuseColor *= surfaceColor;`)
       .replace('#include <normal_fragment_begin>', THREE.ShaderChunk.normal_fragment_begin.replaceAll('vNormalMapUv', 'surfaceUV'))
-      .replace('#include <normal_fragment_maps>', THREE.ShaderChunk.normal_fragment_maps.replaceAll('vNormalMapUv', 'surfaceUV').replaceAll('texture2D( normalMap, surfaceUV )', finish === 'wood' ? 'texture2D( normalMap, surfaceUV )' : 'naturalSample(normalMap, surfaceUV)'))
-      .replace('#include <roughnessmap_fragment>', THREE.ShaderChunk.roughnessmap_fragment.replaceAll('vRoughnessMapUv', 'surfaceUV').replaceAll('texture2D( roughnessMap, surfaceUV )', finish === 'wood' ? 'texture2D( roughnessMap, surfaceUV )' : 'naturalSample(roughnessMap, surfaceUV)'))
-  }, [finish, clad, brick, grout, roof])
-  return <meshStandardMaterial key={clad ? `clad-${finish}-${brick}` : `pbr-${tint}`} {...textures} color={tint} normalScale={finish === 'plaster' ? (clad ? [.7, .7] : [.55, .55]) : finish === 'grass' ? [.3, .3] : (clad ? [.35, .35] : [.22, .22])} roughness={finish === 'wood' ? .8 : clad && finish === 'stone' ? .95 : .88} envMapIntensity={clad ? .48 : .85} onBeforeCompile={compile} customProgramCacheKey={() => `surface-v9-${finish}-${clad ? `clad-${brick}-${grout}-${roof}` : `pbr-${tint}`}`} transparent={faded} opacity={faded ? .4 : 1} emissive={selected ? '#31495d' : '#000000'} emissiveIntensity={selected ? .16 : 0} />
+      .replace('#include <normal_fragment_maps>', THREE.ShaderChunk.normal_fragment_maps.replaceAll('vNormalMapUv', 'surfaceUV').replaceAll('texture2D( normalMap, surfaceUV )', sample(kind, 'normalMap')))
+      .replace('#include <roughnessmap_fragment>', THREE.ShaderChunk.roughnessmap_fragment.replaceAll('vRoughnessMapUv', 'surfaceUV').replaceAll('texture2D( roughnessMap, surfaceUV )', sample(kind, 'roughnessMap')))
+  }, [surface, clad, brick, grout, roof])
+  const normal = clad && surface.kind === 'plaster' ? .7 : surface.normalScale
+  return <meshStandardMaterial key={clad ? `clad-${surface.id}-${brick}` : `pbr-${surface.id}-${tint}`} {...textures} color={tint} normalScale={[normal, normal]} roughness={clad && surface.kind === 'stone' && surface.stylize ? .95 : surface.roughness} metalness={surface.metalness || 0} envMapIntensity={clad ? .48 : surface.kind === 'metal' ? 1.2 : .85} onBeforeCompile={compile} customProgramCacheKey={() => `surface-v10-${surface.id}-${clad ? `clad-${brick}-${grout}-${roof}` : `pbr-${tint}`}`} transparent={faded} opacity={faded ? .4 : 1} emissive={selected ? '#31495d' : '#000000'} emissiveIntensity={selected ? .16 : 0} />
 }

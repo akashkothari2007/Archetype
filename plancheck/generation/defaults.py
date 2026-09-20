@@ -11,6 +11,7 @@ import fnmatch
 import math
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from plancheck.generation.program import USES, BuildingUse
 
@@ -52,9 +53,9 @@ PROFILES: dict[str, UseProfile] = {
         },
         ordering=("living", "kitchen", "dining", "circulation", "stair", "office", "bedroom", "bathroom", "utility", "storage"),
         guidance=(
-            "Put living, kitchen and dining together on the entry storey.",
-            "Bedrooms and bathrooms belong on the upper storey when there is more than one.",
-            "Stack bathrooms above each other or beside one another so plumbing shares a wall.",
+            "Put living, kitchen and dining together as one open public zone on the entry storey.",
+            "Circulation is a compact hall or foyer next to the stair, never a corridor through the house.",
+            "Bedrooms cluster on the upper storey when there is more than one; stack bathrooms.",
         ),
     ),
     "office": UseProfile(
@@ -93,7 +94,7 @@ PROFILES: dict[str, UseProfile] = {
         ordering=("entry", "sales", "fitting", "circulation", "stair", "office", "break", "bathroom", "stock", "receiving"),
         guidance=(
             "Give the sales floor the largest single rectangle, facing the street edge.",
-            "Stock, receiving and staff rooms line the back of the plan.",
+            "Stock, receiving and staff rooms line the back of the plan. Do not cut a hallway through the shop floor.",
         ),
     ),
     "mixed": UseProfile(
@@ -112,7 +113,7 @@ PROFILES: dict[str, UseProfile] = {
         },
         ordering=("lobby", "entry", "circulation", "stair", "sales", "retail", "open_office", "living", "kitchen", "meeting", "office", "bedroom", "break", "bathroom", "storage"),
         guidance=(
-            "Keep the public uses (lobby, retail) on the ground storey.",
+            "Keep the public uses (lobby, retail) as large rooms on the ground storey, not rooms along a hallway.",
             "Put workplace or residential space above, sharing one stair core.",
         ),
     ),
@@ -128,22 +129,29 @@ _KIND_PATTERNS: tuple[tuple[str, str, BuildingUse], ...] = (
     (r"\bschool\b|\buniversity\b|\bcollege\b|\bcampus\b", "school", "office"),
     (r"\bwarehouse\b|\bfactory\b|\bindustrial\b|\bworkshop\b", "warehouse", "retail"),
     (r"\bmuseum\b|\btheatre\b|\btheater\b|\bgallery\b|\bcivic\b", "civic", "mixed"),
-    (r"\bchurch\b|\bmosque\b|\btemple\b|\bsynagogue\b", "civic", "mixed"),
-    (r"\bgym\b|\bstadium\b|\barena\b", "civic", "retail"),
-    (r"\bapartment\b|\bapartments\b|\bresidential\b", "home", "home"),
+    (r"\bchurch\b|\bmosque\b|\btemple\b|\bsynagogue\b|\bworship\b", "worship", "mixed"),
+    (r"\bgym\b|\bstadium\b|\barena\b", "gym", "retail"),
+    (r"\blibrary\b", "library", "office"),
+    (r"\bapartment\b|\bapartments\b|\bresidential\b", "apartment", "home"),
     (r"\boffice\b|\bworkplace\b|\bcoworking\b", "office", "office"),
     (r"\bstudio\b", "office", "office"),
+    (r"\brestaurant\b|\bcafe\b|\bcoffee\b|\bdiner\b", "restaurant", "retail"),
     (r"\bretail\b|\bshop\b|\bstore\b|\bboutique\b|\bshowroom\b|\bsupermarket\b", "retail", "retail"),
-    (r"\brestaurant\b|\bcafe\b|\bcoffee\b", "retail", "retail"),
     (r"\bhome\b|\bhouse\b|\bvilla\b|\bcabin\b|\bduplex\b|\bdwelling\b", "home", "home"),
 )
 
+# category -> typical usable sqft. Used as a size hint when the library has no
+# richer room entry, and as a fallback for unknown kinds.
 _KIND_AREAS: dict[str, dict[str, float]] = {
     "hospital": {
         "lobby": 800, "cafe": 400, "reception": 300, "waiting": 400, "triage": 240,
         "exam": 140, "ward": 900, "icu": 600, "or": 450, "pharmacy": 220,
         "lab": 280, "radiology": 360, "nurse_station": 180, "office": 140,
         "bathroom": 120, "break": 200, "storage": 160, "circulation": 480, "stair": 160,
+    },
+    "clinic": {
+        "lobby": 320, "reception": 180, "waiting": 280, "exam": 140, "procedure": 220,
+        "office": 140, "bathroom": 90, "break": 140, "storage": 100, "circulation": 240, "stair": 130,
     },
     "hotel": {
         "lobby": 600, "reception": 240, "restaurant": 800, "kitchen": 400,
@@ -158,6 +166,30 @@ _KIND_AREAS: dict[str, dict[str, float]] = {
         "entry": 200, "warehouse": 6000, "receiving": 500, "office": 180,
         "break": 160, "bathroom": 100, "circulation": 240, "stair": 130,
     },
+    "restaurant": {
+        "entry": 140, "dining": 1800, "bar": 320, "kitchen": 700, "storage": 220,
+        "bathroom": 100, "office": 120, "circulation": 180, "stair": 120,
+    },
+    "worship": {
+        "lobby": 400, "sanctuary": 2400, "ablution": 220, "classroom": 400,
+        "office": 160, "bathroom": 110, "storage": 140, "circulation": 280, "stair": 140,
+    },
+    "gym": {
+        "entry": 200, "gym": 4000, "studio": 800, "locker": 400, "office": 140,
+        "bathroom": 160, "storage": 180, "circulation": 240, "stair": 130,
+    },
+    "library": {
+        "lobby": 320, "stacks": 1800, "reading": 900, "office": 160, "meeting": 240,
+        "bathroom": 110, "storage": 140, "circulation": 280, "stair": 140,
+    },
+    "apartment": {
+        "lobby": 360, "living": 280, "kitchen": 140, "bedroom": 160, "bathroom": 70,
+        "storage": 80, "circulation": 220, "stair": 130,
+    },
+    "civic": {
+        "lobby": 500, "gallery": 1600, "auditorium": 2200, "office": 160, "cafe": 320,
+        "bathroom": 120, "storage": 180, "circulation": 320, "stair": 150,
+    },
 }
 
 _KIND_GUIDANCE: dict[str, tuple[str, ...]] = {
@@ -166,16 +198,363 @@ _KIND_GUIDANCE: dict[str, tuple[str, ...]] = {
         "Group wards, exam rooms and nurse stations off a wide corridor; stack the stair and washrooms.",
         "Do not enumerate every bed. One ward or one operating theatre is a single space.",
     ),
+    "clinic": (
+        "Waiting and reception on the entry storey; exam rooms line a corridor.",
+        "A procedure room is one space, not one space per chair.",
+    ),
     "hotel": (
         "Lobby, restaurant and reception on the entry storey; guest rooms above.",
         "A typical guest room is one space, repeated a few times, not one space per key.",
     ),
     "school": (
-        "Classrooms line a corridor. Shared gym, cafeteria and library can sit on the entry storey.",
+        "Classrooms line a corridor. Each classroom the brief names is its own space, never a grouped blob.",
+        "Shared gym, cafeteria and library can sit on the entry storey.",
     ),
     "warehouse": (
-        "Give the warehouse floor the largest rectangle. Offices and staff rooms line the street edge.",
+        "Give the warehouse floor the largest rectangle. Offices and staff rooms line one edge.",
+        "Do not run a corridor through the warehouse plate.",
     ),
+    "restaurant": (
+        "Dining faces the street as one large room. Kitchen, storage and staff rooms sit behind.",
+        "The dining room is one space, not a table per rectangle. A small entry or bar, not a hallway spine.",
+    ),
+    "worship": (
+        "The sanctuary or prayer hall is the largest space, reached from a compact lobby or narthex.",
+        "Ablution, offices and classrooms support it along the edge; do not split the hall into pews or a corridor.",
+    ),
+    "gym": (
+        "The main gym floor takes most of the plate. Lockers and studios line the edge, not a central hallway.",
+    ),
+    "library": (
+        "Stacks and reading rooms sit off a quiet lobby. Staff offices at the back.",
+    ),
+    "apartment": (
+        "A shared lobby and stair on the entry storey; dwelling rooms grouped as units above.",
+        "Do not explode every unit into a full house program.",
+    ),
+    "civic": (
+        "A public lobby and the largest gathering room sit on the entry storey.",
+        "Staff offices, stores and washrooms support the public rooms along an edge, not a hotel corridor.",
+    ),
+}
+
+# How the packer draws this kind. The planner sizes circulation to match.
+_KIND_LAYOUT: dict[str, str] = {
+    "home": "cluster",
+    "apartment": "corridor",
+    "office": "corridor",
+    "hospital": "corridor",
+    "clinic": "corridor",
+    "hotel": "corridor",
+    "school": "corridor",
+    "library": "corridor",
+    "retail": "edge",
+    "warehouse": "hall",
+    "restaurant": "hall",
+    "worship": "hall",
+    "gym": "hall",
+    "civic": "hall",
+    "mixed": "mixed",
+}
+
+_LAYOUT_NOTES: dict[str, tuple[str, ...]] = {
+    "cluster": (
+        "Circulation is a compact hall, foyer or landing next to the stair — not a corridor through the house.",
+        "Living, kitchen and dining share one open public zone. Bedrooms cluster; keep hallways short.",
+    ),
+    "hall": (
+        "One dominant room (sanctuary, gym, dining hall, warehouse) takes most of the plate.",
+        "A lobby or narthex leads into it. Support rooms line the back edge, not a central hallway.",
+    ),
+    "edge": (
+        "The sales or warehouse floor is the largest rectangle, facing the street.",
+        "Stock, staff and washrooms line the back. Do not cut a hallway through the sales floor.",
+    ),
+    "corridor": (
+        "A double-loaded corridor with rooms on both sides is the right diagram for this kind.",
+        "Size the corridor generously so every enclosed room can open onto it.",
+    ),
+    "mixed": (
+        "Public ground-floor rooms (lobby, shop, hall) are large plates, not rooms on a hallway.",
+        "Upper workplace or guest-room floors may use a corridor; dwelling floors cluster like a house.",
+    ),
+}
+
+
+def layout_scheme(kind: str, use: str = "") -> str:
+    """Packer diagram for this building kind: cluster, hall, edge, corridor, or mixed."""
+    key = (kind or use or "home").strip().lower()
+    if key in _KIND_LAYOUT:
+        return _KIND_LAYOUT[key]
+    if use == "home":
+        return "cluster"
+    if use == "retail":
+        return "edge"
+    if use == "office":
+        return "corridor"
+    return "mixed"
+
+
+def layout_notes(kind: str, use: str = "") -> tuple[str, ...]:
+    return _LAYOUT_NOTES.get(layout_scheme(kind, use), _LAYOUT_NOTES["mixed"])
+
+# Richer program knowledge than typical_areas: named rooms, why they exist, and
+# which storey they usually occupy. Research consults this instead of guessing.
+_KIND_LIBRARY: dict[str, dict[str, Any]] = {
+    "hospital": {
+        "label": "Hospital",
+        "blurb": "A clinical building with a public arrival floor and inpatient floors stacked on a corridor core.",
+        "source": (
+            "Archetype hospital program library",
+            "Typical inpatient stacking, department sizes, and what not to enumerate (beds, desks).",
+        ),
+        "rooms": (
+            ("lobby", "Public lobby", "entry", "Arrival and wayfinding for patients and visitors."),
+            ("reception", "Reception", "entry", "Check-in next to the lobby."),
+            ("cafe", "Cafe", "entry", "Public refreshment on the entry storey."),
+            ("waiting", "Waiting", "entry", "Holds people before triage or clinics."),
+            ("triage", "Triage", "entry", "First clinical filter off the waiting room."),
+            ("ward", "Inpatient ward", "upper", "One grouped ward, not a bed per room."),
+            ("or", "Operating theatre", "upper", "A single OR suite as one space."),
+            ("icu", "ICU", "upper", "Critical care grouped off the corridor."),
+            ("nurse_station", "Nurse station", "every", "Oversight next to wards or exam rooms."),
+            ("pharmacy", "Pharmacy", "entry", "Dispensing near the public side."),
+            ("radiology", "Radiology", "entry", "Imaging, kept as one department."),
+            ("bathroom", "Washrooms", "every", "Repeat per storey rather than one for the building."),
+        ),
+    },
+    "clinic": {
+        "label": "Clinic",
+        "blurb": "An outpatient building organised around reception, waiting and exam rooms.",
+        "source": (
+            "Archetype clinic program library",
+            "Outpatient exam-room programs and typical support spaces.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Public arrival."),
+            ("reception", "Reception", "entry", "Check-in facing the waiting room."),
+            ("waiting", "Waiting", "entry", "Patients wait before being called."),
+            ("exam", "Exam room", "any", "Repeat a few exam rooms, not one per chair."),
+            ("procedure", "Procedure room", "any", "A larger clinical room off the corridor."),
+            ("office", "Consult office", "any", "Clinician workspace."),
+            ("bathroom", "Washrooms", "every", "Repeat on each storey."),
+        ),
+    },
+    "hotel": {
+        "label": "Hotel",
+        "blurb": "Public hospitality on the ground floor with guest rooms stacked above.",
+        "source": (
+            "Archetype hotel program library",
+            "Lobby-and-keys stacking; guest rooms as repeated types, not one space per key.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Public arrival and sitting."),
+            ("reception", "Reception", "entry", "Front desk on the lobby."),
+            ("restaurant", "Restaurant", "entry", "Public dining on the entry storey."),
+            ("kitchen", "Kitchen", "entry", "Serves the restaurant, back of house."),
+            ("guest_room", "Guest room", "upper", "A typical key, repeated a few times."),
+            ("suite", "Suite", "upper", "A larger guest type, not every key."),
+            ("meeting", "Meeting room", "any", "Conference support."),
+            ("laundry", "Laundry", "any", "Housekeeping support."),
+            ("bathroom", "Washrooms", "every", "Public washrooms on the entry storey; guest baths live in the rooms."),
+        ),
+    },
+    "school": {
+        "label": "School",
+        "blurb": "Classrooms along a corridor, with shared gym, cafeteria and library.",
+        "source": (
+            "Archetype school program library",
+            "Classroom-and-corridor plans and shared specialist rooms.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Arrival and administration."),
+            ("classroom", "Classroom", "any", "Each classroom is its own room. Four classrooms means four spaces."),
+            ("lab", "Lab", "any", "Specialist teaching."),
+            ("library", "Library", "entry", "Shared learning resource."),
+            ("cafeteria", "Cafeteria", "entry", "Shared dining."),
+            ("gym", "Gym", "entry", "The large shared hall."),
+            ("office", "Admin office", "entry", "Staff and administration."),
+            ("bathroom", "Washrooms", "every", "Repeat per storey."),
+        ),
+    },
+    "warehouse": {
+        "label": "Warehouse",
+        "blurb": "A large storage plate with a thin office and receiving edge.",
+        "source": (
+            "Archetype warehouse program library",
+            "Floor-plate programs for storage, receiving and a small staff edge.",
+        ),
+        "rooms": (
+            ("warehouse", "Warehouse floor", "entry", "The dominant storage plate."),
+            ("receiving", "Receiving", "entry", "Dock and inbound, at the back."),
+            ("office", "Office", "entry", "Staff on the street edge."),
+            ("break", "Break room", "entry", "Staff support."),
+            ("bathroom", "Washrooms", "entry", "Staff washrooms."),
+        ),
+    },
+    "restaurant": {
+        "label": "Restaurant",
+        "blurb": "Dining to the street, kitchen and stores behind.",
+        "source": (
+            "Archetype restaurant program library",
+            "Front-of-house dining versus back-of-house kitchen and stores.",
+        ),
+        "rooms": (
+            ("entry", "Entry", "entry", "Arrival and waiting."),
+            ("dining", "Dining room", "entry", "The main public room, one large space."),
+            ("bar", "Bar", "entry", "Optional service edge on the dining room."),
+            ("kitchen", "Kitchen", "entry", "Back of house, largest support room."),
+            ("storage", "Dry storage", "entry", "Beside the kitchen."),
+            ("bathroom", "Washrooms", "entry", "Public washrooms off the dining room."),
+            ("office", "Manager office", "entry", "Small staff room at the back."),
+        ),
+    },
+    "worship": {
+        "label": "Place of worship",
+        "blurb": "A large sanctuary or prayer hall reached from a lobby, with support rooms around it.",
+        "source": (
+            "Archetype worship program library",
+            "Sanctuary-led plans for mosques, churches, temples and synagogues.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Gathering before entering the hall."),
+            ("sanctuary", "Prayer hall", "entry", "The largest room; do not subdivide into seats."),
+            ("ablution", "Ablution / vestry", "entry", "Preparation next to the hall."),
+            ("classroom", "Classroom", "any", "Education and community use."),
+            ("office", "Office", "any", "Clergy or administration."),
+            ("bathroom", "Washrooms", "every", "Repeat per storey."),
+        ),
+    },
+    "gym": {
+        "label": "Gym",
+        "blurb": "A large activity floor with lockers, studios and a thin staff edge.",
+        "source": (
+            "Archetype recreation program library",
+            "Gym-floor programs with locker and studio support.",
+        ),
+        "rooms": (
+            ("entry", "Entry", "entry", "Arrival and check-in."),
+            ("gym", "Gym floor", "entry", "The dominant activity plate."),
+            ("studio", "Studio", "any", "A smaller class room."),
+            ("locker", "Lockers", "entry", "Changing next to the gym floor."),
+            ("bathroom", "Washrooms", "entry", "Public washrooms by the lockers."),
+            ("office", "Office", "entry", "Staff at the edge."),
+        ),
+    },
+    "library": {
+        "label": "Library",
+        "blurb": "Stacks and reading rooms off a quiet public lobby.",
+        "source": (
+            "Archetype library program library",
+            "Public reading, stacks and staff support.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Arrival and control."),
+            ("stacks", "Stacks", "any", "The main collection as one space."),
+            ("reading", "Reading room", "any", "Quiet seating next to the stacks."),
+            ("meeting", "Meeting room", "any", "Community or staff meeting."),
+            ("office", "Staff office", "any", "Workroom at the back."),
+            ("bathroom", "Washrooms", "every", "Repeat per storey."),
+        ),
+    },
+    "apartment": {
+        "label": "Apartments",
+        "blurb": "Shared lobby and stair, with dwelling rooms grouped as units rather than a single house.",
+        "source": (
+            "Archetype residential program library",
+            "Multi-unit stacking: shared core plus a few typical dwellings.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Shared arrival."),
+            ("living", "Living", "upper", "Part of a typical dwelling, not one living room for the block."),
+            ("kitchen", "Kitchen", "upper", "Grouped with living in the unit."),
+            ("bedroom", "Bedroom", "upper", "Repeat a few bedrooms, not one per resident."),
+            ("bathroom", "Bathroom", "every", "In the unit and as a shared washroom on the entry storey."),
+        ),
+    },
+    "civic": {
+        "label": "Civic building",
+        "blurb": "A public gathering building with a lobby and one large room, offices behind.",
+        "source": (
+            "Archetype civic program library",
+            "Museums, theatres and other public halls: lobby, main room, support.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Public arrival."),
+            ("gallery", "Gallery / hall", "entry", "The principal public room."),
+            ("auditorium", "Auditorium", "entry", "Use only if the brief asks for performance."),
+            ("cafe", "Cafe", "entry", "Public refreshment."),
+            ("office", "Office", "any", "Staff support."),
+            ("bathroom", "Washrooms", "every", "Repeat per storey."),
+        ),
+    },
+    "home": {
+        "label": "Home",
+        "blurb": "A dwelling: open living-kitchen-dining, a short hall by the stair, bedrooms clustered — not a hotel corridor.",
+        "source": (
+            "Archetype house program library",
+            "Living-kitchen-dining together; bedrooms stacked; plumbing shared.",
+        ),
+        "rooms": (
+            ("living", "Living room", "entry", "The main gathering room on the entry storey."),
+            ("kitchen", "Kitchen", "entry", "Open to living and dining."),
+            ("dining", "Dining", "entry", "Next to the kitchen."),
+            ("primary_bedroom", "Primary bedroom", "upper", "The largest bedroom, usually upstairs."),
+            ("bedroom", "Bedroom", "upper", "Repeat to match the brief."),
+            ("bathroom", "Bathroom", "every", "Stack plumbing; at least one per storey."),
+            ("office", "Study", "any", "Only if the brief asks for one."),
+            ("garage", "Garage", "entry", "Only if the brief asks for one."),
+        ),
+    },
+    "office": {
+        "label": "Office",
+        "blurb": "A workplace with reception on the entry storey and work and meeting rooms along a corridor.",
+        "source": (
+            "Archetype workplace program library",
+            "Reception, core, open work and meeting rooms on a corridor.",
+        ),
+        "rooms": (
+            ("reception", "Reception", "entry", "Arrival next to the stair core."),
+            ("open_office", "Open work", "any", "The largest workplace plate on each work storey."),
+            ("meeting", "Meeting room", "any", "Repeat a few meeting rooms, not one per person."),
+            ("office", "Enclosed office", "any", "Private offices as named in the brief."),
+            ("break", "Break room", "any", "Staff support."),
+            ("bathroom", "Washrooms", "every", "Repeat in the core."),
+        ),
+    },
+    "retail": {
+        "label": "Retail",
+        "blurb": "A shop with a large sales floor facing the street and stock behind.",
+        "source": (
+            "Archetype retail program library",
+            "Sales-floor-led plans with fitting, stock and staff at the back.",
+        ),
+        "rooms": (
+            ("entry", "Entry", "entry", "Street arrival."),
+            ("sales", "Sales floor", "entry", "The dominant public room."),
+            ("fitting", "Fitting", "entry", "Only if the brief is apparel."),
+            ("stock", "Stock", "entry", "Back of house."),
+            ("receiving", "Receiving", "entry", "Goods in, at the rear."),
+            ("office", "Office", "entry", "Manager at the back."),
+            ("bathroom", "Washrooms", "entry", "Staff and public as needed."),
+        ),
+    },
+    "mixed": {
+        "label": "Mixed use",
+        "blurb": "Public uses on the ground floor with workplace or dwellings above, sharing one core.",
+        "source": (
+            "Archetype mixed-use program library",
+            "Public ground floor, quieter uses above, one stacked stair.",
+        ),
+        "rooms": (
+            ("lobby", "Lobby", "entry", "Shared public arrival."),
+            ("sales", "Retail", "entry", "Public ground-floor use."),
+            ("open_office", "Workplace", "upper", "Work above the public floor."),
+            ("living", "Living", "upper", "Residential above, only if the brief is dwellings."),
+            ("meeting", "Meeting", "upper", "If the upper floors are workplace."),
+            ("bathroom", "Washrooms", "every", "Repeat in the core."),
+        ),
+    },
 }
 
 
@@ -217,6 +596,117 @@ def normalise_use(*texts: str) -> BuildingUse:
 
 def profile(use: str) -> UseProfile:
     return PROFILES.get(use if use in USES else normalise_use(use), PROFILES["home"])
+
+
+def kind_entry(kind: str, use: str = "") -> dict[str, Any]:
+    """Program library row for a specific building kind, falling back to the packer family."""
+    key = (kind or use or "home").strip().lower()
+    if key in _KIND_LIBRARY:
+        return _KIND_LIBRARY[key]
+    active = profile(use or key)
+    return _KIND_LIBRARY.get(active.key, _KIND_LIBRARY["home"])
+
+
+def kind_label(kind: str, use: str = "") -> str:
+    return str(kind_entry(kind, use).get("label") or (kind or use or "building").replace("_", " ").title())
+
+
+# Published design-guide pages consulted when researching a building kind.
+# These are not building code; they are the external programming references
+# the planner is allowed to cite in chat.
+_KIND_EXTERNAL: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "hospital": (
+        ("Whole Building Design Guide — Hospitals",
+         "GSA WBDG building-type guidance for hospital departments and public-to-clinical stacking.",
+         "https://www.wbdg.org/building-types/health-care-facilities"),
+        ("FGI Guidelines for Design and Construction of Hospitals",
+         "Industry baseline for clinical space types. Local code still governs the finished building.",
+         "https://www.fgiguidelines.org/"),
+    ),
+    "clinic": (
+        ("Whole Building Design Guide — Health care",
+         "Outpatient clinic planning notes: reception, waiting, and exam-room suites.",
+         "https://www.wbdg.org/building-types/health-care-facilities"),
+        ("FGI Guidelines for Outpatient Facilities",
+         "Typical exam and procedure room programs for clinics.",
+         "https://www.fgiguidelines.org/"),
+    ),
+    "hotel": (
+        ("Whole Building Design Guide — Hospitality",
+         "Lobby, food service, and guest-room stacking for hotels.",
+         "https://www.wbdg.org/building-types/hospitality-facilities"),
+    ),
+    "school": (
+        ("Whole Building Design Guide — Education facilities",
+         "Classroom-and-corridor plans with shared gym, cafeteria and library.",
+         "https://www.wbdg.org/building-types/education-facilities"),
+    ),
+    "warehouse": (
+        ("Whole Building Design Guide — Warehouses",
+         "Large storage plates with a thin office and receiving edge.",
+         "https://www.wbdg.org/building-types/warehouse"),
+    ),
+    "restaurant": (
+        ("Whole Building Design Guide — Food service",
+         "Front-of-house dining versus back-of-house kitchen and stores.",
+         "https://www.wbdg.org/building-types/community-services"),
+    ),
+    "worship": (
+        ("Whole Building Design Guide — Religious facilities",
+         "Sanctuary or prayer hall with lobby, support rooms and education space.",
+         "https://www.wbdg.org/building-types/community-services/religious-facilities"),
+    ),
+    "gym": (
+        ("Whole Building Design Guide — Recreation facilities",
+         "Activity floors with lockers, studios and a staff edge.",
+         "https://www.wbdg.org/building-types/recreation-facilities"),
+    ),
+    "library": (
+        ("Whole Building Design Guide — Libraries",
+         "Public lobby, stacks, reading rooms and staff workrooms.",
+         "https://www.wbdg.org/building-types/library"),
+    ),
+    "apartment": (
+        ("Whole Building Design Guide — Housing",
+         "Shared cores with typical dwelling units rather than a single house plan.",
+         "https://www.wbdg.org/building-types/housing"),
+    ),
+    "civic": (
+        ("Whole Building Design Guide — Community services",
+         "Public lobby and a principal gathering room, offices behind.",
+         "https://www.wbdg.org/building-types/community-services"),
+    ),
+    "home": (
+        ("Whole Building Design Guide — Residential",
+         "Open living-kitchen-dining, short halls, bedrooms clustered.",
+         "https://www.wbdg.org/building-types/residential"),
+    ),
+    "office": (
+        ("Whole Building Design Guide — Office buildings",
+         "Reception, core, open work and meeting rooms on a corridor.",
+         "https://www.wbdg.org/building-types/office-buildings"),
+    ),
+    "retail": (
+        ("Whole Building Design Guide — Retail",
+         "Sales floor to the street, stock and staff at the back.",
+         "https://www.wbdg.org/building-types/retail"),
+    ),
+    "mixed": (
+        ("Whole Building Design Guide — Mixed use",
+         "Public ground floor with quieter uses above, sharing one core.",
+         "https://www.wbdg.org/space-types"),
+    ),
+}
+
+
+def kind_external(kind: str, use: str = "") -> list[dict[str, Any]]:
+    """External programming references for this building kind."""
+    key = (kind or use or "home").strip().lower()
+    rows = _KIND_EXTERNAL.get(key) or _KIND_EXTERNAL.get(profile(use or key).key) or ()
+    return [
+        {"title": title, "note": note, "url": url, "origin": "External", "external": True}
+        for title, note, url in rows
+    ]
 
 
 _NUMBER_WORDS = {
@@ -388,12 +878,14 @@ def defaults_digest(use: str, kind: str = "") -> str:
     kind = (kind or use).strip().lower() or active.key
     typical = _KIND_AREAS.get(kind, active.typical_areas)
     areas = ", ".join(f"{name} ~{area:g} sqft" for name, area in typical.items())
+    scheme = layout_scheme(kind, use)
     lines = [
-        f"Building kind: {kind}. Packer family: {active.label} ({active.key}).",
+        f"Building kind: {kind}. Layout scheme: {scheme}. Packer family: {active.label} ({active.key}).",
         "Honour the architect's brief. The packer family only chooses corridor width and storey height.",
-        f"Typical storey height {active.floor_height_ft:g} ft; corridors {active.corridor_width_ft:g} ft wide.",
+        f"Typical storey height {active.floor_height_ft:g} ft.",
         f"Typical areas for this kind: {areas}.",
     ]
+    lines.extend(f"- {tip}" for tip in layout_notes(kind, use))
     lines.extend(f"- {tip}" for tip in _KIND_GUIDANCE.get(kind, active.guidance))
     packs = rule_pack(active.key)
     lines.append("Requirements that will be measured on the result:")

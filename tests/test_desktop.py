@@ -47,3 +47,41 @@ def test_api_complete_workflow(monkeypatch,tmp_path):
     assert any(item['id']==wall and item['material']=='sage' for item in material.json()['changed']['walls'])
     stale=c.post(f'/api/desktop/projects/{pid}/commands',json={'expected_revision':p['revision'],'commands':[{'kind':'set_environment','params':{'time':8}}]});assert stale.status_code==409
     assert c.post(f'/api/desktop/projects/{pid}/undo',json={'expected_revision':material.json()['revision']}).status_code==200
+
+def test_rename_delete_and_duplicate_names(tmp_path):
+    from plancheck.mocks.generation import demo_home,demo_rules
+    from plancheck.services.repository import next_available_name
+    assert next_available_name('Willow House',[])=='Willow House'
+    assert next_available_name('Willow House',['Willow House'])=='Willow House (2)'
+    assert next_available_name('willow house',['Willow House','Willow House (2)'])=='willow house (3)'
+    repo=FileProjectRepository(tmp_path)
+    first=repo.create('Willow House',demo_home(),demo_rules())
+    second=repo.create('North Annex',demo_home(),demo_rules())
+    renamed=repo.rename(second.project_id,'north annex')
+    assert renamed.name=='north annex'
+    copy=repo.rename(second.project_id,'willow house')
+    assert copy.name=='willow house (2)'
+    third=repo.create('WILLOW HOUSE',demo_home(),demo_rules())
+    assert third.name=='WILLOW HOUSE (3)'
+    repo.delete(second.project_id)
+    assert [item['project_id'] for item in repo.list()]==[third.project_id,first.project_id]
+
+def test_rename_delete_api(tmp_path,monkeypatch):
+    from plancheck.core.settings import reset_settings
+    monkeypatch.setenv('PLANCHECK_DATA_DIR',str(tmp_path));reset_settings()
+    from plancheck.mocks.generation import demo_home,demo_rules
+    repo=FileProjectRepository(tmp_path)
+    one=repo.create('Alpha House',demo_home(),demo_rules())
+    two=repo.create('Beta House',demo_home(),demo_rules())
+    c=TestClient(app)
+    clash=c.patch(f'/api/desktop/projects/{two.project_id}',json={'name':'alpha house'})
+    assert clash.status_code==200
+    assert clash.json()['name']=='alpha house (2)'
+    ok=c.patch(f'/api/desktop/projects/{two.project_id}',json={'name':'Cedar House'})
+    assert ok.status_code==200
+    assert ok.json()['name']=='Cedar House'
+    gone=c.delete(f'/api/desktop/projects/{two.project_id}')
+    assert gone.status_code==200
+    assert c.get(f'/api/desktop/projects/{two.project_id}').status_code==404
+    assert c.get('/api/desktop/projects').json()[0]['project_id']==one.project_id
+

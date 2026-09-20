@@ -1,9 +1,14 @@
-import { useEffect, useState } from 'react'
-import { Search } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Paintbrush, Search } from 'lucide-react'
 import type { Building, ModelCommand } from '../types'
 import { assetMime, fixtures, furniture, materials, type Asset } from './editor-geometry'
+import { azimuthFromPoint, cardinal, dayPeriod, formatClock, SEASONS, SUN_STOPS, TIME_STOPS, type SeasonId } from './environment-panel'
+import { requestImagineFurniture } from './furniture-imagine'
+import { XrayScrubber, type LayerStop } from './plan-layers'
 import { SitePanel } from './SitePanel'
 import './editor-view.css'
+
+export type LibraryTab = 'layers' | 'fixtures' | 'furniture' | 'materials' | 'environment' | 'site'
 
 export function AssetSymbol({ id }: { id: string }) {
   const common = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.4 }
@@ -19,33 +24,126 @@ export function AssetSymbol({ id }: { id: string }) {
   </svg>
 }
 
-export function AssetLibrary({ mode, building, onCommand }: { mode: '2d' | '3d'; building: Building; onCommand: (commands: ModelCommand[]) => void }) {
-  const [tab, setTab] = useState('assets')
+export function AssetLibrary({ tab, mode, building, onCommand, layerStop, layerCounts, onLayerStop }: { tab: LibraryTab; mode: '2d' | '3d'; building: Building; onCommand: (commands: ModelCommand[]) => void; layerStop: LayerStop; layerCounts: number[]; onLayerStop: (stop: LayerStop) => void }) {
   const [query, setQuery] = useState('')
   const [environment, setEnvironment] = useState(building.environment)
   useEffect(() => setEnvironment(building.environment), [building.environment])
-  useEffect(() => setTab('assets'), [mode])
-  const items = (tab === 'materials' ? materials : mode === '2d' ? fixtures : furniture).filter(a => a.label.toLowerCase().includes(query.toLowerCase()))
+  const catalog = tab === 'materials' ? materials : tab === 'furniture' ? furniture : fixtures
+  const items = catalog.filter(a => a.label.toLowerCase().includes(query.toLowerCase()))
   const saveEnvironment = (value = environment) => onCommand([{ kind: 'set_environment', target_id: '', params: value }])
-  return <section className="editor-library" aria-label="Asset library">
-    <div className="editor-library-header">
-      <div className="editor-tabs" role="tablist" aria-label="Library category">
-        <button role="tab" aria-selected={tab === 'assets'} className={tab === 'assets' ? 'active' : ''} onClick={() => setTab('assets')}>{mode === '2d' ? 'Fixtures' : 'Furniture'}</button>
-        {mode === '3d' && <><button role="tab" aria-selected={tab === 'materials'} className={tab === 'materials' ? 'active' : ''} onClick={() => setTab('materials')}>Materials</button><button role="tab" aria-selected={tab === 'environment'} className={tab === 'environment' ? 'active' : ''} onClick={() => setTab('environment')}>Environment</button><button role="tab" aria-selected={tab === 'site'} className={tab === 'site' ? 'active' : ''} onClick={() => setTab('site')}>Site</button></>}
+  return <section className="editor-library" aria-label={tab}>
+    {(tab === 'fixtures' || tab === 'furniture' || tab === 'materials') && <div className="editor-library-header">
+      <label className="editor-asset-search"><Search size={13} /><input aria-label="Find an asset" placeholder="Search library" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={event => event.stopPropagation()} /></label>
+    </div>}
+    {tab === 'layers' ? <XrayScrubber stop={layerStop} counts={layerCounts} onChange={onLayerStop} /> : tab === 'site' ? <SitePanel building={building} onCommand={onCommand} /> : tab === 'environment' ? <EnvironmentPanel environment={environment} setEnvironment={setEnvironment} saveEnvironment={saveEnvironment} /> : <>
+      <div className="editor-asset-grid">
+        {tab === 'furniture' && <button type="button" className="editor-asset editor-asset-imagine" title="Paint a piece into the 3D room" aria-label="Imagine furniture" onClick={requestImagineFurniture}>
+          <span className="editor-asset-preview imagine"><Paintbrush size={28} /></span>
+          <span>Imagine furniture</span>
+        </button>}
+        {items.map((asset: Asset) => (
+          <button key={asset.id} className="editor-asset" draggable title={`Drag ${asset.label.toLowerCase()} into the ${mode === '2d' ? 'plan' : 'model'}`} onDragStart={event => { event.dataTransfer.setData(assetMime, JSON.stringify(asset)); event.dataTransfer.effectAllowed = 'copy'; window.dispatchEvent(new CustomEvent('archetype:asset-drag', { detail: asset })) }} onDragEnd={() => window.dispatchEvent(new CustomEvent('archetype:asset-drag', { detail: null }))}>
+            <span className={`editor-asset-preview ${asset.kind === 'material' ? 'material' : ''}`} style={asset.color ? { background: asset.color } : undefined}>{asset.preview ? <img src={asset.preview} alt="" draggable={false} /> : asset.kind !== 'material' ? <AssetSymbol id={asset.id} /> : null}</span>
+            <span>{asset.label}</span>
+          </button>
+        ))}
       </div>
-      {tab !== 'environment' && tab !== 'site' && <label className="editor-asset-search"><Search size={13} /><input aria-label="Find an asset" placeholder="Search library" value={query} onChange={e => setQuery(e.target.value)} /></label>}
-    </div>
-    {tab === 'site' ? <SitePanel building={building} onCommand={onCommand} /> : tab === 'environment' ? <div className="editor-environment">
-      <label>Time of day <output>{Math.floor(environment.time).toString().padStart(2, '0')}:{Math.round(environment.time % 1 * 60).toString().padStart(2, '0')}</output><input type="range" aria-label="Time of day" min="0" max="23.75" step=".25" value={environment.time} onChange={e => setEnvironment({ ...environment, time: Number(e.target.value) })} onPointerUp={() => saveEnvironment()} onKeyUp={() => saveEnvironment()} /></label>
-      <label>Sun direction <output>{environment.sun_azimuth}°</output><input type="range" aria-label="Sun direction" min="0" max="360" value={environment.sun_azimuth} onChange={e => setEnvironment({ ...environment, sun_azimuth: Number(e.target.value) })} onPointerUp={() => saveEnvironment()} onKeyUp={() => saveEnvironment()} /></label>
-      <label>Season<select aria-label="Season" value={environment.season} onChange={e => { const value = { ...environment, season: e.target.value as Building['environment']['season'] }; setEnvironment(value); saveEnvironment(value) }}>{['spring', 'summer', 'autumn', 'winter'].map(s => <option key={s} value={s}>{s[0].toUpperCase() + s.slice(1)}</option>)}</select></label>
-      <p>Lighting is a visual study. Solar position is illustrative.</p>
-    </div> : <>
-      <div className="editor-asset-grid">{items.map((asset: Asset) => <button key={asset.id} className="editor-asset" draggable title={`Drag ${asset.label.toLowerCase()} into the ${mode === '2d' ? 'plan' : 'model'}`} onDragStart={event => { event.dataTransfer.setData(assetMime, JSON.stringify(asset)); event.dataTransfer.effectAllowed = 'copy'; window.dispatchEvent(new CustomEvent('archetype:asset-drag', { detail: asset })) }} onDragEnd={() => window.dispatchEvent(new CustomEvent('archetype:asset-drag', { detail: null }))}>
-        <span className={`editor-asset-preview ${asset.kind === 'material' ? 'material' : ''}`} style={asset.color ? { background: asset.color } : undefined}>{asset.preview ? <img src={asset.preview} alt="" draggable={false} /> : asset.kind !== 'material' ? <AssetSymbol id={asset.id} /> : null}</span><span>{asset.label}</span>
-      </button>)}</div>
-      <div className="editor-library-hint">{tab === 'materials' ? 'Drag a finish onto a wall or floor' : mode === '2d' ? 'Drag into your plan · Doors and windows snap to walls' : 'Drag into your model · Poly Haven · CC0 licensed'}</div>
     </>}
   </section>
 }
+
+function EnvironmentPanel({ environment, setEnvironment, saveEnvironment }: {
+  environment: Building['environment']
+  setEnvironment: (value: Building['environment']) => void
+  saveEnvironment: (value?: Building['environment']) => void
+}) {
+  const setTime = (time: number, persist = false) => {
+    const value = { ...environment, time }
+    setEnvironment(value)
+    if (persist) saveEnvironment(value)
+  }
+  const setAzimuth = (sun_azimuth: number, persist = false) => {
+    const value = { ...environment, sun_azimuth }
+    setEnvironment(value)
+    if (persist) saveEnvironment(value)
+  }
+  const setSeason = (season: SeasonId) => {
+    const value = { ...environment, season }
+    setEnvironment(value)
+    saveEnvironment(value)
+  }
+  return <div className="editor-environment">
+    <div className="editor-environment-card">
+      <div className="editor-environment-head">
+        <span>Time of day</span>
+        <output>{formatClock(environment.time)} · {dayPeriod(environment.time)}</output>
+      </div>
+      <input className="editor-environment-slider time" type="range" aria-label="Time of day" min="0" max="23.75" step=".25" value={environment.time} onChange={e => setTime(Number(e.target.value))} onPointerUp={e => setTime(Number((e.target as HTMLInputElement).value), true)} onKeyUp={e => setTime(Number((e.currentTarget as HTMLInputElement).value), true)} />
+      <div className="editor-environment-stops">
+        {TIME_STOPS.map(stop => (
+          <button key={stop.label} type="button" className={Math.abs(environment.time - stop.time) < 0.26 ? 'active' : ''} onClick={() => setTime(stop.time, true)}>{stop.label}</button>
+        ))}
+      </div>
+    </div>
+    <div className="editor-environment-card sun">
+      <div className="editor-environment-head">
+        <span>Sun</span>
+        <output>{environment.sun_azimuth}° {cardinal(environment.sun_azimuth)}</output>
+      </div>
+      <div className="editor-environment-sun">
+        <SunDial azimuth={environment.sun_azimuth} onChange={setAzimuth} />
+        <div className="editor-environment-sun-track">
+          <input className="editor-environment-slider" type="range" aria-label="Sun direction" min="0" max="360" value={environment.sun_azimuth} onChange={e => setAzimuth(Number(e.target.value))} onPointerUp={e => setAzimuth(Number((e.target as HTMLInputElement).value), true)} onKeyUp={e => setAzimuth(Number((e.currentTarget as HTMLInputElement).value), true)} />
+          <div className="editor-environment-stops">
+            {SUN_STOPS.map(stop => (
+              <button key={stop.label} type="button" className={environment.sun_azimuth === stop.azimuth ? 'active' : ''} onClick={() => setAzimuth(stop.azimuth, true)}>{stop.label}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+    <div className="editor-environment-card season">
+      <div className="editor-environment-head">
+        <span>Season</span>
+        <output>{environment.season[0].toUpperCase() + environment.season.slice(1)}</output>
+      </div>
+      <div className="editor-environment-seasons" role="radiogroup" aria-label="Season">
+        {SEASONS.map(season => (
+          <button key={season} type="button" role="radio" aria-checked={environment.season === season} className={environment.season === season ? 'active' : ''} onClick={() => setSeason(season)}>{season[0].toUpperCase() + season.slice(1)}</button>
+        ))}
+      </div>
+    </div>
+  </div>
+}
+
+function SunDial({ azimuth, onChange }: { azimuth: number; onChange: (azimuth: number, persist?: boolean) => void }) {
+  const ref = useRef<SVGSVGElement>(null)
+  const point = (event: React.PointerEvent<SVGSVGElement>) => {
+    const box = ref.current?.getBoundingClientRect()
+    if (!box) return azimuth
+    return azimuthFromPoint(event.clientX, event.clientY, box.left + box.width / 2, box.top + box.height / 2)
+  }
+  return (
+    <svg ref={ref} className="editor-sun-dial" viewBox="0 0 72 72" aria-label="Sun compass" role="slider" aria-valuemin={0} aria-valuemax={360} aria-valuenow={azimuth} tabIndex={0}
+      onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); onChange(point(event)) }}
+      onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) onChange(point(event)) }}
+      onPointerUp={event => { event.currentTarget.releasePointerCapture(event.pointerId); onChange(point(event), true) }}
+      onKeyDown={event => {
+        const step = event.shiftKey ? 15 : 5
+        if (event.key === 'ArrowRight' || event.key === 'ArrowUp') { event.preventDefault(); onChange((azimuth + step) % 360, true) }
+        else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') { event.preventDefault(); onChange((azimuth - step + 360) % 360, true) }
+      }}>
+      <circle cx="36" cy="36" r="31" />
+      <text x="36" y="12">N</text>
+      <text x="62" y="39">E</text>
+      <text x="36" y="66">S</text>
+      <text x="10" y="39">W</text>
+      <g transform={`rotate(${azimuth} 36 36)`}>
+        <line x1="36" y1="36" x2="36" y2="14" />
+        <circle className="sun" cx="36" cy="14" r="5" />
+      </g>
+    </svg>
+  )
+}
+
 export default AssetLibrary

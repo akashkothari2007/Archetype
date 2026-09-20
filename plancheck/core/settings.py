@@ -113,13 +113,11 @@ class Settings(BaseSettings):
         return (
             self.splat_api_key.strip()
             or os.environ.get("PLANCHECK_SPLAT_API_KEY", "").strip()
-            or os.environ.get("FAL_KEY", "").strip()
             or _env_file_value("PLANCHECK_SPLAT_API_KEY")
-            or _env_file_value("FAL_KEY")
         )
 
     def splat_live(self) -> bool:
-        return bool(self.resolved_splat_api_key() or self.splat_url.strip())
+        return bool(self.splat_url.strip() and self.resolved_splat_api_key())
 
     def engine_modes(self) -> dict[str, str]:
         modes = {name: "stub" for name in ENGINE_NAMES}

@@ -25,7 +25,15 @@ from plancheck.core.building import (
     Vertex,
 )
 from plancheck.generation import defaults
-from plancheck.generation.program import BuildingProgram, FloorLayout, RoomRect, SpaceSpec, snap
+from plancheck.generation.program import (
+    BuildingProgram,
+    FloorLayout,
+    RoomRect,
+    SpaceSpec,
+    is_bathroom,
+    is_kitchen,
+    snap,
+)
 from plancheck.services.commands import recompute_rooms, validate_building
 
 Point = tuple[float, float]
@@ -39,7 +47,8 @@ MAX_WINDOWS_PER_ROOM = 3
 
 SERVICE_CATEGORIES = {"stair", "storage", "utility", "server", "stock", "receiving", "shaft"}
 FLOOR_MATERIALS = {
-    "bathroom": "tile", "wc": "tile", "restroom": "tile", "kitchen": "tile",
+    "bathroom": "tile", "wc": "tile", "restroom": "tile", "washroom": "tile",
+    "kitchen": "tile",
     "utility": "concrete", "stock": "concrete", "receiving": "concrete",
     "sales": "concrete", "garage": "concrete", "circulation": "oak", "stair": "oak",
 }
@@ -327,6 +336,115 @@ def _add_openings(
         )
 
 
+def _door_sides(building: Building, floor_id: str, rect: RoomRect) -> set[str]:
+    """Which edges of this rectangle already have a door, so fixtures stay off them."""
+    verts = {v.id: v for v in building.vertices if v.floor_id == floor_id}
+    walls = {w.id: w for w in building.walls if w.floor_id == floor_id}
+    sides: set[str] = set()
+    for opening in building.openings:
+        if opening.kind != "door":
+            continue
+        wall = walls.get(opening.wall_id)
+        if wall is None:
+            continue
+        start, end = verts.get(wall.start_id), verts.get(wall.end_id)
+        if start is None or end is None:
+            continue
+        xs, ys = sorted((start.x, end.x)), sorted((start.y, end.y))
+        if abs(start.y - end.y) < 0.05 and xs[1] - xs[0] > 0.5:
+            if abs(start.y - rect.y1) < 0.05 and xs[1] > rect.x1 + 0.2 and xs[0] < rect.x2 - 0.2:
+                sides.add("s")
+            elif abs(start.y - rect.y2) < 0.05 and xs[1] > rect.x1 + 0.2 and xs[0] < rect.x2 - 0.2:
+                sides.add("n")
+        elif abs(start.x - end.x) < 0.05 and ys[1] - ys[0] > 0.5:
+            if abs(start.x - rect.x1) < 0.05 and ys[1] > rect.y1 + 0.2 and ys[0] < rect.y2 - 0.2:
+                sides.add("w")
+            elif abs(start.x - rect.x2) < 0.05 and ys[1] > rect.y1 + 0.2 and ys[0] < rect.y2 - 0.2:
+                sides.add("e")
+    return sides
+
+
+def _fixture_pose(
+    rect: RoomRect, side: str, along: float, width: float, depth: float
+) -> tuple[float, float, float, float]:
+    """Centre, rotation, and depth used so the back of the fixture sits on the wall."""
+    inset = 0.12
+    into = min(depth, max(1.0, (_into(rect, side) - 2 * inset)))
+    if side == "s":
+        return snap(along), snap(rect.y1 + into / 2 + inset), 0.0, into
+    if side == "n":
+        return snap(along), snap(rect.y2 - into / 2 - inset), 180.0, into
+    if side == "w":
+        return snap(rect.x1 + into / 2 + inset), snap(along), 90.0, into
+    return snap(rect.x2 - into / 2 - inset), snap(along), 270.0, into
+
+
+def _into(rect: RoomRect, side: str) -> float:
+    return rect.depth_ft if side in {"s", "n"} else rect.width_ft
+
+
+def _along_span(rect: RoomRect, side: str) -> tuple[float, float]:
+    if side in {"s", "n"}:
+        return rect.x1, rect.x2
+    return rect.y1, rect.y2
+
+
+def _ranked_sides(rect: RoomRect, blocked: set[str]) -> list[str]:
+    order = sorted(
+        ("s", "n", "w", "e"),
+        key=lambda side: (
+            side in blocked,
+            -(_along_span(rect, side)[1] - _along_span(rect, side)[0]),
+            -_into(rect, side),
+            side,
+        ),
+    )
+    return [side for side in order if _into(rect, side) >= 1.6]
+
+
+def _place_on_walls(
+    floor_id: str,
+    rect: RoomRect,
+    blocked: set[str],
+    items: list[tuple[str, str, float, float, float]],
+) -> list[PlacedObject]:
+    """Pack fixtures along room walls. ``items`` are id, asset, width, depth, height."""
+    placed: list[PlacedObject] = []
+    used: dict[str, float] = {}
+    gap = 0.35
+    corner = 0.4
+    for object_id, asset, width, depth, height in items:
+        pose = None
+        for side in _ranked_sides(rect, blocked):
+            lo, hi = _along_span(rect, side)
+            cursor = used.get(side, lo + corner)
+            if cursor + width + corner > hi:
+                continue
+            along = cursor + width / 2
+            x, y, rotation, into = _fixture_pose(rect, side, along, width, depth)
+            pose = (side, cursor + width + gap, x, y, rotation, into)
+            break
+        if pose is None:
+            continue
+        side, next_cursor, x, y, rotation, into = pose
+        used[side] = next_cursor
+        placed.append(
+            PlacedObject(
+                id=object_id,
+                floor_id=floor_id,
+                asset_id=asset,
+                kind="fixture",
+                x=x,
+                y=y,
+                rotation_deg=rotation,
+                width_ft=width,
+                depth_ft=into,
+                height_ft=height,
+            )
+        )
+    return placed
+
+
 def _add_objects(building: Building, spaces: dict[str, SpaceSpec], rects: list[RoomRect], floor_id: str) -> None:
     for rect in sorted(rects, key=lambda r: r.space_id):
         space = spaces[rect.space_id]
@@ -345,31 +463,21 @@ def _add_objects(building: Building, spaces: dict[str, SpaceSpec], rects: list[R
                     height_ft=8,
                 )
             )
-        elif space.needs_plumbing:
-            offset = min(1.6, max(0.6, rect.width_ft / 4))
-            building.objects.extend(
-                [
-                    PlacedObject(
-                        id=f"{floor_id}-{space.id}-wc",
-                        floor_id=floor_id,
-                        asset_id="toilet",
-                        kind="fixture",
-                        x=snap(cx - offset),
-                        y=cy,
-                        width_ft=1.8,
-                        depth_ft=2.5,
-                        height_ft=2.5,
-                    ),
-                    PlacedObject(
-                        id=f"{floor_id}-{space.id}-sink",
-                        floor_id=floor_id,
-                        asset_id="sink",
-                        kind="fixture",
-                        x=snap(cx + offset),
-                        y=cy,
-                        width_ft=2,
-                        depth_ft=1.6,
-                        height_ft=2.8,
-                    ),
-                ]
-            )
+            continue
+        blocked = _door_sides(building, floor_id, rect)
+        items: list[tuple[str, str, float, float, float]] = []
+        if is_bathroom(space):
+            items = [
+                (f"{floor_id}-{space.id}-wc", "toilet", 1.7, 2.5, 2.5),
+                (f"{floor_id}-{space.id}-sink", "sink", 2.0, 1.6, 2.8),
+            ]
+            if rect.area_sqft >= 50:
+                items.append((f"{floor_id}-{space.id}-shower", "shower", 3.0, 3.0, 0.3))
+        elif is_kitchen(space):
+            run = min(5.0, max(2.5, min(rect.width_ft, rect.depth_ft) * 0.45))
+            items = [
+                (f"{floor_id}-{space.id}-counter", "counter", run, 2.0, 3.0),
+                (f"{floor_id}-{space.id}-sink", "sink", 2.0, 1.6, 2.8),
+            ]
+        for obj in _place_on_walls(floor_id, rect, blocked, items):
+            building.objects.append(obj)

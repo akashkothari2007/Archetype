@@ -20,27 +20,28 @@ interface ViolationsModalProps {
 }
 
 export function ViolationsModal({ violations, onClose, onRepair, isLoading }: ViolationsModalProps) {
-  const [selected, setSelected] = useState<Set<string>>(new Set(violations.map(v => v.id || v.rule_id)));
+  const violationKey = (v: Violation) => v.id || v.rule_id || ''
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(violations.map(violationKey).filter(Boolean)))
 
   const handleToggle = (violationId: string) => {
-    const newSelected = new Set(selected);
+    const newSelected = new Set(selected)
     if (newSelected.has(violationId)) {
-      newSelected.delete(violationId);
+      newSelected.delete(violationId)
     } else {
-      newSelected.add(violationId);
+      newSelected.add(violationId)
     }
-    setSelected(newSelected);
-  };
+    setSelected(newSelected)
+  }
 
   const handleSelectAll = () => {
     if (selected.size === violations.length) {
-      setSelected(new Set());
+      setSelected(new Set())
     } else {
-      setSelected(new Set(violations.map(v => v.id || v.rule_id)));
+      setSelected(new Set(violations.map(violationKey).filter(Boolean)))
     }
-  };
+  }
 
-  const selectedViolations = violations.filter(v => selected.has(v.id || v.rule_id));
+  const selectedViolations = violations.filter(v => selected.has(violationKey(v)))
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -78,8 +79,9 @@ export function ViolationsModal({ violations, onClose, onRepair, isLoading }: Vi
           {/* Violations List */}
           <div className="modal-violations-list">
             {violations.map(v => {
-              const violationId = v.id || v.rule_id;
-              const isChecked = selected.has(violationId);
+              const violationId = violationKey(v)
+              if (!violationId) return null
+              const isChecked = selected.has(violationId)
 
               return (
                 <label key={violationId} className="modal-violation-item">

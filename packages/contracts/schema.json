@@ -311,6 +311,11 @@
           "title": "Checks",
           "type": "array"
         },
+        "coverage": {
+          "additionalProperties": true,
+          "title": "Coverage",
+          "type": "object"
+        },
         "files": {
           "items": {
             "additionalProperties": true,
@@ -353,6 +358,7 @@
         "building",
         "rules",
         "checks",
+        "coverage",
         "files",
         "sheets",
         "import_meta",
@@ -522,6 +528,20 @@
           "default": null,
           "title": "Clear Width Ft"
         },
+        "reliability": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "suspect"
+          ],
+          "title": "Reliability",
+          "type": "string"
+        },
+        "reliability_reason": {
+          "default": "",
+          "title": "Reliability Reason",
+          "type": "string"
+        },
         "source": {
           "$ref": "#/$defs/Source"
         }
@@ -537,6 +557,8 @@
         "hinge",
         "swing",
         "clear_width_ft",
+        "reliability",
+        "reliability_reason",
         "source"
       ],
       "title": "Opening",
@@ -592,6 +614,11 @@
           "exclusiveMinimum": 0,
           "title": "Height Ft",
           "type": "number"
+        },
+        "splat": {
+          "default": "",
+          "title": "Splat",
+          "type": "string"
         }
       },
       "required": [
@@ -604,7 +631,8 @@
         "rotation_deg",
         "width_ft",
         "depth_ft",
-        "height_ft"
+        "height_ft",
+        "splat"
       ],
       "title": "PlacedObject",
       "type": "object"
@@ -734,6 +762,25 @@
           "title": "Instance Count",
           "type": "integer"
         },
+        "parent_room_id": {
+          "default": "",
+          "title": "Parent Room Id",
+          "type": "string"
+        },
+        "reliability": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "suspect"
+          ],
+          "title": "Reliability",
+          "type": "string"
+        },
+        "reliability_reason": {
+          "default": "",
+          "title": "Reliability Reason",
+          "type": "string"
+        },
         "source": {
           "$ref": "#/$defs/Source"
         }
@@ -750,6 +797,9 @@
         "confidence",
         "needs_review",
         "instance_count",
+        "parent_room_id",
+        "reliability",
+        "reliability_reason",
         "source"
       ],
       "title": "Room",

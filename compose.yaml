@@ -8,6 +8,7 @@ services:
       PLANCHECK_DATA_DIR: /data/projects
       PYTHONUNBUFFERED: "1"
       PLANCHECK_LOG_LEVEL: ${PLANCHECK_LOG_LEVEL:-INFO}
+    command: ["python", "-m", "uvicorn", "plancheck.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info", "--reload", "--reload-dir", "/app/plancheck"]
     volumes:
       - ./local-data:/data
       - ./plancheck:/app/plancheck
