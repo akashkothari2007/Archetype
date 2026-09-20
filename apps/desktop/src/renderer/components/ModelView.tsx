@@ -86,7 +86,7 @@ async function appearanceMeta(projectId: string, fallback?: unknown) {
 }
 
 export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | null) => void; visible?: boolean; checks?: CheckHit[] }) {
-  const { building, floorId, onCommand, onSelect, selectedId, busy, projectId, registerPaint, onFloor } = props
+  const { building, floorId, onCommand, onSelect, selectedId, busy, projectId, buildingUse, buildingName, registerPaint, onFloor } = props
   const host = useRef<HTMLDivElement>(null)
   const cameraStore = useRef<CamSnap>(null)
   const [walking, setWalking] = useState(false)
@@ -259,7 +259,7 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
     finally { setDragAsset(null); setDragTarget(null); window.dispatchEvent(new CustomEvent('archetype:asset-drag', { detail: null })) }
   }}>
     <SceneBoundary>{props.visible === false ? null : onSite
-      ? <SiteView building={building} report={report} onReport={setReport} onCommand={onCommand} palette={look.palette} enhanced={showEnhanced && !!look.palette} />
+      ? <SiteView building={building} buildingUse={buildingUse} buildingName={buildingName} report={report} onReport={setReport} onCommand={onCommand} palette={look.palette} enhanced={showEnhanced && !!look.palette} />
       : <AppearanceContext.Provider value={{ ...look, splatUrl: null, apply: exterior && !walking && showEnhanced && !!look.palette }}><Canvas shadows={{ type: THREE.PCFShadowMap }} dpr={[1, 1.5]} camera={{ position: [bounds.cx + 30, 38, bounds.cy + 40], fov: ORBIT_FOV, near: .2, far: 8000 }} gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05, preserveDrawingBuffer: true }} onPointerMissed={() => { if (!imagining) onSelect(null) }}>
         <Scene {...props} exterior={exterior && !walking} walking={walking} locked={imagining} spacePanning={spacePanning && !imagining} objectTool={objectTool} action={action} dragTarget={dragTarget} raycast={raycast} grab={grab} measure={measure} setRoom={setSceneRoom} cameraStore={cameraStore} />
       </Canvas></AppearanceContext.Provider>}</SceneBoundary>
@@ -305,7 +305,7 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
   </div>
 }
 
-function Scene({ building, floorId, projectId, onSelect, onCommand, selectedId, checks = [], exterior, walking, locked, spacePanning, objectTool, action, dragTarget, raycast, grab, measure, setRoom, cameraStore }: EditorProps & { checks?: CheckHit[]; exterior: boolean; walking: boolean; locked: boolean; spacePanning: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; grab: RefObject<(() => ReturnType<typeof captureGuide>) | null>; measure: RefObject<ViewMeasure | null>; setRoom: (id: string | null, p: Point) => void; cameraStore: RefObject<CamSnap> }) {
+function Scene({ building, buildingUse, buildingName, floorId, projectId, onSelect, onCommand, selectedId, checks = [], exterior, walking, locked, spacePanning, objectTool, action, dragTarget, raycast, grab, measure, setRoom, cameraStore }: EditorProps & { checks?: CheckHit[]; exterior: boolean; walking: boolean; locked: boolean; spacePanning: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; grab: RefObject<(() => ReturnType<typeof captureGuide>) | null>; measure: RefObject<ViewMeasure | null>; setRoom: (id: string | null, p: Point) => void; cameraStore: RefObject<CamSnap> }) {
   const stacked = useMemo(() => exterior ? building.floors : floorsThrough(building, floorId), [building, floorId, exterior])
   const floorPlan = useMemo(() => floorBounds(building, floorId), [building, floorId])
   const bounds = useMemo(() => floorsBounds(building, stacked.map(floor => floor.id)), [building, stacked])
@@ -480,7 +480,7 @@ function Scene({ building, floorId, projectId, onSelect, onCommand, selectedId, 
     <Suspense fallback={null}>
       <Landscape bounds={bounds} />
       {exterior
-        ? <BuildingShell building={building} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} />
+        ? <BuildingShell building={building} buildingUse={buildingUse} buildingName={buildingName} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} />
         : <group>
           <BuildingShell building={building} throughFloorId={floorId} photoreal={false} selectedId={selectedId} dragTarget={dragTarget} onSelect={selectCurrent} />
           {stacked.flatMap(floor => building.objects.filter(object => object.floor_id === floor.id).map(object => (
@@ -499,9 +499,14 @@ function PlacedEntity({ object, selected, walking, tool, projectId, onSelect, on
   const splat = 'splat' in object ? String(object.splat || '') : ''
   const splatUrl = splat && projectId ? `${base}/projects/${projectId}/files/${splat}` : ''
   const node = <group ref={ref} position={[object.x, elevation + .02, object.y]} rotation={[0, -object.rotation_deg * Math.PI / 180, 0]} userData={{ entityId: object.id, kind: 'object' }} onClick={e => { e.stopPropagation(); onSelect(object.id) }}>
-    {splatUrl ? <Suspense fallback={<LoadingObject object={object} />}><ObjectSplat url={splatUrl} width={object.width_ft} height={object.height_ft} depth={object.depth_ft} />{selected && <mesh position={[0, object.height_ft / 2, 0]}><boxGeometry args={[object.width_ft * 1.02, object.height_ft * 1.02, object.depth_ft * 1.02]} /><meshBasicMaterial color="#408cb0" wireframe transparent opacity={.4} /></mesh>}</Suspense> : object.kind === 'furniture' && furniture.some(a => a.id === object.asset_id) ? <Suspense fallback={<LoadingObject object={object} />}><FurnitureModel object={object} selected={selected} /></Suspense> : <FixtureModel object={object} selected={selected} />}
+    {splatUrl ? <Suspense fallback={<LoadingObject object={object} />}><ObjectSplat url={splatUrl} width={object.width_ft} height={object.height_ft} depth={object.depth_ft} />{selected && <mesh position={[0, object.height_ft / 2, 0]}><boxGeometry args={[object.width_ft * 1.02, object.height_ft * 1.02, object.depth_ft * 1.02]} /><meshBasicMaterial color="#408cb0" wireframe transparent opacity={.4} /></mesh>}</Suspense> : object.kind === 'furniture' && furniture.some(a => a.id === object.asset_id) ? <Suspense fallback={<LoadingObject object={object} />}><FurnitureEntity object={object} selected={selected} /></Suspense> : <FixtureModel object={object} selected={selected} />}
   </group>
   return selected && !walking ? <TransformControls mode={tool} showX={tool === 'translate'} showY={tool === 'rotate'} showZ={tool === 'translate'} size={.7} translationSnap={.25} rotationSnap={Math.PI / 12} onMouseUp={() => { const node = ref.current; if (!node) return; const rotation = -node.rotation.y * 180 / Math.PI; if (Math.abs(node.position.x - object.x) + Math.abs(node.position.z - object.y) + Math.abs(rotation - object.rotation_deg) < .001) return; onCommand([{ kind: 'update_object', target_id: object.id, params: { x: node.position.x, y: node.position.z, rotation_deg: rotation } }]) }}>{node}</TransformControls> : node
+}
+
+function FurnitureEntity({ object, selected }: { object: Building['objects'][number]; selected: boolean }) {
+  const source = furniture.find(a => a.id === object.asset_id)!
+  return source.procedural === 'blackboard' ? <BlackboardModel object={object} selected={selected} /> : <FurnitureModel object={object} selected={selected} />
 }
 
 function FurnitureModel({ object, selected }: { object: Building['objects'][number]; selected: boolean }) {
@@ -525,6 +530,25 @@ function FurnitureModel({ object, selected }: { object: Building['objects'][numb
     return { clone, size, center, minY: box.min.y }
   }, [scene, look.palette?.accent])
   return <group scale={[object.width_ft / size.x, object.height_ft / size.y, object.depth_ft / size.z]}><primitive object={clone} position={[-center.x, -minY, -center.z]} />{selected && <mesh position={[0, size.y / 2, 0]}><boxGeometry args={[size.x * 1.02, size.y * 1.02, size.z * 1.02]} /><meshBasicMaterial color="#408cb0" wireframe transparent opacity={.4} /></mesh>}</group>
+}
+
+function BlackboardModel({ object, selected }: { object: Building['objects'][number]; selected: boolean }) {
+  const boardHeight = object.height_ft * .7
+  const boardY = object.height_ft * .58
+  const frame = Math.min(.16, object.width_ft * .025)
+  const legX = object.width_ft * .39
+  const legHeight = Math.max(.65, boardY - boardHeight / 2)
+  const legY = legHeight / 2
+  const trayY = boardY - boardHeight / 2 - .07
+  return <group>
+    <mesh position={[0, boardY, 0]} castShadow receiveShadow><boxGeometry args={[object.width_ft, boardHeight, object.depth_ft]} /><meshStandardMaterial color="#27362d" roughness={.72} /></mesh>
+    <mesh position={[0, boardY + boardHeight / 2 - frame / 2, 0]} castShadow><boxGeometry args={[object.width_ft + frame * 2, frame, object.depth_ft + frame]} /><meshStandardMaterial color="#8d6848" roughness={.58} /></mesh>
+    <mesh position={[0, boardY - boardHeight / 2 + frame / 2, 0]} castShadow><boxGeometry args={[object.width_ft + frame * 2, frame, object.depth_ft + frame]} /><meshStandardMaterial color="#8d6848" roughness={.58} /></mesh>
+    {[-1, 1].map(side => <mesh key={side} position={[side * (object.width_ft / 2 - frame / 2), boardY, 0]} castShadow><boxGeometry args={[frame, boardHeight, object.depth_ft + frame]} /><meshStandardMaterial color="#8d6848" roughness={.58} /></mesh>)}
+    {[-1, 1].map(side => <mesh key={`leg-${side}`} position={[side * legX, legY, 0]} castShadow receiveShadow><boxGeometry args={[frame, legHeight, object.depth_ft * 1.7]} /><meshStandardMaterial color="#5d4635" roughness={.6} /></mesh>)}
+    <mesh position={[0, trayY, object.depth_ft * .8]} castShadow><boxGeometry args={[object.width_ft * .55, frame * .75, object.depth_ft * .8]} /><meshStandardMaterial color="#a47a54" roughness={.52} /></mesh>
+    {selected && <mesh position={[0, object.height_ft / 2, 0]}><boxGeometry args={[object.width_ft * 1.02, object.height_ft * 1.02, object.depth_ft * 2]} /><meshBasicMaterial color="#408cb0" wireframe transparent opacity={.4} /></mesh>}
+  </group>
 }
 
 function LoadingObject({ object }: { object: Building['objects'][number] }) {

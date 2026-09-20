@@ -8,7 +8,25 @@ import { FloorSlab } from './scene-landscape'
 
 type Wall = Building['walls'][number]
 type Vertices = Map<string, { id: string; x: number; y: number }>
+type FacadeKind = 'home' | 'office' | 'retail' | 'mixed' | 'civic' | 'industrial'
 export const colors = Object.fromEntries(materials.map(m => [m.id, m.color]))
+
+/** Turns the language in a project brief into a visual family without changing its plan. */
+export function facadeKind(buildingUse?: string): FacadeKind {
+  const use = (buildingUse || '').toLowerCase()
+  if (/warehouse|factory|industrial|workshop|distribution/.test(use)) return 'industrial'
+  if (/\bshop\b|store|retail|restaurant|cafe|market|salon|gallery/.test(use)) return 'retail'
+  if (/office|workspace|studio|corporate/.test(use)) return 'office'
+  if (/hotel|apartment|condo|mixed|residence.*retail/.test(use)) return 'mixed'
+  if (/school|university|hospital|clinic|library|museum|civic|community|church|worship/.test(use)) return 'civic'
+  return 'home'
+}
+
+function facadeLabel(kind: FacadeKind, name?: string) {
+  const clean = (name || '').replace(/[^\w\s&.-]/g, '').trim().slice(0, 24)
+  if (clean && kind !== 'home') return clean.toUpperCase()
+  return ({ office: 'STUDIO', retail: 'MARKET', mixed: 'COMMONS', civic: 'WELCOME', industrial: 'WORKS', home: '' } as const)[kind]
+}
 function finishColor(id: string) {
   const surface = surfaceOf(id)
   return surface.tint ? (colors[id] || surface.color) : '#ffffff'
@@ -45,11 +63,13 @@ export function storeySlabThickness(building: Building, floor: Building['floors'
 }
 
 /** Exterior massing stacked from grade. Pass throughFloorId to hide the roof and every storey above that cut. */
-export function BuildingShell({ building, hideShell = false, selectedId = null, dragTarget = null, onSelect, throughFloorId, photoreal = true }: { building: Building; hideShell?: boolean; selectedId?: string | null; dragTarget?: string | null; onSelect: (id: string) => void; throughFloorId?: string | null; photoreal?: boolean }) {
+export function BuildingShell({ building, buildingUse, buildingName, hideShell = false, selectedId = null, dragTarget = null, onSelect, throughFloorId, photoreal = true }: { building: Building; buildingUse?: string; buildingName?: string; hideShell?: boolean; selectedId?: string | null; dragTarget?: string | null; onSelect: (id: string) => void; throughFloorId?: string | null; photoreal?: boolean }) {
   const ground = groundElevationOf(building)
   const topFloor = topFloorOf(building)
   const floors = floorsThrough(building, throughFloorId)
   const showRoof = !throughFloorId
+  // Imported drawings have no design brief, so their room taxonomy becomes a useful fallback.
+  const exteriorKind = facadeKind(buildingUse || building.rooms.map(room => `${room.type_ref} ${room.category} ${room.name}`).join(' '))
   const vertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
   return <>{floors.map(floor => {
     const floorRooms = building.rooms.filter(r => r.floor_id === floor.id)
@@ -59,6 +79,7 @@ export function BuildingShell({ building, hideShell = false, selectedId = null, 
       {!hideShell && floorRooms.map(room => <group key={room.id}><FloorSlab polygon={room.polygon} y={-slabThickness} thickness={slabThickness} /><RoomFloor room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} /></group>)}
       {!hideShell && <Walls3D walls={floorWalls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} photoreal={photoreal} />}
       {!hideShell && <FloorDressing walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} foundation={floor.elevation_ft === ground} />}
+      {!hideShell && photoreal && <FacadeDressing walls={floorWalls} rooms={floorRooms} vertices={vertices} openings={building.openings} height={floor.height_ft} kind={exteriorKind} buildingName={buildingName} groundFloor={floor.elevation_ft === ground} topFloor={floor.id === topFloor?.id} />}
       {!hideShell && showRoof && floor.id === topFloor?.id && <ConceptRoof walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} />}
     </group>
   })}</>
@@ -257,5 +278,108 @@ export function FloorDressing({ walls, rooms, vertices, height, foundation }: { 
         <SurfaceMaterial finish="stone" color="#d5cfc4" matchStyle={false} />
       </mesh>
     ))}
+  </group>
+}
+
+/** Presentation-only exterior pieces. They deliberately sit on the outer face and never alter rooms or wall topology. */
+function FacadeDressing({ walls, rooms, vertices, openings, height, kind, buildingName, groundFloor, topFloor }: { walls: Wall[]; rooms: Building['rooms']; vertices: Map<string, Point>; openings: Building['openings']; height: number; kind: FacadeKind; buildingName?: string; groundFloor: boolean; topFloor: boolean }) {
+  const edges = walls.flatMap(wall => {
+    const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id)
+    const edge = a && b ? wallExterior(a, b, rooms) : null
+    return a && b && edge ? [{ wall, a, b, edge, openings: openings.filter(opening => opening.wall_id === wall.id) }] : []
+  })
+  const lead = [...edges].sort((left, right) => {
+    const leftDoor = left.openings.some(opening => opening.kind === 'door') ? 1000 : 0
+    const rightDoor = right.openings.some(opening => opening.kind === 'door') ? 1000 : 0
+    return rightDoor + right.edge.length - leftDoor - left.edge.length
+  })[0]
+  return <group>
+    {edges.map(item => <FacadeEdge key={`facade-${item.wall.id}`} {...item} height={height} kind={kind} groundFloor={groundFloor} topFloor={topFloor} lead={lead?.wall.id === item.wall.id} label={facadeLabel(kind, buildingName)} />)}
+  </group>
+}
+
+function FacadeEdge({ wall, edge, openings, height, kind, groundFloor, topFloor, lead, label }: { wall: Wall; edge: NonNullable<ReturnType<typeof wallExterior>>; openings: Building['openings']; height: number; kind: FacadeKind; groundFloor: boolean; topFloor: boolean; lead: boolean; label: string }) {
+  const depth = edge.sign * (wall.thickness_ft / 2 + .075)
+  const length = edge.length
+  const blank = openings.length === 0
+  const bayCount = blank ? Math.max(1, Math.min(kind === 'industrial' ? 3 : 5, Math.floor(length / (kind === 'retail' && groundFloor ? 7 : 5.5)))) : 0
+  const bayWidth = bayCount ? Math.min(3.7, Math.max(1.45, (length - (bayCount + 1) * .5) / bayCount)) : 0
+  const windowHeight = kind === 'retail' && groundFloor ? Math.min(height * .65, 6.1) : Math.min(height * .48, 4.4)
+  const windowY = kind === 'retail' && groundFloor ? windowHeight / 2 + .42 : height * .56
+  const accent = kind === 'home' ? '#baa785' : kind === 'civic' ? '#b9ad9b' : kind === 'industrial' ? '#576269' : '#303c42'
+  const awning = kind === 'retail' || kind === 'mixed' || kind === 'industrial'
+  const fins = kind === 'office' || kind === 'civic'
+  const pilasterCount = Math.max(0, Math.min(4, Math.floor(length / 10)))
+  // Decorative elements are presentation-only, but they must respect the real
+  // opening positions from the editable model. Coordinates here are local to
+  // the wall centre; openings are stored from the wall's start point.
+  const clearsOpening = (center: number, width: number, padding = .16) => {
+    const start = center + length / 2 - width / 2, end = center + length / 2 + width / 2
+    return openings.every(opening => end < opening.offset_ft - padding || start > opening.offset_ft + opening.width_ft + padding)
+  }
+  return <group position={[edge.center.x, 0, edge.center.y]} rotation={[0, -edge.angle, 0]}>
+    {/* A light cornice gives every exterior edge a shadow line, while the form below varies by use. */}
+    <mesh position={[0, height - .34, depth]} castShadow receiveShadow><boxGeometry args={[length + .14, .16, .22]} /><meshStandardMaterial color={accent} roughness={.5} metalness={kind === 'industrial' ? .55 : .12} /></mesh>
+    {topFloor && (kind === 'home' || kind === 'civic') && <mesh position={[0, height - .12, depth + edge.sign * .1]} castShadow><boxGeometry args={[length + .38, .12, .38]} /><meshStandardMaterial color="#ded6c8" roughness={.7} /></mesh>}
+    {Array.from({ length: pilasterCount }, (_, index) => {
+      const x = -length / 2 + (index + 1) * length / (pilasterCount + 1)
+      return clearsOpening(x, .26, .28) ? <mesh key={`pilaster-${index}`} position={[x, height / 2, depth + edge.sign * .08]} castShadow receiveShadow><boxGeometry args={[.26, Math.max(2.5, height - .45), .22]} /><meshStandardMaterial color={accent} roughness={.58} metalness={kind === 'office' ? .28 : .04} /></mesh> : null
+    })}
+    {Array.from({ length: bayCount }, (_, index) => {
+      const x = -length / 2 + .5 + bayWidth / 2 + index * (bayWidth + .5)
+      return <PresentationWindow key={`bay-${index}`} x={x} y={windowY} z={depth + edge.sign * .045} width={bayWidth} height={windowHeight} kind={kind} />
+    })}
+    {fins && Array.from({ length: Math.max(0, Math.floor(length / 4.8)) }, (_, index) => {
+      const x = -length / 2 + 1.2 + index * 4.8
+      return clearsOpening(x, .14, .22) ? <mesh key={`fin-${index}`} position={[x, height * .56, depth + edge.sign * .26]} castShadow><boxGeometry args={[.14, height * .72, .48]} /><meshStandardMaterial color="#4d5658" roughness={.42} metalness={.45} /></mesh> : null
+    })}
+    {openings.filter(opening => opening.kind === 'door').map(opening => <EntranceCanopy key={`canopy-${opening.id}`} opening={opening} z={depth} outward={edge.sign} kind={kind} />)}
+    {awning && groundFloor && <mesh position={[0, Math.min(height - 1.05, windowHeight + .82), depth + edge.sign * .65]} castShadow receiveShadow><boxGeometry args={[Math.max(1.5, length - .4), .16, 1.35]} /><meshStandardMaterial color={kind === 'industrial' ? '#434f55' : '#b47a42'} roughness={.38} metalness={.32} /></mesh>}
+    {groundFloor && lead && label && kind !== 'home' && <FacadeSign label={label} width={Math.min(Math.max(4.2, length * .42), 10)} y={Math.min(height - 1.2, kind === 'retail' ? windowHeight + 1.5 : height * .7)} z={depth + edge.sign * (awning ? 1.42 : .16)} outward={edge.sign} kind={kind} />}
+  </group>
+}
+
+function PresentationWindow({ x, y, z, width, height, kind }: { x: number; y: number; z: number; width: number; height: number; kind: FacadeKind }) {
+  const frame = kind === 'home' ? '#f0ebe1' : '#20292d'
+  const mullion = kind === 'retail' ? width / 3 : width / 2
+  return <group position={[x, y, z]}>
+    <mesh castShadow receiveShadow><boxGeometry args={[width, height, .055]} /><meshPhysicalMaterial color={kind === 'retail' ? '#6f9daf' : '#9db8c3'} roughness={.08} metalness={.42} envMapIntensity={1.1} /></mesh>
+    {[[-width / 2, 0, .1, height + .16], [width / 2, 0, .1, height + .16], [0, height / 2, width + .16, .1], [0, -height / 2, width + .16, .1], [0, 0, .08, height]].map(([px, py, w, h], index) => <mesh key={index} position={[px, py, .045]} castShadow><boxGeometry args={[w, h, .08]} /><meshStandardMaterial color={frame} roughness={.34} metalness={.42} /></mesh>)}
+    {mullion < width / 2 && [-mullion / 2, mullion / 2].map((px, index) => <mesh key={`m-${index}`} position={[px, 0, .045]} castShadow><boxGeometry args={[.065, height, .08]} /><meshStandardMaterial color={frame} roughness={.34} metalness={.42} /></mesh>)}
+  </group>
+}
+
+function EntranceCanopy({ opening, z, outward, kind }: { opening: Building['openings'][number]; z: number; outward: number; kind: FacadeKind }) {
+  const width = Math.max(3.4, opening.width_ft + 1.1)
+  const y = Math.min(opening.sill_ft + opening.height_ft + .48, 7.7)
+  const color = kind === 'home' ? '#6e4c37' : kind === 'civic' ? '#8c7c69' : '#39454a'
+  return <group position={[opening.offset_ft + opening.width_ft / 2, y, z + outward * .72]}>
+    <mesh castShadow receiveShadow><boxGeometry args={[width, .15, 1.45]} /><meshStandardMaterial color={color} roughness={.36} metalness={kind === 'office' ? .55 : .2} /></mesh>
+    <mesh position={[-width / 2 + .18, -.5, 0]} castShadow><boxGeometry args={[.12, 1, .12]} /><meshStandardMaterial color={color} roughness={.42} metalness={.36} /></mesh>
+    <mesh position={[width / 2 - .18, -.5, 0]} castShadow><boxGeometry args={[.12, 1, .12]} /><meshStandardMaterial color={color} roughness={.42} metalness={.36} /></mesh>
+  </group>
+}
+
+function FacadeSign({ label, width, y, z, outward, kind }: { label: string; width: number; y: number; z: number; outward: number; kind: FacadeKind }) {
+  const texture = useMemo(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = 1024; canvas.height = 256
+    const context = canvas.getContext('2d')
+    if (!context) return null
+    context.fillStyle = kind === 'retail' ? '#223137' : '#31383c'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.strokeStyle = kind === 'retail' ? '#d6a66a' : '#d8d3c9'
+    context.lineWidth = 10; context.strokeRect(10, 10, canvas.width - 20, canvas.height - 20)
+    context.fillStyle = '#f7f1e7'; context.font = '600 84px Arial, sans-serif'; context.textAlign = 'center'; context.textBaseline = 'middle'
+    context.fillText(label, canvas.width / 2, canvas.height / 2 + 5, 920)
+    const map = new THREE.CanvasTexture(canvas)
+    map.colorSpace = THREE.SRGBColorSpace
+    return map
+  }, [kind, label])
+  useEffect(() => () => texture?.dispose(), [texture])
+  if (!texture) return null
+  return <group position={[0, y, z]}>
+    <mesh castShadow receiveShadow><boxGeometry args={[width + .22, 1.34, .12]} /><meshStandardMaterial color="#1d2528" roughness={.4} metalness={.34} /></mesh>
+    <mesh position={[0, 0, outward * .071]} rotation={[0, outward < 0 ? Math.PI : 0, 0]}><planeGeometry args={[width, 1.12]} /><meshBasicMaterial map={texture} side={THREE.DoubleSide} /></mesh>
   </group>
 }

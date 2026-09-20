@@ -23,9 +23,31 @@ import {sameLayerCounts,type LayerStop} from './components/plan-layers';
 import {chatExportFilename,downloadTextFile,formatChatMarkdown} from './chat-export';
 import {composerContextChips, type ContextChip as ContextChipModel} from './chat-context';
 import {formatPlanSvg,schematicExportFilename} from './components/plan-export';
-const initial:DesignBrief={name:'Willow House',building_use:'Home',floors:'2',rooms:'3 bedrooms, 2 bathrooms, kitchen, living room',area:'2,400 sq ft',style:'Warm minimal',prompt:''};
-const steps:[keyof DesignBrief,string,string,boolean?][]=[['name','What will you call your project?','A name for your next idea.'],['building_use','What kind of building is it?','Home, office, retail, or something else.'],['floors','How many floors do you have in mind?','We’ll keep this in your design brief.'],['rooms','What spaces should it include?','Describe the rooms and the way you’ll use them.'],['area','How much space are you working with?','Include your preferred unit: square feet or square meters.'],['style','How should the space feel?','Materials, light, colors, or a few words about the atmosphere.'],['prompt','Anything else the design should answer to?','Adjacencies, who uses it, constraints of the site — write it the way you’d brief a colleague. Optional.',true]];
-const lastStep=steps.length-1;
+const initial:DesignBrief={name:'',building_use:'',floors:'',rooms:'',area:'',style:'',prompt:''};
+type IntakeField='building_use'|'floors'|'rooms'|'area'|'style';
+type IntakeMessage={role:'assistant'|'user';text:string;field?:IntakeField;chips?:string[];ready?:boolean};
+const describeChip='I’ll describe it';
+const intakeQuestions:Record<IntakeField,{text:string;chips:string[]}>={
+  building_use:{text:'What kind of place are you imagining?',chips:['A home','A workspace','A retail space',describeChip]},
+  floors:{text:'How many floors should it have?',chips:['One floor','Two floors','Three floors',describeChip]},
+  rooms:{text:'What spaces need to be part of it?',chips:['Open kitchen + living','3 bedrooms + 2 baths','A flexible studio',describeChip]},
+  area:{text:'Roughly how much space are you working with?',chips:['Under 1,500 sq ft','About 2,500 sq ft','About 5,000 sq ft',describeChip]},
+  style:{text:'How should the space feel?',chips:['Warm minimal','Modern and bright','Natural and calm',describeChip]},
+};
+const intakeFields:IntakeField[]=['building_use','floors','rooms','area','style'];
+function firstMissingIntakeField(brief:DesignBrief){return intakeFields.find(field=>!String(brief[field]).trim())}
+function starterIntakeMessages():IntakeMessage[]{return [{role:'assistant',text:'',chips:['A calm family home','A neighbourhood café','A compact studio',describeChip]}];}
+function floorSummary(value:string){return /\bfloor|storey|story\b/i.test(value)?value:`${value} floor${value==='1'?'':'s'}`}
+function inferBriefFromIdea(idea:string,brief:DesignBrief):DesignBrief{
+  const value=idea.toLowerCase();
+  const building_use=/\b(home|house|residence|apartment|cottage)\b/.test(value)?'Home':/\b(office|workspace|studio)\b/.test(value)?'Workspace':/\b(café|cafe|restaurant|shop|retail|store)\b/.test(value)?'Retail / hospitality':'';
+  const floorMatch=value.match(/\b(\d+)\s*[- ]?(?:storey|story|floor)s?\b/);
+  const floors=floorMatch?.[1]||(/\b(single[- ]storey|one[- ]floor)\b/.test(value)?'1':/\b(two[- ]storey|two[- ]floor)\b/.test(value)?'2':'');
+  const areaMatch=idea.match(/\b\d[\d,]*(?:\.\d+)?\s?(?:sq\.?\s?(?:ft|feet|m|metres?|meters?)|sqft|m²)\b/i);
+  const hasRooms=/\b(bed(room)?s?|bath(room)?s?|kitchen|living|dining|office|studio|lobby|meeting room)\b/.test(value);
+  const styleMatch=['minimal','modern','traditional','classic','industrial','scandinavian','warm','natural','bright'].find(style=>value.includes(style));
+  return {...brief,prompt:idea,building_use:brief.building_use||building_use,floors:brief.floors||floors,rooms:brief.rooms||(hasRooms?idea:''),area:brief.area||(areaMatch?.[0]||''),style:brief.style||(styleMatch?styleMatch.replace(/\b\w/g,letter=>letter.toUpperCase()):'')};
+}
 const desktop=(window as any).archetype as {platform?:string;importFolder:()=>Promise<any>;popupMenu?:(name:string,x:number,y:number)=>void;onMenuCommand?:(cb:(command:string)=>void)=>()=>void;saveTextFile?:(name:string,content:string)=>Promise<string|null>}|undefined;
 const showWindowMenu=desktop?.platform==='win32'||desktop?.platform==='linux';
 function Brand(){return <span className="brand-mark"><svg width="25" height="25" viewBox="0 0 28 28" fill="none"><path d="M4 21V9L14 3l10 6v12l-10 5L4 21Z M4 9l10 6 10-6M14 15v11M9 6l10 6v11" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg></span>}
@@ -35,7 +57,7 @@ function Workspace({params}:IDockviewPanelProps){
   const [panelVisible,setPanelVisible]=useState(true);
   useEffect(()=>{const api=params.api;if(!api||typeof api.onDidVisibilityChange!=='function')return;setPanelVisible(api.isVisible);const d=api.onDidVisibilityChange((e:any)=>setPanelVisible(e.isVisible));return()=>d.dispose()},[params.api]);
   if(!a.project)return null;
-  const props={building:a.project.building,floorId:a.floor,onCommand:a.command,selectedId:a.selected,onSelect:a.setSelected,units:a.units,busy:!!a.job,checks:a.project.checks,sheets:a.project.sheets,projectId:a.project.project_id,onFloor:a.setFloor,checkPulse:a.checkPulse};
+  const props={building:a.project.building,floorId:a.floor,onCommand:a.command,selectedId:a.selected,onSelect:a.setSelected,units:a.units,busy:!!a.job,checks:a.project.checks,sheets:a.project.sheets,projectId:a.project.project_id,buildingUse:a.project.brief?.building_use,buildingName:a.project.name,onFloor:a.setFloor,checkPulse:a.checkPulse};
   return params.mode==='3d'?<ModelView {...props} registerPaint={a.registerPaint} visible={panelVisible}/>:<FloorPlan {...props} layerStop={a.layerStop} onLayerCounts={a.onLayerCounts} onExportSchematic={a.exportSchematic}/>;
 }
 function Assets({params}:IDockviewPanelProps){const a=useApp();return a.project?<AssetLibrary tab={params.tab||'fixtures'} mode={a.mode} building={a.project.building} onCommand={a.command} layerStop={a.layerStop} layerCounts={a.layerCounts} onLayerStop={a.setLayerStop}/>:null}
@@ -104,18 +126,23 @@ function Checks(){
   const failures=[...checks.filter((c:any)=>c.status==='fail')].sort((x:any,y:any)=>(y.instances_affected||0)-(x.instances_affected||0));
   const quarantined=checks.filter((c:any)=>c.status==='quarantined');
   const cannotVerify=checks.filter((c:any)=>c.status==='cannot_verify');
+  const floorPlanImage=a.project?.sheets?.find((sheet:any)=>sheet.thumb_url||sheet.raster_url)?.thumb_url||a.project?.sheets?.find((sheet:any)=>sheet.raster_url)?.raster_url;
+  const titleCase=(value:string)=>value.replaceAll('_',' ').replace(/\b\w/g,letter=>letter.toUpperCase());
   const renderCheck=(c:any)=>(
     <button className={'check-item '+c.status} key={c.id} onClick={()=>{a.setSelected(c.entity_id);a.pulseCheck()}}>
-      <strong>{c.metric.replaceAll('_',' ')}</strong>
+      {floorPlanImage&&<img className="check-floor-plan" src={floorPlanImage} alt="2D floor plan" />}
+      {!floorPlanImage&&<div className="check-floor-plan check-floor-plan-fallback" aria-hidden="true"><span>2D floor plan</span></div>}
+      <div className="check-copy">
+        <strong>{titleCase(c.metric)}</strong>
       <p>{c.message}</p>
       {(c.status==='quarantined'||c.status==='cannot_verify')&&(c.reason||c.reliability_reason)&&<small className="quarantine-why">{c.reason||c.reliability_reason}</small>}
       <small>{c.source_doc}{c.source_page?` · p. ${c.source_page}`:''}</small>
+      </div>
     </button>
   );
   return <div className="agent-pane"><div className="review-list">
     <section className="check-section">
       <h4>Failures</h4>
-      <button className="primary" disabled={!!a.job} onClick={()=>setShowViolationsModal(true)}>Prepare repairs</button>
       {failures.map(renderCheck)}
     </section>
     <section className="check-section">
@@ -127,8 +154,8 @@ function Checks(){
       {cannotVerify.map(renderCheck)}
     </section>
     {!failures.length&&!quarantined.length&&!cannotVerify.length&&<p>Approve a requirement in Standards to begin checking.</p>}
-    {showViolationsModal&&<ViolationsModal violations={failures} onClose={()=>setShowViolationsModal(false)} onRepair={(sel:any[])=>{setShowViolationsModal(false);a.openPanel('assistant');const vt=sel.map((v:any)=>`- ${v.metric?.replaceAll('_',' ')||v.rule_id}: ${v.message}`).join('\n');a.chat(`Repair these issues:\n${vt}`,sel,true)}} isLoading={!!a.job}/>}
-  </div></div>;
+    {showViolationsModal&&<ViolationsModal violations={failures} onClose={()=>setShowViolationsModal(false)} onRepair={(sel:any[])=>{setShowViolationsModal(false);a.openPanel('assistant');const vt=sel.map((v:any)=>`- ${v.metric?.replaceAll('_',' ')||v.rule_id}: ${v.message}`).join('\n');a.chat(`Repair these issues:\n${vt}`,sel,true)}} isLoading={!!a.job}/>} 
+  </div><div className="checks-action"><button className="primary" disabled={!!a.job||!failures.length} onClick={()=>setShowViolationsModal(true)}>Prepare repairs</button></div></div>;
 }
 function Standards(){
   const a=useApp();
@@ -164,6 +191,63 @@ function Rule({rule:r}:{rule:any}){
 function SourcePanel(){const a=useApp();return a.project?<SourceCompare project={a.project}/>:null}
 function Logs(){return <LogPanel/>}
 const components={projects:Projects,logs:Logs,workspace:Workspace,assets:Assets,assistant:Assistant,checks:Checks,standards:Standards,source:SourcePanel};
+function GenerateConversation({brief,setBrief,onGenerate,onCancel,online}:{brief:DesignBrief;setBrief:(brief:DesignBrief)=>void;onGenerate:(brief?:DesignBrief)=>void;onCancel:()=>void;online:boolean}){
+  const [messages,setMessages]=useState<IntakeMessage[]>(starterIntakeMessages);
+  const [text,setText]=useState('');
+  const [field,setField]=useState<IntakeField|undefined>();
+  const [describing,setDescribing]=useState(false);
+  const scroller=useRef<HTMLDivElement>(null);
+  const composerInput=useRef<HTMLTextAreaElement>(null);
+  useEffect(()=>{scroller.current?.scrollTo({top:scroller.current.scrollHeight,behavior:'smooth'})},[messages]);
+  const sendFreeformBrief=()=>{
+    const value=text.trim();
+    if(!value)return;
+    const next=inferBriefFromIdea(value,brief);
+    setBrief(next);
+    onGenerate(next);
+  };
+  const respond=(answer:string)=>{
+    const value=answer.trim();
+    if(!value)return;
+    const ready=messages.at(-1)?.ready===true;
+    const next=field?{...brief,[field]:value}:ready?{...brief,prompt:[brief.prompt,value].filter(Boolean).join('\n')}:inferBriefFromIdea(value,brief);
+    const nextField=ready?undefined:firstMissingIntakeField(next);
+    setBrief(next);
+    setText('');
+    setDescribing(false);
+    setMessages(current=>[
+      ...(ready?current.filter(message=>!message.ready):current),
+      {role:'user',text:value},
+      nextField?{role:'assistant',field:nextField,...intakeQuestions[nextField]}:{role:'assistant',ready:true,text:'Anything else?'},
+    ]);
+    setField(nextField);
+  };
+  const summary=[brief.building_use,brief.floors&&floorSummary(brief.floors),brief.rooms,brief.area,brief.style].filter(Boolean);
+  return <section className="generate-conversation" aria-label="Design conversation">
+    <header className="generate-conversation-head">
+      <button type="button" className="intake-back" aria-label="Back" onClick={onCancel}><ArrowLeft size={18}/></button>
+      <h1>What should we work on?</h1>
+      <p>Describe your idea. I’ll ask what’s needed.</p>
+    </header>
+    <div className="generate-thread" ref={scroller}>
+      {messages.map((message,index)=><div key={index} className={'intake-message '+message.role}>
+        {message.role==='assistant'&&index>0&&<span className="assistant-label"><Brand/> Archetype</span>}
+        {!!message.text&&<p>{message.text}</p>}
+        {!!message.chips?.length&&<div className="intake-chips">{message.chips.map(chip=><button type="button" key={chip} className={chip===describeChip&&describing?'active':''} disabled={index!==messages.length-1} onClick={()=>{if(chip===describeChip){setDescribing(true);composerInput.current?.focus()}else respond(chip)}}>{chip}</button>)}</div>}
+        {message.ready&&<div className="intake-ready">
+          <div className="intake-summary">{summary.map(item=><span key={item}>{item}</span>)}</div>
+          <button className="intake-generate" disabled={!online} onClick={()=>onGenerate()}>Generate design</button>
+        </div>}
+      </div>)}
+    </div>
+    <div className="generate-composer">
+      <textarea ref={composerInput} autoFocus aria-label="Describe your design idea" placeholder={field?'Type your answer…':messages.at(-1)?.ready?'Add a note…':'Describe what you want to create…'} value={text} onChange={event=>setText(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();!field&&messages.length===1?sendFreeformBrief():respond(text)}}}/>
+      <div className="generate-composer-foot">
+        <button type="button" className="generate-send" aria-label="Send design brief" disabled={!text.trim()} onClick={()=>!field&&messages.length===1?sendFreeformBrief():respond(text)}><ArrowUp size={17}/></button>
+      </div>
+    </div>
+  </section>;
+}
 function addLibraryTabs(d:DockviewReadyEvent['api'], fixtures:any){
   d.addPanel({id:'layers',component:'assets',title:'Layers',params:{tab:'layers'},position:{referencePanel:fixtures,direction:'within'},inactive:true});
   d.addPanel({id:'materials',component:'assets',title:'Materials',params:{tab:'materials'},position:{referencePanel:fixtures,direction:'within'},inactive:true});
@@ -248,7 +332,6 @@ export default function App(){
   const [units,setUnits]=useState<'metric'|'imperial'>('imperial');
   const [selected,setSelected]=useState<string|null>(null);
   const [intake,setIntake]=useState(false);
-  const [step,setStep]=useState(0);
   const [brief,setBrief]=useState(initial);
   const [job,setJob]=useState<Job|null>(null);
   const [saving,setSaving]=useState(false);
@@ -282,8 +365,8 @@ export default function App(){
   useEffect(()=>{const imagine=()=>{const d=dock.current;d?.getPanel('model')?.api.setActive();syncLibraryForMode(d,'3d');d?.getPanel('furniture')?.api.setActive()};window.addEventListener('archetype:imagine-furniture',imagine);return()=>window.removeEventListener('archetype:imagine-furniture',imagine)},[]);
   useEffect(()=>{if(file&&project&&!file.name.toLowerCase().endsWith('.pdf'))fetch(base+`/projects/${project.project_id}/files/${file.path}`).then(r=>r.text()).then(setFileText).catch(e=>setFileText(String(e)))},[file,project?.project_id]);
   async function open(id:string,recap?:any[]){try{const p=await api<DesktopProject>('/projects/'+id);setProject(p);setFloor(p.building.floors[0]?.id||'');setSelected(null);setMessages(recap||[]);setProposal(null);setSummary(null);setIntake(false)}catch(e){setError(String(e))}}
-  function newProject(){setProject(null);setIntake(true);setStep(0);setBrief(initial)}
-  async function generate(){try{const {job_id}=await api('/generate',{...brief,name:uniqueProjectName(projects,brief.name)});let last:Job|null=null;const result=await waitJob(job_id,j=>{last=j;setJob(j)});await refresh();await open(result.project_id,generationRecap(last,result))}catch(e){setError(String(e))}finally{setJob(null)}}
+  function newProject(){setProject(null);setIntake(true);setBrief(initial)}
+  async function generate(briefOverride:DesignBrief=brief){try{const fallbackName=`${briefOverride.building_use||'New'} project`;const {job_id}=await api('/generate',{...briefOverride,name:uniqueProjectName(projects,briefOverride.name||fallbackName)});let last:Job|null=null;const result=await waitJob(job_id,j=>{last=j;setJob(j)});await refresh();await open(result.project_id,generationRecap(last,result))}catch(e){setError(String(e))}finally{setJob(null)}}
   async function command(commands:ModelCommand[]){const p=current.current;if(!p||saving)return;setSaving(true);try{const updated=await api(`/projects/${p.project_id}/commands`,{expected_revision:p.revision,commands});setProject(isDesktopProject(updated)?updated:applyPatch(p,updated));setProposal(null)}catch(e){setError(String(e))}finally{setSaving(false)}}
   async function history(direction:string){if(!project||saving)return;setSaving(true);try{setProject(await api(`/projects/${project.project_id}/${direction}`,{expected_revision:project.revision}));setProposal(null)}catch(e){setError(String(e))}finally{setSaving(false)}}
   useEffect(()=>{const key=(e:KeyboardEvent)=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes((e.target as HTMLElement)?.tagName)){e.preventDefault();history(e.shiftKey?'redo':'undo')}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[project,saving]);
@@ -328,5 +411,5 @@ export default function App(){
   useEffect(()=>{syncLibraryForMode(dock.current,mode)},[mode,project?.project_id,layoutKey]);
   const onLayerCounts=useCallback((counts:number[])=>{setLayerCounts(current=>sameLayerCounts(current,counts)?current:counts)},[]);
   const state={project,projects,floor,setFloor,mode,units,selected,setSelected,newProject,open,importFolder,renameProject,deleteProject,command,job,saving,messages,proposal,setProposal,summary,setSummary,registerPaint,chat,exportChat,exportSchematic,apply,review,setFile,openPanel,checkPulse,pulseCheck:()=>setCheckPulse(n=>n+1),layerStop,setLayerStop,layerCounts,onLayerCounts};
-  return <AppContext.Provider value={state}><div className="app"><header className="titlebar">{showWindowMenu&&<div className="titlebar-left"><AppMenu/></div>}{project&&<span className="project-title">{project.name}</span>}{project&&<div className="top-controls"><button title="Undo" disabled={!project.can_undo||saving} onClick={()=>history('undo')}><Undo2 size={16}/></button><button title="Redo" disabled={!project.can_redo||saving} onClick={()=>history('redo')}><Redo2 size={16}/></button><select aria-label="Display units" value={units} onChange={e=>setUnits(e.target.value as any)}><option value="imperial">ft / in</option><option value="metric">m / cm</option></select><button title="Reset layout" onClick={()=>{localStorage.removeItem('archetype-layout');setLayoutKey(k=>k+1)}}><LayoutTemplate size={16}/></button></div>}</header>{project?<div className="editor-shell"><DockviewReact key={`${layoutKey}-library`} className="dockview-theme-light" components={components} onReady={onReady}/></div>:<div className="home-shell"><aside><HomeSidebar/></aside><main className={'home-main'+(overview||job&&(importPid||job.sheets_done?.length)?' importing':'')+(job&&!overview&&!(importPid||job.sheets_done?.length)?' generating':'')}>{overview?<ImportOverview summary={overview} onOpen={enterImported}/>:job&&(importPid||job.sheets_done?.length)?<ImportBoard job={job} projectId={importPid}/>:job?<div className="generation-stage"><div className="generation-progress"><div className="progress-orbit"><Brand/></div><h1>Making room for your idea.</h1><p>{job.message}</p><div className="progress-track"><div style={{width:job.progress*100+'%'}}/></div><small>{generating?'Exploring the building type, gathering rooms, then compiling an editable plan':'Demo generation · research shown, then a two-storey home'}</small></div><GenerationChat job={job}/></div>:intake?<div className="intake"><button className="back" onClick={()=>step?setStep(step-1):setIntake(false)}><ArrowLeft size={15}/> Back</button><div className="step-dots">{steps.map((s,i)=><span key={s[0]} className={i<=step?'active':''}/>)}</div><h1>{steps[step][1]}</h1><p>{steps[step][2]}</p>{steps[step][0]==='prompt'?<textarea autoFocus key={step} rows={5} aria-label={steps[step][1]} value={String(brief.prompt)} onChange={e=>setBrief({...brief,prompt:e.target.value})}/>:<input autoFocus key={step} aria-label={steps[step][1]} value={String(brief[steps[step][0]])} onChange={e=>setBrief({...brief,[steps[step][0]]:e.target.value})} onKeyDown={e=>{if(e.key==='Enter'&&String(brief[steps[step][0]]).trim())step===lastStep?generate():setStep(step+1)}}/>}<button className="primary" disabled={(!steps[step][3]&&!String(brief[steps[step][0]]).trim())||!online} onClick={()=>step===lastStep?generate():setStep(step+1)}>{step===lastStep?'Generate design':'Continue'}<ArrowRight size={15}/></button><small>{generating?'Your brief becomes a space program, then walls, doors and windows you can edit.':'The demo saves your brief and creates a fixed two-storey home.'}</small></div>:<div className="welcome"><div className="welcome-symbol"><Brand/></div><h1>Archetype</h1><div className="home-actions"><button className="home-card" disabled={!online} onClick={newProject}><Plus size={22}/><span>Generate a building design</span></button><button className="home-card" disabled={!online} onClick={importFolder}><FolderOpen size={22}/><span>Import a project</span></button></div>{projects.length>0&&<div className="recent"><span>Pick up where you left off</span>{projects.slice(0,3).map(p=><button key={p.project_id} onClick={()=>open(p.project_id)}><span><Folder size={15}/>{p.name}</span><ArrowRight size={14}/></button>)}</div>}</div>}</main></div>}{error&&<div role="alert" className="toast"><span>{error.replace(/^Error: /,'')}</span><button onClick={()=>setError('')}><X size={15}/></button></div>}{file&&project&&<FilePreview file={file} project={project} text={fileText} onClose={()=>setFile(null)}/>}<input ref={input} hidden type="file" multiple {...{webkitdirectory:''} as any} onChange={e=>importFiles(e.target.files)}/></div></AppContext.Provider>;
+  return <AppContext.Provider value={state}><div className="app"><header className="titlebar">{showWindowMenu&&<div className="titlebar-left"><AppMenu/></div>}{project&&<span className="project-title">{project.name}</span>}{project&&<div className="top-controls"><button title="Undo" disabled={!project.can_undo||saving} onClick={()=>history('undo')}><Undo2 size={16}/></button><button title="Redo" disabled={!project.can_redo||saving} onClick={()=>history('redo')}><Redo2 size={16}/></button><select aria-label="Display units" value={units} onChange={e=>setUnits(e.target.value as any)}><option value="imperial">ft / in</option><option value="metric">m / cm</option></select><button title="Reset layout" onClick={()=>{localStorage.removeItem('archetype-layout');setLayoutKey(k=>k+1)}}><LayoutTemplate size={16}/></button></div>}</header>{project?<div className="editor-shell"><DockviewReact key={`${layoutKey}-library`} className="dockview-theme-light" components={components} onReady={onReady}/></div>:<div className="home-shell"><aside><HomeSidebar/></aside><main className={'home-main'+(overview||job&&(importPid||job.sheets_done?.length)?' importing':'')+(job&&!overview&&!(importPid||job.sheets_done?.length)?' generating':'')}>{overview?<ImportOverview summary={overview} onOpen={enterImported}/>:job&&(importPid||job.sheets_done?.length)?<ImportBoard job={job} projectId={importPid}/>:job?<div className="generation-stage"><div className="generation-progress"><div className="progress-orbit"><Brand/></div><h1>Making room for your idea.</h1><p>{job.message}</p><div className="progress-track"><div style={{width:job.progress*100+'%'}}/></div><small>{generating?'Exploring the building type, gathering rooms, then compiling an editable plan':'Demo generation · research shown, then a two-storey home'}</small></div><GenerationChat job={job}/></div>:intake?<GenerateConversation brief={brief} setBrief={setBrief} onGenerate={generate} onCancel={()=>setIntake(false)} online={online}/>:<div className="welcome"><div className="welcome-symbol"><Brand/></div><h1>Archetype</h1><div className="home-actions"><button className="home-card" disabled={!online} onClick={newProject}><Plus size={22}/><span>Generate a building design</span></button><button className="home-card" disabled={!online} onClick={importFolder}><FolderOpen size={22}/><span>Import a project</span></button></div>{projects.length>0&&<div className="recent"><span>Pick up where you left off</span>{projects.slice(0,3).map(p=><button key={p.project_id} onClick={()=>open(p.project_id)}><span><Folder size={15}/>{p.name}</span><ArrowRight size={14}/></button>)}</div>}</div>}</main></div>}{error&&<div role="alert" className="toast"><span>{error.replace(/^Error: /,'')}</span><button onClick={()=>setError('')}><X size={15}/></button></div>}{file&&project&&<FilePreview file={file} project={project} text={fileText} onClose={()=>setFile(null)}/>}<input ref={input} hidden type="file" multiple {...{webkitdirectory:''} as any} onChange={e=>importFiles(e.target.files)}/></div></AppContext.Provider>;
 }

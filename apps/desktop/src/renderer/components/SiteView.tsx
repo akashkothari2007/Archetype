@@ -28,15 +28,18 @@ const scratch = {
   carto: { lat: 0, lon: 0, height: 0 },
 }
 
-type Props = { building: Building; report: SiteReport | null; onReport: (report: SiteReport | null) => void; onCommand: (commands: ModelCommand[]) => void; palette?: AppearancePalette | null; enhanced?: boolean }
+type Props = { building: Building; buildingUse?: string; buildingName?: string; report: SiteReport | null; onReport: (report: SiteReport | null) => void; onCommand: (commands: ModelCommand[]) => void; palette?: AppearancePalette | null; enhanced?: boolean }
 
-export function SiteView({ building, report, onReport, onCommand, palette = null, enhanced = false }: Props) {
+export function SiteView({ building, buildingUse, buildingName, report, onReport, onCommand, palette = null, enhanced = false }: Props) {
   const site = building.site ?? emptySite
   const [placing, setPlacing] = useState(site.lat == null || site.lon == null || peekSitePlace())
   const [look, setLook] = useState<SiteLook | null>(peekSiteLook)
   const [recenter, setRecenter] = useState(0)
   const [selected, setSelected] = useState(false)
-  useEffect(() => { if (site.lat == null || site.lon == null) setPlacing(true) }, [site.lat, site.lon])
+  // A Dockview workspace keeps this component mounted as projects change. Resetting
+  // the placement state for each location prevents a previously unsited project from
+  // leaving the next, already-sited project on an empty placement canvas.
+  useEffect(() => { setPlacing(site.lat == null || site.lon == null) }, [site.lat, site.lon])
   useEffect(() => {
     const apply = () => {
       const nextLook = consumeSiteLook()
@@ -78,7 +81,7 @@ export function SiteView({ building, report, onReport, onCommand, palette = null
       onPointerMissed={() => setSelected(false)}
     >
       <color attach="background" args={['#07090d']} />
-      <SiteScene building={building} report={report} onReport={onReport} onCommand={onCommand} placing={placing} look={look} recenter={recenter} selected={selected} onSelect={() => setSelected(true)} onPlace={(lat, lon) => place(lat, lon)} />
+      <SiteScene building={building} buildingUse={buildingUse} buildingName={buildingName} report={report} onReport={onReport} onCommand={onCommand} placing={placing} look={look} recenter={recenter} selected={selected} onSelect={() => setSelected(true)} onPlace={(lat, lon) => place(lat, lon)} />
     </Canvas>
     {selected && <div className="editor-site-selection" role="toolbar" aria-label="Building rotation">
       <strong>Building selected</strong>
@@ -90,7 +93,7 @@ export function SiteView({ building, report, onReport, onCommand, palette = null
   </></AppearanceContext.Provider>
 }
 
-function SiteScene({ building, report, onReport, onCommand, placing, look, recenter, selected, onSelect, onPlace }: { building: Building; report: SiteReport | null; onReport: Props['onReport']; onCommand: Props['onCommand']; placing: boolean; look: SiteLook | null; recenter: number; selected: boolean; onSelect: () => void; onPlace: (lat: number, lon: number) => void }) {
+function SiteScene({ building, buildingUse, buildingName, report, onReport, onCommand, placing, look, recenter, selected, onSelect, onPlace }: { building: Building; buildingUse?: string; buildingName?: string; report: SiteReport | null; onReport: Props['onReport']; onCommand: Props['onCommand']; placing: boolean; look: SiteLook | null; recenter: number; selected: boolean; onSelect: () => void; onPlace: (lat: number, lon: number) => void }) {
   const site = building.site ?? emptySite
   const lat = site.lat, lon = site.lon
   const azimuth = site.rotation_deg * Math.PI / 180
@@ -103,7 +106,7 @@ function SiteScene({ building, report, onReport, onCommand, placing, look, recen
   const aimLon = look?.lon ?? lon
   const controls = useRef<any>(null)
   return <>
-    <TilesRenderer errorTarget={8} onLoadModel={event => makeTilesPhotoreal(event.scene)}>
+    <TilesRenderer key={`${lat ?? 'unsited'}:${lon ?? 'unsited'}`} errorTarget={8} onLoadModel={event => makeTilesPhotoreal(event.scene)}>
       <TilesPlugin plugin={CesiumIonAuthPlugin} args={{ apiToken: ionToken, assetId: String(GOOGLE_TILES_ASSET_ID), autoRefreshToken: true } as never} />
       <TilesPlugin plugin={GLTFExtensionsPlugin} args={{ dracoLoader: draco } as never} />
       <TilesPlugin plugin={TileCompressionPlugin} />
@@ -112,12 +115,12 @@ function SiteScene({ building, report, onReport, onCommand, placing, look, recen
       <UnlitTiles />
       <GlobeControls ref={controls} enableDamping dampingFactor={0.12} enableFlight minDistance={8} />
       <SitePicker placing={placing} onPlace={onPlace} />
-      {placing && <HoverBuilding building={building} footprint={footprint} rotation={site.rotation_deg} anchor={look} />}
+      {placing && <HoverBuilding building={building} buildingUse={buildingUse} buildingName={buildingName} footprint={footprint} rotation={site.rotation_deg} anchor={look} />}
       {sited && <GroundProbe building={building} lat={lat} lon={lon} rotation={site.rotation_deg} onGrade={setGrade} onReport={onReport} />}
       {sited && !placing && <EastNorthUpFrame lat={lat * Math.PI / 180} lon={lon * Math.PI / 180} height={height}>
         <LitSiteModel>
           {sited && <SiteDaylight lat={lat} />}
-          <SiteBuilding building={building} footprint={footprint} report={report} azimuth={azimuth} selected={selected} controls={controls} onSelect={onSelect} onCommand={onCommand} />
+          <SiteBuilding building={building} buildingUse={buildingUse} buildingName={buildingName} footprint={footprint} report={report} azimuth={azimuth} selected={selected} controls={controls} onSelect={onSelect} onCommand={onCommand} />
         </LitSiteModel>
       </EastNorthUpFrame>}
       <FlyTo lat={aimLat} lon={aimLon} span={span} ground={look ? null : grade} recenter={recenter} controls={controls} />
@@ -176,7 +179,7 @@ function normalizeDegrees(value: number) {
   return (value % 360 + 360) % 360
 }
 
-function SiteBuilding({ building, footprint, report, azimuth, selected, controls, onSelect, onCommand }: { building: Building; footprint: ReturnType<typeof siteFootprint>; report: SiteReport | null; azimuth: number; selected: boolean; controls: React.RefObject<any>; onSelect: () => void; onCommand: Props['onCommand'] }) {
+function SiteBuilding({ building, buildingUse, buildingName, footprint, report, azimuth, selected, controls, onSelect, onCommand }: { building: Building; buildingUse?: string; buildingName?: string; footprint: ReturnType<typeof siteFootprint>; report: SiteReport | null; azimuth: number; selected: boolean; controls: React.RefObject<any>; onSelect: () => void; onCommand: Props['onCommand'] }) {
   const ref = useRef<THREE.Group>(null)
   const height = buildingHeightFt(building)
   useLayoutEffect(() => {
@@ -186,7 +189,7 @@ function SiteBuilding({ building, footprint, report, azimuth, selected, controls
     <group rotation={[Math.PI / 2, 0, 0]} scale={METERS_PER_FOOT}>
       <SitePad footprint={footprint} report={report} />
       <group position={[-footprint.cx, 0, -footprint.cy]}>
-        <Suspense fallback={null}><BuildingShell building={building} onSelect={onSelect} /></Suspense>
+        <Suspense fallback={null}><BuildingShell building={building} buildingUse={buildingUse} buildingName={buildingName} onSelect={onSelect} /></Suspense>
       </group>
       <mesh position={[0, height / 2, 0]} onClick={event => { event.stopPropagation(); onSelect() }} userData={{ siteBuilding: true }}>
         <boxGeometry args={[Math.max(footprint.width, 1), Math.max(height, 1), Math.max(footprint.height, 1)]} />
@@ -305,7 +308,7 @@ function tintGhost(root: THREE.Object3D) {
   })
 }
 
-function HoverBuilding({ building, footprint, rotation, anchor }: { building: Building; footprint: ReturnType<typeof siteFootprint>; rotation: number; anchor: SiteLook | null }) {
+function HoverBuilding({ building, buildingUse, buildingName, footprint, rotation, anchor }: { building: Building; buildingUse?: string; buildingName?: string; footprint: ReturnType<typeof siteFootprint>; rotation: number; anchor: SiteLook | null }) {
   const tiles = useContext(TilesRendererContext) as { group: THREE.Object3D; ellipsoid: { getPositionToCartographic: (pos: THREE.Vector3, target: { lat: number; lon: number; height: number }) => void } } | null
   const { camera, gl } = useThree()
   const pointer = useRef({ x: 0, y: 0, inside: false })
@@ -347,7 +350,7 @@ function HoverBuilding({ building, footprint, rotation, anchor }: { building: Bu
         <group position={[-footprint.cx, 0, -footprint.cy]}>
           <Suspense fallback={<mesh position={[footprint.cx, buildingHeightFt(building) / 2, footprint.cy]} userData={{ siteBuilding: true }}><boxGeometry args={[Math.max(footprint.width, 1), Math.max(buildingHeightFt(building), 1), Math.max(footprint.height, 1)]} /><meshBasicMaterial color="#6ea8cc" transparent opacity={0.32} depthWrite={false} /></mesh>}>
             <AppearanceContext.Provider value={{ map: null, roofMap: null, matrix: null, palette: null, splatUrl: null, apply: false }}>
-              <BuildingShell building={building} onSelect={() => {}} />
+              <BuildingShell building={building} buildingUse={buildingUse} buildingName={buildingName} onSelect={() => {}} />
             </AppearanceContext.Provider>
           </Suspense>
         </group>
@@ -445,15 +448,18 @@ function probeTerrainHeight(tiles: { group: THREE.Object3D; ellipsoid: any } | n
 function FlyTo({ lat, lon, span, ground, recenter, controls }: { lat: number | null; lon: number | null; span: number; ground: number | null; recenter: number; controls: { current: { resetState: () => void; pivotPoint: THREE.Vector3 } | null } }) {
   const tiles = useContext(TilesRendererContext) as { group: THREE.Object3D; ellipsoid: { getEastNorthUpAxes?: (lat: number, lon: number, east: THREE.Vector3, north: THREE.Vector3, up: THREE.Vector3, pos?: THREE.Vector3) => void; getCartographicToNormal: (lat: number, lon: number, target: THREE.Vector3) => THREE.Vector3; getCartographicToPosition: (lat: number, lon: number, height: number, target: THREE.Vector3) => THREE.Vector3; getPositionToCartographic: (pos: THREE.Vector3, target: { lat: number; lon: number; height: number }) => void } } | null
   const camera = useThree(state => state.camera)
-  const last = useRef<{ lat: number; lon: number; recenter: number; ground: number | null } | null>(null)
+  // `probeTerrainHeight` can hit a low-detail tile before GroundProbe has measured
+  // the site. Keep those two readings distinct so the arrival of the measured grade
+  // always triggers the close, building-scale frame.
+  const last = useRef<{ lat: number; lon: number; recenter: number; measuredGround: number | null } | null>(null)
   useFrame(() => {
     if (!tiles?.group || !tiles.ellipsoid || lat == null || lon == null) return
     const probed = ground ?? probeTerrainHeight(tiles, lat, lon)
     const previous = last.current
     const moved = !previous || previous.recenter !== recenter || haversineMeters(previous, { lat, lon }) > 40
-    const gotGround = !!previous && previous.ground == null && probed != null
-    if (!moved && !gotGround) return
-    last.current = { lat, lon, recenter, ground: probed }
+    const gotMeasuredGround = !!previous && previous.measuredGround == null && ground != null
+    if (!moved && !gotMeasuredGround) return
+    last.current = { lat, lon, recenter, measuredGround: ground }
     // Unknown ground stays ~12 km up so the camera is not inside the earth while tiles load.
     const { terrain, hover, lookUp } = siteCameraOffset(span, probed)
     const latRad = lat * Math.PI / 180, lonRad = lon * Math.PI / 180

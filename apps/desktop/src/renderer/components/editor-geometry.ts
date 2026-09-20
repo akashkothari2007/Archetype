@@ -1,5 +1,5 @@
 import type { Building, ModelCommand } from '../types'
-import furnitureCatalog from '../furniture-catalog.json'
+import rawFurnitureCatalog from '../furniture-catalog.json'
 import { surfacePreview, surfaces } from './material-catalog'
 
 export type Point = { x: number; y: number }
@@ -12,10 +12,24 @@ export type EditorProps = {
   units: 'metric' | 'imperial'
   busy?: boolean
   projectId?: string
+  /** Kept with the project brief; used for presentation-only exterior character. */
+  buildingUse?: string
+  buildingName?: string
   onFloor?: (id: string) => void
 }
 export const assetMime = 'application/archetype-asset'
-export type Asset = { id: string; label: string; kind: 'fixture' | 'furniture' | 'door' | 'window' | 'material'; width: number; depth: number; height: number; preview?: string; model?: string; color?: string }
+export type Asset = { id: string; label: string; kind: 'fixture' | 'furniture' | 'door' | 'window' | 'material'; width: number; depth: number; height: number; preview?: string; model?: string; color?: string; procedural?: 'blackboard' }
+type FurnitureCatalogEntry = {
+  id: string
+  label: string
+  width: number
+  depth: number
+  height: number
+  preview?: string
+  model?: string
+  procedural?: 'blackboard'
+}
+const furnitureCatalog = rawFurnitureCatalog as FurnitureCatalogEntry[]
 export const fixtures: Asset[] = [
   { id: 'door', label: 'Swing door', kind: 'door', width: 3, depth: .25, height: 7 },
   { id: 'window', label: 'Window', kind: 'window', width: 4, depth: .25, height: 4 },
@@ -33,8 +47,9 @@ export const furniture: Asset[] = furnitureCatalog.map(a => ({
   width: a.width,
   depth: a.depth,
   height: a.height,
-  preview: `assets/${a.id}/preview.png`,
-  model: `assets/${a.id}/${a.id}.gltf`,
+  preview: a.preview ? `assets/${a.id}/${a.preview}` : a.procedural ? undefined : `assets/${a.id}/preview.png`,
+  model: a.procedural ? undefined : a.model || `assets/${a.id}/${a.id}.gltf`,
+  procedural: a.procedural,
 }))
 export function catalogAsset(id?: string | null): Asset | undefined {
   if (!id) return undefined

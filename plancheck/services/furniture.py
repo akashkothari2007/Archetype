@@ -26,11 +26,14 @@ _DINING = {"dining", "dining_room", "eat_in"}
 _KITCHEN = {"kitchen", "pantry", "scullery"}
 _OFFICE = {"office", "study", "studio", "den", "library", "work"}
 _ENTRY = {"entry", "entryway", "vestibule", "mudroom"}
+_CLASSROOM = {"classroom", "class", "school", "lecture", "teaching"}
 _FURNISH_RE = re.compile(
     r"\b(furnish|furniture|furnishing|decorate|sofa|couch|armchair|ottoman|"
     r"nightstand|bookshelf|bookcase|credenza|sideboard|loveseat|"
-    r"coffee\s+table|dining\s+table|place\s+(?:a\s+)?(?:bed|desk|chair|table)|"
-    r"add\s+(?:a\s+)?(?:sofa|couch|bed|desk|chair|table|ottoman))\b",
+    r"coffee\s+table|dining\s+table|large\s+desk|student\s+desks?|school\s+desks?|teacher'?s?\s+desk|"
+    r"desks?|chairs?|blackboard|chalkboard|"
+    r"place\s+(?:an?\s+)?(?:bed|desks?|chairs?|tables?|blackboard|chalkboard)|"
+    r"add\s+(?:an?\s+)?(?:sofa|couch|bed|desks?|chairs?|tables?|ottoman|blackboard|chalkboard))\b",
     re.I,
 )
 _REPLACE_RE = re.compile(r"\b(refurnish|redecorate|replace|clear|remove|start over)\b", re.I)
@@ -40,6 +43,7 @@ _KITS: dict[str, list[str]] = {
     "dining": ["dining_table", "dining_chair", "dining_chair", "dining_chair", "dining_chair", "cabinet"],
     "kitchen": ["stool", "stool", "range", "cart"],
     "office": ["desk", "desk_chair", "shelves", "chair"],
+    "classroom": ["blackboard", "desk", "student_desk", "student_desk", "student_desk", "student_desk", "desk_chair", "desk_chair", "desk_chair", "desk_chair"],
     "entry": ["console", "mirror", "bench"],
     "other": ["sofa", "coffee_table", "chair", "shelves"],
 }
@@ -103,7 +107,8 @@ def match_catalog_assets(message: str) -> list[dict[str, Any]]:
             item["id"].replace("_", " ").lower(),
             str(item.get("role") or "").replace("_", " ").lower(),
         }
-        if any(token and token in text for token in tokens if len(token) > 2):
+        tokens.update(str(alias).lower() for alias in item.get("aliases") or [])
+        if any(token and re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text) for token in tokens if len(token) > 2):
             found.append(item)
     return found
 
@@ -121,6 +126,8 @@ def _room_kind(room: Room) -> str | None:
         return "dining"
     if tokens & _KITCHEN or "kitchen" in hay:
         return "kitchen"
+    if tokens & _CLASSROOM or "classroom" in hay:
+        return "classroom"
     if tokens & _OFFICE:
         return "office"
     if tokens & _ENTRY:
@@ -199,8 +206,9 @@ def _fits(poly: Polygon, occupied: list[Polygon], footprint: Polygon, pad: float
 def _pick(role: str, used: set[str], room_kind: str) -> dict[str, Any] | None:
     preferred = []
     fallback = []
+    repeated = role in {"student_desk", "desk_chair", "dining_chair", "stool"}
     for item in furniture_catalog():
-        if item["id"] in used or item.get("role") != role:
+        if (item["id"] in used and not repeated) or item.get("role") != role:
             continue
         rooms = set(item.get("rooms") or [])
         (preferred if not rooms or room_kind in rooms else fallback).append(item)

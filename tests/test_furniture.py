@@ -1,7 +1,8 @@
+from plancheck.core.building import Room
 from plancheck.mocks.generation import demo_home
 from plancheck.services.agent import fallback_furnish, host_intent, local_respond
 from plancheck.services.commands import apply_commands
-from plancheck.services.furniture import furniture_catalog, furnish_building, is_furnish_request, target_rooms
+from plancheck.services.furniture import furniture_catalog, furnish_building, is_furnish_request, match_catalog_assets, target_rooms
 
 
 def test_catalog_covers_a_whole_house():
@@ -16,8 +17,27 @@ def test_catalog_covers_a_whole_house():
 def test_furnish_request_detection():
     assert is_furnish_request("Furnish the living room")
     assert is_furnish_request("add a sofa to the lounge")
+    assert is_furnish_request("add a large desk to the classroom")
+    assert is_furnish_request("add desks, chairs, a large desk, and a blackboard")
     assert host_intent("Furnish this floor") == "finish"
     assert host_intent("widen the hallway") == "geometry"
+
+
+def test_classroom_furniture_is_catalogued_and_placeable():
+    building = demo_home()
+    classroom = Room(
+        id="classroom",
+        floor_id="ground",
+        name="Classroom",
+        category="classroom",
+        polygon=[(0, 0), (30, 0), (30, 24), (0, 24)],
+    )
+    building.rooms.append(classroom)
+    requested = match_catalog_assets("add desks, chairs, a large desk, and a blackboard")
+    assert {item["id"] for item in requested} == {"SchoolDesk_01", "SchoolChair_01", "metal_office_desk", "blackboard"}
+    commands = furnish_building(building, rooms=[classroom], message="furnish the classroom")
+    ids = {command["params"]["asset_id"] for command in commands}
+    assert {"SchoolDesk_01", "SchoolChair_01", "metal_office_desk", "blackboard"} <= ids
 
 
 def test_furnish_living_room_places_catalog_models():

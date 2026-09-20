@@ -120,7 +120,7 @@ app.whenReady().then(()=>{
     autoHideMenuBar:true,
     titleBarStyle:'hidden',
     ...(mac?{
-      trafficLightPosition:{x:14,y:16}
+      trafficLightPosition:{x:14,y:10}
     }:{}),
     ...(win32?{
       titleBarOverlay:{

@@ -44,6 +44,22 @@ const manifest = []
 
 for (const item of catalog) {
   const id = item.id
+  if (item.procedural) {
+    console.log(`Keeping bundled ${id} preview…`)
+    manifest.push({
+      id,
+      name: item.label,
+      source: 'built-in procedural furniture',
+      license: 'project source',
+      license_url: '',
+      authors: {},
+      resolution: 'procedural',
+      path: '',
+      preview: item.preview ? `assets/${id}/${item.preview}` : '',
+      files: [],
+    })
+    continue
+  }
   console.log(`Fetching ${id}…`)
   const [files, info] = await Promise.all([filesFor(id), infoFor(id)])
   const gltf = gltfEntry(files)
