@@ -18,6 +18,7 @@ import { AppearanceContext, useAppearance, type AppearancePalette } from './appe
 type CameraAction = { kind: 'fit' | 'rotate' | 'teleport'; point?: Point; nonce: number }
 type Hit = { id: string; point: Point; kind: string } | null
 type View = 'exterior' | 'cutaway' | 'site'
+type CamSnap = { pos: [number, number, number]; target: [number, number, number] } | null
 const ORBIT_FOV = 42
 const WALK_FOV = 72
 const EYE_HEIGHT = 5.3
@@ -73,9 +74,10 @@ async function appearanceMeta(projectId: string, fallback?: unknown) {
   }
 }
 
-export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | null) => void }) {
+export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | null) => void; visible?: boolean }) {
   const { building, floorId, onCommand, onSelect, selectedId, busy, projectId, registerPaint } = props
   const host = useRef<HTMLDivElement>(null)
+  const cameraStore = useRef<CamSnap>(null)
   const [walking, setWalking] = useState(false)
   const [view, setView] = useState<View>('exterior')
   const [currentRoom, setCurrentRoom] = useState<string | null>(null)
@@ -182,10 +184,10 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
     } catch { setNotice('This asset could not be placed.') }
     finally { setDragAsset(null); setDragTarget(null); window.dispatchEvent(new CustomEvent('archetype:asset-drag', { detail: null })) }
   }}>
-    <SceneBoundary>{onSite
+    <SceneBoundary>{props.visible === false ? null : onSite
       ? <SiteView building={building} report={report} onReport={setReport} onCommand={onCommand} palette={look.palette} enhanced={showEnhanced && !!look.palette} />
       : <AppearanceContext.Provider value={{ ...look, splatUrl: null, apply: exterior && !walking && showEnhanced && !!look.palette }}><Canvas shadows={{ type: THREE.PCFShadowMap }} dpr={[1, 1.5]} camera={{ position: [bounds.cx + 30, 38, bounds.cy + 40], fov: ORBIT_FOV, near: .2, far: 8000 }} gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05, preserveDrawingBuffer: true }} onPointerMissed={() => onSelect(null)}>
-        <Scene {...props} exterior={exterior && !walking} walking={walking} spacePanning={spacePanning} objectTool={objectTool} action={action} dragTarget={dragTarget} raycast={raycast} grab={grab} setRoom={setSceneRoom} />
+        <Scene {...props} exterior={exterior && !walking} walking={walking} spacePanning={spacePanning} objectTool={objectTool} action={action} dragTarget={dragTarget} raycast={raycast} grab={grab} setRoom={setSceneRoom} cameraStore={cameraStore} />
       </Canvas></AppearanceContext.Provider>}</SceneBoundary>
     {!onSite && <div className="editor-floating-tools editor-model-tools" role="toolbar" aria-label="3D navigation">
       <button className={!walking ? 'active' : ''} aria-label="Orbit view" title="Orbit view" onClick={() => setWalking(false)}><Orbit size={17} /></button>
@@ -221,18 +223,24 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
   </div>
 }
 
-function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, walking, spacePanning, objectTool, action, dragTarget, raycast, grab, setRoom }: EditorProps & { exterior: boolean; walking: boolean; spacePanning: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; grab: RefObject<(() => ReturnType<typeof captureGuide>) | null>; setRoom: (id: string | null, p: Point) => void }) {
+function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, walking, spacePanning, objectTool, action, dragTarget, raycast, grab, setRoom, cameraStore }: EditorProps & { exterior: boolean; walking: boolean; spacePanning: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; grab: RefObject<(() => ReturnType<typeof captureGuide>) | null>; setRoom: (id: string | null, p: Point) => void; cameraStore: RefObject<CamSnap> }) {
   const look = useAppearance()
   const bounds = useMemo(() => floorBounds(exterior ? { ...building, vertices: building.vertices.map(v => ({ ...v, floor_id: floorId })) } : building, floorId), [building, floorId, exterior])
   const walls = building.walls.filter(w => w.floor_id === floorId), rooms = building.rooms.filter(r => r.floor_id === floorId)
   const objects = building.objects.filter(o => o.floor_id === floorId)
   const vertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
   const controls = useRef<any>(null)
-  const { camera, gl, scene } = useThree()
+  const { camera, gl, scene, invalidate } = useThree()
   const keys = useRef(new Set<string>())
   const lastRoom = useRef(0)
   const groundElevation = groundElevationOf(building)
   const topFloor = topFloorOf(building)
+  // Save camera state into the parent ref when this Canvas unmounts so it
+  // can be restored when the 3D panel becomes visible again.
+  useEffect(() => () => {
+    const tgt = controls.current?.target
+    cameraStore.current = { pos: [camera.position.x, camera.position.y, camera.position.z], target: tgt ? [tgt.x, tgt.y, tgt.z] : [bounds.cx, 0, bounds.cy] }
+  }, [camera, bounds.cx, bounds.cy, cameraStore])
   useEffect(() => {
     grab.current = () => {
       const height = (topFloor?.elevation_ft || 0) + (topFloor?.height_ft || 9) - groundElevation
@@ -269,7 +277,12 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
     persp.updateProjectionMatrix()
   }, [walking, camera])
   useEffect(() => {
-    if (action.kind === 'fit') {
+    const saved = cameraStore.current
+    if (saved) {
+      camera.position.set(saved.pos[0], saved.pos[1], saved.pos[2])
+      controls.current?.target.set(saved.target[0], saved.target[1], saved.target[2])
+      cameraStore.current = null
+    } else if (action.kind === 'fit') {
       const height = exterior ? (topFloor?.elevation_ft || 0) + (topFloor?.height_ft || 9) - groundElevation : 9
       const distance = Math.max(bounds.width, bounds.height, height * 2, 20) * (exterior ? 1.55 : 1)
       const targetY = exterior ? height * .35 : 1
@@ -287,14 +300,15 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
       controls.current?.target.set(action.point.x, EYE_HEIGHT, action.point.y + 4)
     }
     controls.current?.update()
-  }, [action, bounds, camera, exterior, topFloor?.elevation_ft, topFloor?.height_ft, groundElevation])
+    invalidate()
+  }, [action, bounds, camera, exterior, topFloor?.elevation_ft, topFloor?.height_ft, groundElevation, invalidate, cameraStore])
   useEffect(() => {
     if (!walking && document.pointerLockElement === gl.domElement) document.exitPointerLock()
     keys.current.clear()
     const down = (e: KeyboardEvent) => { if (!walking || ['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return; if (['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { keys.current.add(e.key.toLowerCase()); e.preventDefault() } }
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase())
     const blur = () => keys.current.clear()
-    const look = (e: MouseEvent) => { if (walking && document.pointerLockElement === gl.domElement) { camera.rotation.order = 'YXZ'; camera.rotation.y -= e.movementX * .002; camera.rotation.x = THREE.MathUtils.clamp(camera.rotation.x - e.movementY * .002, -Math.PI * .46, Math.PI * .46) } }
+    const look = (e: MouseEvent) => { if (walking && document.pointerLockElement === gl.domElement) { camera.rotation.order = 'YXZ'; camera.rotation.y -= e.movementX * .002; camera.rotation.x = THREE.MathUtils.clamp(camera.rotation.x - e.movementY * .002, -Math.PI * .46, Math.PI * .46); invalidate() } }
     const capture = () => { if (walking) gl.domElement.requestPointerLock()?.catch(() => undefined) }
     window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', blur); document.addEventListener('mousemove', look); gl.domElement.addEventListener('click', capture)
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur); document.removeEventListener('mousemove', look); gl.domElement.removeEventListener('click', capture) }
@@ -330,6 +344,7 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
           if (!collides({ x: camera.position.x, y: camera.position.z + move.z / steps })) camera.position.z += move.z / steps
         }
         camera.position.y = EYE_HEIGHT
+        invalidate()
       }
     }
     // Room tracking drives the cutaway minimap and walkthrough only.

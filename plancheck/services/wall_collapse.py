@@ -265,28 +265,97 @@ def _try_pair(first, second):
 
 
 def pair_parallel_faces(segments) -> list[CollapsedWall]:
-    pending = [_as_seg(item) for item in segments]
+    """Pair parallel wall faces into single centreline walls with measured thickness.
+
+    Strategy: enumerate all valid pairs, sort by perpendicular offset ascending
+    (closest faces are most likely two sides of one physical wall), break ties
+    by overlap descending.  Greedy-match so each segment is used at most once.
+    Unmatched leftovers from partial-overlap pairs are emitted as unpaired stubs.
+    """
+    items = [_as_seg(item) for item in segments]
+    n = len(items)
+    if n == 0:
+        return []
+
+    # Build a spatial index: bucket walls by lane for quick neighbour lookup.
+    # Vertical walls keyed by rounded x, horizontal by rounded y.
+    BUCKET = max(PAIR_OFFSET_MAX_FT * 2, 1.0)
+    lane_buckets: dict[tuple[str, int], list[int]] = {}
+    for idx, (a, b, _s) in enumerate(items):
+        if _is_vertical(a, b):
+            coord = (a[0] + b[0]) / 2
+            key = ("v", round(coord / BUCKET))
+        elif _is_horizontal(a, b):
+            coord = (a[1] + b[1]) / 2
+            key = ("h", round(coord / BUCKET))
+        else:
+            d = _direction(a, b)
+            if d:
+                angle = round(math.atan2(d[1], d[0]) / DIAGONAL_ANGLE_BIN)
+                ux, uy = d[0], d[1]
+                offset = a[0] * (-uy) + a[1] * ux
+                key = ("d", angle, round(offset / BUCKET))
+            else:
+                key = ("z", idx)
+        lane_buckets.setdefault(key, []).append(idx)
+
+    # Enumerate candidate pairs using spatial buckets for efficiency.
+    candidates: list[tuple[float, float, int, int, CollapsedWall, list]] = []
+    checked: set[tuple[int, int]] = set()
+    for key, indices in lane_buckets.items():
+        # Collect indices from this bucket and adjacent buckets
+        nearby = list(indices)
+        if key[0] in ("v", "h"):
+            axis, slot = key[0], key[1]
+            for delta in (-1, 1):
+                nearby.extend(lane_buckets.get((axis, slot + delta), []))
+        elif key[0] == "d":
+            axis, angle, slot = key
+            for delta in (-1, 1):
+                nearby.extend(lane_buckets.get((axis, angle, slot + delta), []))
+        for i in indices:
+            for j in nearby:
+                if i >= j:
+                    continue
+                pair_key = (i, j)
+                if pair_key in checked:
+                    continue
+                checked.add(pair_key)
+                hit = _try_pair(items[i], items[j])
+                if hit:
+                    wall, leftovers = hit
+                    overlap = segment_length(wall.start, wall.end)
+                    # Sort key: closest offset first, then most overlap
+                    candidates.append((wall.thickness_ft, -overlap, i, j, wall, leftovers))
+
+    candidates.sort()
+
+    # Greedy matching: closest offset pairs first
+    used: set[int] = set()
     out: list[CollapsedWall] = []
-    while pending:
-        pending.sort(key=lambda item: -segment_length(item[0], item[1]))
-        current = pending.pop(0)
-        best_i = None
-        best = None
-        for i, other in enumerate(pending):
-            hit = _try_pair(current, other)
-            if hit and (best is None or hit[0].thickness_ft >= 0) and hit:
-                overlap = segment_length(hit[0].start, hit[0].end)
-                if best is None or overlap > best[0]:
-                    best = (overlap, i, hit)
-        if best is None:
-            a, b, structural = current
-            out.append(CollapsedWall(a, b, structural, DEFAULT_THICKNESS_FT, True))
+    leftover_stubs: list[tuple] = []
+    for _offset, _neg_overlap, i, j, wall, leftovers in candidates:
+        if i in used or j in used:
             continue
-        _overlap, index, (wall, leftovers) = best
-        pending.pop(index)
+        used.add(i)
+        used.add(j)
         out.append(wall)
-        pending.extend(leftovers)
+        leftover_stubs.extend(leftovers)
+
+    # Emit unpaired walls with default thickness
+    for i, (a, b, structural) in enumerate(items):
+        if i not in used:
+            out.append(CollapsedWall(a, b, structural, DEFAULT_THICKNESS_FT, True))
+
+    # Leftover stubs from partial-overlap pairs get default thickness
+    for a, b, structural in leftover_stubs:
+        if segment_length(a, b) >= MIN_WALL_FT:
+            out.append(CollapsedWall(a, b, structural, DEFAULT_THICKNESS_FT, True))
+
     return out
+
+
+MERGE_LANE_TOL_FT = LANE_TOL_FT * 2  # wider tolerance for post-merge thickness recovery
 
 
 def merge_collapsed_walls(walls: list[CollapsedWall]) -> list[CollapsedWall]:
@@ -311,7 +380,7 @@ def merge_collapsed_walls(walls: list[CollapsedWall]) -> list[CollapsedWall]:
             if abs(abs(ux * vx + uy * vy) - 1.0) > PARALLEL_DOT_TOL:
                 continue
             offset = abs((wall.start[0] - start[0]) * nx + (wall.start[1] - start[1]) * ny)
-            if offset > LANE_TOL_FT:
+            if offset > MERGE_LANE_TOL_FT:
                 continue
             t0 = _project(start, ux, uy, wall.start)
             t1 = _project(start, ux, uy, wall.end)
@@ -319,9 +388,12 @@ def merge_collapsed_walls(walls: list[CollapsedWall]) -> list[CollapsedWall]:
             overlap = min(length, hi) - max(0.0, lo)
             if overlap <= 0:
                 continue
-            if not wall.assumed and wall.thickness_ft >= thick:
-                thick = wall.thickness_ft
-                assumed = False
+            if not wall.assumed:
+                # Measured thickness always beats assumed; among measured,
+                # keep the largest (widest overlap wins).
+                if assumed or wall.thickness_ft > thick:
+                    thick = wall.thickness_ft
+                    assumed = False
             elif wall.assumed and assumed:
                 thick = max(thick, wall.thickness_ft)
             structural = merge_structural(structural, wall.structural)

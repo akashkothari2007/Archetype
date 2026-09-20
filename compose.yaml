@@ -10,6 +10,7 @@ services:
       PLANCHECK_LOG_LEVEL: ${PLANCHECK_LOG_LEVEL:-INFO}
     volumes:
       - ./local-data:/data
+      - ./plancheck:/app/plancheck
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/desktop/health')"]
       interval: 5s

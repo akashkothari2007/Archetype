@@ -137,6 +137,8 @@ class Door(BaseModel):
     width_pt: float
     width_ft: float
     swing: DoorSwing | None = None
+    hinge_pt: Point2 | None = None
+    arc_mid_pt: Point2 | None = None
 
 
 class Window(BaseModel):

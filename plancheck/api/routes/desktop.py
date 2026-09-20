@@ -159,16 +159,17 @@ class ChatRequest(RevisionRequest):
     selected_ids:list[str]=Field(default_factory=list)
     floor_id:str=''
     history:list[dict]=Field(default_factory=list)
+    violations:list[dict]|None=None
+    fix_new_issues:bool=True
 
 @router.post('/projects/{pid}/agent')
 def agent(pid:str,body:ChatRequest):
     project=load(pid)
     if project.revision!=body.expected_revision:raise RevisionConflict('The project changed before the repair started')
     def work(report):
-        from plancheck.services.agent import respond
-        report(phase='analyzing',progress=.08,message='Reading the selected model and approved requirements');time.sleep(.3)
-        report(phase='planning',progress=.18,message='Assigning bounded tasks to geometry workers');time.sleep(.3)
-        result=respond(project.building,project.rules,body.message,body.context,body.selected_ids,report,floor_id=body.floor_id or None,history=body.history)
+        from plancheck.services.agent import respond_new
+        report(phase='analyzing',progress=.08,message='Reading the building and approved requirements');time.sleep(.3)
+        result=respond_new(building=project.building,rules=project.rules,prompt=body.message,fix_new_issues=body.fix_new_issues,violations=body.violations,report=report,context=body.context,floor_id=body.floor_id or None,selected_ids=body.selected_ids,history=body.history)
         report(phase='preview-ready',progress=.96,message='Preparing changes for your review')
         run_id=uuid.uuid4().hex[:12];result.update(run_id=run_id,expected_revision=body.expected_revision)
         atomic_json(repo().path(pid)/'repairs'/f'{run_id}.json',result)

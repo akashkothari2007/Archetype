@@ -8,6 +8,8 @@ import {ImportBoard} from './components/ImportBoard';
 import {ImportOverview} from './components/ImportOverview';
 import {SourceCompare} from './components/SourceCompare';
 import {FilePreview} from './components/FilePreview';
+import {ViolationsModal} from './components/ViolationsModal';
+import {NewIssuesDisplay} from './components/NewIssuesDisplay';
 import {Projects} from './components/ProjectSidebar';
 import {HomeSidebar,LogPanel} from './components/LogPanel';
 import type {DesktopProject,DesignBrief,ModelCommand,Job,ProjectSummary,ImportSummary} from './types';
@@ -22,7 +24,14 @@ const desktop=(window as any).archetype as {platform?:string;importFolder:()=>Pr
 const showWindowMenu=desktop?.platform==='win32'||desktop?.platform==='linux';
 function Brand(){return <span className="brand-mark"><svg width="25" height="25" viewBox="0 0 28 28" fill="none"><path d="M4 21V9L14 3l10 6v12l-10 5L4 21Z M4 9l10 6 10-6M14 15v11M9 6l10 6v11" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/></svg></span>}
 function AppMenu(){if(!showWindowMenu)return null;const open=(name:string,e:MouseEvent<HTMLButtonElement>)=>{const r=e.currentTarget.getBoundingClientRect();desktop?.popupMenu?.(name,Math.round(r.left),Math.round(r.bottom))};return <nav className="app-menu">{['File','Edit','View','Help'].map(name=><button key={name} type="button" onClick={e=>open(name,e)}>{name}</button>)}</nav>}
-function Workspace({params}:IDockviewPanelProps){const a=useApp();if(!a.project)return null;const props={building:a.project.building,floorId:a.floor,onCommand:a.command,selectedId:a.selected,onSelect:a.setSelected,units:a.units,busy:!!a.job,checks:a.project.checks,sheets:a.project.sheets,projectId:a.project.project_id,onFloor:a.setFloor,checkPulse:a.checkPulse};return params.mode==='3d'?<ModelView {...props} registerPaint={a.registerPaint}/>:<FloorPlan {...props} layerStop={a.layerStop} onLayerCounts={a.setLayerCounts}/>}
+function Workspace({params}:IDockviewPanelProps){
+  const a=useApp();
+  const [panelVisible,setPanelVisible]=useState(true);
+  useEffect(()=>{const api=params.api;if(!api||typeof api.onDidVisibilityChange!=='function')return;setPanelVisible(api.isVisible);const d=api.onDidVisibilityChange((e:any)=>setPanelVisible(e.isVisible));return()=>d.dispose()},[params.api]);
+  if(!a.project)return null;
+  const props={building:a.project.building,floorId:a.floor,onCommand:a.command,selectedId:a.selected,onSelect:a.setSelected,units:a.units,busy:!!a.job,checks:a.project.checks,sheets:a.project.sheets,projectId:a.project.project_id,onFloor:a.setFloor,checkPulse:a.checkPulse};
+  return params.mode==='3d'?<ModelView {...props} registerPaint={a.registerPaint} visible={panelVisible}/>:<FloorPlan {...props} layerStop={a.layerStop} onLayerCounts={a.setLayerCounts}/>;
+}
 function Assets({params}:IDockviewPanelProps){const a=useApp();return a.project?<AssetLibrary tab={params.tab||'furniture'} mode={a.mode} building={a.project.building} onCommand={a.command} layerStop={a.layerStop} layerCounts={a.layerCounts} onLayerStop={a.setLayerStop}/>:null}
 function Assistant(){
   const a=useApp();
@@ -42,7 +51,7 @@ function Assistant(){
         <button onClick={()=>a.chat('Set evening lighting')}>See it in evening light <ArrowRight size={13}/></button>
         <small>Local demo agent · changes use real geometry tools</small>
       </div>}
-      {a.messages.map((m:any,i:number)=><div key={i} className={'message '+m.role}>{m.role==='assistant'&&<span className="assistant-label"><Brand/> Archetype</span>}<p>{m.text}</p></div>)}
+      {a.messages.map((m:any,i:number)=><div key={i} className={'message '+m.role}>{m.role==='assistant'&&<span className="assistant-label"><Brand/> Archetype</span>}<p>{m.text}</p>{m.role==='assistant'&&m.new_issues_found?.length>0&&<NewIssuesDisplay newIssuesFound={m.new_issues_found} fixedNewIssues={m.fixed_new_issues||[]} unfixedNewIssues={m.unfixed_new_issues||[]} llmCallsMade={m.llm_calls_made||0} onFixRemaining={()=>{const unfixed=m.unfixed_new_issues||[];const vt=unfixed.map((v:any)=>`- ${v.metric?.replaceAll('_',' ')||v.rule_id}: ${v.message}`).join('\n');a.chat(`Fix these remaining issues:\n${vt}`,unfixed,true)}} isLoading={!!a.job}/>}</div>)}
       {a.job&&<div className="thinking"><LoaderCircle size={14} className="spin"/><span>{a.job.message}</span><button onClick={()=>api('/jobs/'+a.job.job_id+'/cancel',{})}>Stop</button></div>}
       {a.summary&&<div className="proposal">
         <div className="proposal-title"><Check size={15}/> {a.summary.commands?.length?'Changes applied':'Nothing changed'}</div>
@@ -74,20 +83,42 @@ function Assistant(){
 }
 function Checks(){
   const a=useApp();
+  const [showViolationsModal,setShowViolationsModal]=useState(false);
   const checks=a.project?.checks||[];
-  const failures=checks.filter((c:any)=>c.status==='fail');
+  const failures=[...checks.filter((c:any)=>c.status==='fail')].sort((x:any,y:any)=>(y.instances_affected||0)-(x.instances_affected||0));
   const quarantined=checks.filter((c:any)=>c.status==='quarantined');
+  const cannotVerify=checks.filter((c:any)=>c.status==='cannot_verify');
+  const passes=checks.filter((c:any)=>c.status==='pass');
+  const CF_KEY='archetype-check-filters';
+  const _cf=(()=>{try{return JSON.parse(localStorage.getItem(CF_KEY)||'{}')}catch{return{}}})();
+  const [showFail,setShowFail]=useState<boolean>(_cf.f!==false);
+  const [showQ,setShowQ]=useState<boolean>(!!_cf.q);
+  const [showU,setShowU]=useState<boolean>(!!_cf.u);
+  const cfPid=useRef(a.project?.project_id);
+  useEffect(()=>{const pid=a.project?.project_id;if(cfPid.current&&pid&&pid!==cfPid.current){setShowFail(true);setShowQ(false);setShowU(false);localStorage.removeItem(CF_KEY)}cfPid.current=pid},[a.project?.project_id]);
+  const cfToggle=(k:'f'|'q'|'u',set:(v:boolean)=>void,v:boolean)=>{const n=!v;set(n);try{const o=JSON.parse(localStorage.getItem(CF_KEY)||'{}');o[k]=n;localStorage.setItem(CF_KEY,JSON.stringify(o))}catch{}};
+  const visibleChecks=[...(showFail?failures:[]),...(showQ?quarantined:[]),...(showU?cannotVerify:[])];
+  const coverage=a.project?.coverage;
+  const checkable=coverage?Math.max(0,(coverage.rules_supported||0)-(coverage.unmatched_rules||[]).length-(coverage.rules_superseded||0)):null;
   return <div className="agent-pane"><div className="review-list">
-    <h3>{failures.length} items to review{quarantined.length?` · ${quarantined.length} quarantined`:''}</h3>
-    <p className="muted">Measured from the current model and your approved requirements.</p>
-    <button className="primary" disabled={!!a.job} onClick={()=>{a.openPanel('assistant');a.chat('Check and fix issues')}}>Prepare repairs</button>
-    {checks.filter((c:any)=>c.status!=='pass').map((c:any)=><button className={'check-item '+c.status} key={c.id} onClick={()=>{a.setSelected(c.entity_id);a.pulseCheck()}}>
+    <h3>{failures.length} issues · {passes.length} checks passed · {quarantined.length} measurements quarantined</h3>
+    <p className="muted">Measured from the current model and your approved requirements.{coverage?` ${checkable} of ${coverage.rules_total} rules checkable.`:''}</p>
+    <div className="check-filters">
+      <button className={'check-chip'+(showFail?' on':'')} onClick={()=>cfToggle('f',setShowFail,showFail)}>Failures <b>{failures.length}</b></button>
+      <button className={'check-chip'+(showQ?' on':'')} onClick={()=>cfToggle('q',setShowQ,showQ)}>Quarantined <b>{quarantined.length}</b></button>
+      <button className={'check-chip'+(showU?' on':'')} onClick={()=>cfToggle('u',setShowU,showU)}>Unverifiable <b>{cannotVerify.length}</b></button>
+    </div>
+    <button className="primary" disabled={!!a.job} onClick={()=>setShowViolationsModal(true)}>Prepare repairs</button>
+    {visibleChecks.map((c:any)=><button className={'check-item '+c.status+(c.status!=='fail'?' check-muted':'')} key={c.id} onClick={()=>{a.setSelected(c.entity_id);a.pulseCheck()}}>
       <span className="check-status">{c.status.replace('_',' ')}</span>
       <strong>{c.metric.replaceAll('_',' ')}</strong>
       <p>{c.message}</p>
+      {(c.status==='quarantined'||c.status==='cannot_verify')&&(c.reason||c.reliability_reason)&&<small className="quarantine-why">{c.reason||c.reliability_reason}</small>}
       <small>{c.source_doc}{c.source_page?` · p. ${c.source_page}`:''}</small>
     </button>)}
-    {!checks.filter((c:any)=>c.status!=='pass').length&&<p>Approve a requirement in Standards to begin checking.</p>}
+    {!visibleChecks.length&&!failures.length&&<p>Approve a requirement in Standards to begin checking.</p>}
+    {!visibleChecks.length&&failures.length>0&&<p className="muted">No checks match the active filters.</p>}
+    {showViolationsModal&&<ViolationsModal violations={failures} onClose={()=>setShowViolationsModal(false)} onRepair={(sel:any[])=>{setShowViolationsModal(false);a.openPanel('assistant');const vt=sel.map((v:any)=>`- ${v.metric?.replaceAll('_',' ')||v.rule_id}: ${v.message}`).join('\n');a.chat(`Repair these issues:\n${vt}`,sel,true)}} isLoading={!!a.job}/>}
   </div></div>;
 }
 function Standards(){
@@ -228,7 +259,7 @@ export default function App(){
   async function history(direction:string){if(!project||saving)return;setSaving(true);try{setProject(await api(`/projects/${project.project_id}/${direction}`,{expected_revision:project.revision}));setProposal(null)}catch(e){setError(String(e))}finally{setSaving(false)}}
   useEffect(()=>{const key=(e:KeyboardEvent)=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes((e.target as HTMLElement)?.tagName)){e.preventDefault();history(e.shiftKey?'redo':'undo')}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[project,saving]);
   useEffect(()=>{if(!desktop?.onMenuCommand)return;return desktop.onMenuCommand(cmd=>{if(cmd==='new-project')newProject();if(cmd==='import')importFolder();if(cmd==='close-project'){setProject(null);setIntake(false);setOverview(null);setPendingPid(null)}if(cmd==='undo')history('undo');if(cmd==='redo')history('redo');if(cmd==='reset-layout'){localStorage.removeItem('archetype-layout');setLayoutKey(k=>k+1)}})},[project,saving]);
-  async function chat(text:string){if(!project||job)return;openPanel('assistant');const turn={role:'user',text};setMessages(m=>[...m,turn]);setProposal(null);setSummary(null);try{const {job_id}=await api(`/projects/${project.project_id}/agent`,{expected_revision:project.revision,message:text,context:mode,floor_id:floor,selected_ids:selected?[selected]:[],history:[...messages,turn].slice(-6).map((m:any)=>({role:m.role,text:m.text}))});const result=await waitJob(job_id,setJob);setMessages(m=>[...m,{role:'assistant',text:result.message}]);if(result.intent==='appear'&&result.appearance_prompt){dock.current?.getPanel('model')?.api.setActive();for(let i=0;i<40&&!painter.current;i++)await new Promise(r=>setTimeout(r,50));if(!painter.current)setMessages(m=>[...m,{role:'assistant',text:'Open the 3D Model tab so I can paint the exterior.'}]);else await painter.current(result.appearance_prompt);return}if(result.commands?.length){if(result.applied){setProject(await api('/projects/'+project.project_id));setSummary(result)}else{try{const p=current.current||project;setProject(await api(`/projects/${p.project_id}/repairs/${result.run_id}/apply`,{expected_revision:p.revision}));setSummary(result)}catch{setProposal(result)}}}else if(result.blocked?.length)setProposal(result)}catch(e){setError(String(e))}finally{setJob(null)}}
+  async function chat(text:string,violations:any[]=[],fixNewIssues:boolean=true){if(!project||job)return;openPanel('assistant');const turn={role:'user',text};setMessages(m=>[...m,turn]);setProposal(null);setSummary(null);try{const {job_id}=await api(`/projects/${project.project_id}/agent`,{expected_revision:project.revision,message:text,context:mode,floor_id:floor,selected_ids:selected?[selected]:[],history:[...messages,turn].slice(-6).map((m:any)=>({role:m.role,text:m.text})),violations:violations.length>0?violations:null,fix_new_issues:fixNewIssues});const result=await waitJob(job_id,setJob);setMessages(m=>[...m,{role:'assistant',text:result.message,new_issues_found:result.new_issues_found,fixed_new_issues:result.fixed_new_issues,unfixed_new_issues:result.unfixed_new_issues,llm_calls_made:result.llm_calls_made}]);if(result.intent==='appear'&&result.appearance_prompt){dock.current?.getPanel('model')?.api.setActive();for(let i=0;i<40&&!painter.current;i++)await new Promise(r=>setTimeout(r,50));if(!painter.current)setMessages(m=>[...m,{role:'assistant',text:'Open the 3D Model tab so I can paint the exterior.'}]);else await painter.current(result.appearance_prompt);return}if(result.commands?.length){if(result.applied){setProject(await api('/projects/'+project.project_id));setSummary(result)}else{try{const p=current.current||project;setProject(await api(`/projects/${p.project_id}/repairs/${result.run_id}/apply`,{expected_revision:p.revision}));setSummary(result)}catch{setProposal(result)}}}else if(result.blocked?.length)setProposal(result)}catch(e){setError(String(e))}finally{setJob(null)}}
   async function apply(){if(!project||!proposal)return;setSaving(true);try{setProject(await api(`/projects/${project.project_id}/repairs/${proposal.run_id}/apply`,{expected_revision:project.revision}));setSummary(proposal);setProposal(null)}catch(e){setError(String(e))}finally{setSaving(false)}}
   async function review(id:string,status:string,changes:object){if(!project)return;try{setProject(await api(`/projects/${project.project_id}/rules/${id}`,{expected_revision:project.revision,status,changes},'PATCH'));setProposal(null)}catch(e){setError(String(e))}}
   async function importFolder(){if(desktop){try{const result=await desktop.importFolder();if(!result)return;if(result.job_id){setImportPid(result.project_id||null);const done=await waitJob(result.job_id,setJob);await refresh();if(done.summary){setOverview(done.summary);setPendingPid(done.project_id)}else await open(done.project_id)}else{await refresh();await open(result.project_id)}}catch(e){setError(String(e))}finally{setJob(null);setImportPid(null)}}else input.current?.click()}
