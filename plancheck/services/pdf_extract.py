@@ -3,7 +3,7 @@ from pathlib import Path
 from collections import Counter
 import hashlib,math,re,shutil
 import pymupdf
-from plancheck.core.schemas import Sheet,SheetGeometry,Wall,Door,Window,Fixture,RoomTag,RasterRef,Dimension
+from plancheck.core.schemas import Sheet,SheetGeometry,Wall,Door,Window,Fixture,RoomTag,RasterRef,Dimension,GridBubble,MepEquipment,MepSheetData,SheetGrid
 from plancheck.core.layers import bucket_for,normalise
 from plancheck.core.settings import get_settings
 
@@ -241,6 +241,7 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
    if candidates:
     region=min(candidates,key=lambda f:(abs(f[1]-rr[3]),(f[2]-f[0])*(f[3]-f[1])))
     if not any(math.dist(region,r['bbox_pt'])<1 for r in geom.regions):geom.regions.append({'id':f'{sheet.sheet_id}-region-{len(geom.regions)+1}','name':name,'bbox_pt':region,'scale_pts_per_ft':scale,'kind':'unit','confidence':.95})
+  geom.grid.bubbles=extract_grid_bubbles(page,xy,rect)
   geom.excluded.furniture=counts['furniture'];geom.excluded.wall_hatch=counts['wall_hatch'];geom.excluded.unmapped=counts['unmapped']
   geom.extraction_stats={'paths':len(drawings),**dict(counts),'regions':len(geom.regions),'raw_walls':len(geom.walls),'door_fragments':len(door_frags),'door_clusters':len(geom.doors)+rejected,'door_rejected':rejected,'extraction_warnings':rejected}
   if scale and geom.walls:
@@ -253,6 +254,161 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
   write_wall_thumb(geom,thumb_path(raster))
   geom.raster=RasterRef(dpi=43.2,file=f'sheets/{raster.name}',size_px=[pix.width,pix.height])
   return geom
+
+_GRID_LABEL_RE=re.compile(r'^[A-Za-z]{1,2}$|^\d{1,2}[a-z]?$')
+
+_HVAC_TAG_RE=re.compile(r'^(PTAC|RTU-\d+|EF-\d+|AHU-\d+|VAV-\d+|HP-\d+)$')
+_PLUMB_TAG_RE=re.compile(r'^(WC-\d+|LAV-\d+|SH-\d+|FD|CO|RD|P-\d+)$')
+
+_HVAC_KIND={
+ 'PTAC':'hvac','RTU':'hvac','EF':'hvac','AHU':'hvac','VAV':'hvac','HP':'hvac',
+}
+_PLUMB_KIND={
+ 'WC':'plumbing','LAV':'plumbing','SH':'plumbing','FD':'plumbing','CO':'plumbing','RD':'plumbing','P':'plumbing',
+}
+
+def _kind_from_tag(tag:str)->str:
+ prefix=re.split(r'[-\d]',tag)[0].upper()
+ return _HVAC_KIND.get(prefix,_PLUMB_KIND.get(prefix,'unknown'))
+
+def extract_grid_bubbles(page,xy_fn,rect_fn)->list[GridBubble]:
+ """Extract grid bubble labels from sheet margins."""
+ width,height=page.rect.width,page.rect.height
+ margin_x=width*0.05
+ margin_y=height*0.05
+ bubbles=[]
+ for block in page.get_text('dict')['blocks']:
+  for line in block.get('lines',[]):
+   for span in line.get('spans',[]):
+    text=span['text'].strip()
+    if not text or not _GRID_LABEL_RE.match(text):continue
+    rr=rect_fn(span['bbox'])
+    cx,cy=(rr[0]+rr[2])/2,(rr[1]+rr[3])/2
+    # Must be at sheet margins (within 5% of edges)
+    at_left=rr[0]<margin_x
+    at_right=rr[2]>width-margin_x
+    at_top=rr[3]>height-margin_y  # y-up: top of sheet = high y
+    at_bottom=rr[1]<margin_y
+    if not (at_left or at_right or at_top or at_bottom):continue
+    # Deduplicate: don't add if same label already nearby
+    dup=False
+    for existing in bubbles:
+     if existing.label.upper()==text.upper() and math.dist(existing.xy,[cx,cy])<width*0.02:
+      dup=True;break
+    if not dup:
+     bubbles.append(GridBubble(label=text,xy=[cx,cy]))
+ return bubbles
+
+
+def extract_mep(sheet:Sheet,path:Path,raster_path:Path)->MepSheetData:
+ """Extract MEP equipment and grid bubbles from a PDF sheet page."""
+ discipline=sheet.discipline or 'unknown'
+ with pymupdf.open(path) as doc:
+  page=doc[sheet.page-1]
+  height=page.rect.height
+  def xy(p):
+   q=pymupdf.Point(p)*page.rotation_matrix
+   return [float(q.x),float(height-q.y)]
+  def rect(r):
+   q=pymupdf.Rect(r)*page.rotation_matrix
+   return [float(q.x0),float(height-q.y1),float(q.x1),float(height-q.y0)]
+
+  # Grid bubbles
+  bubbles=extract_grid_bubbles(page,xy,rect)
+  grid=SheetGrid(bubbles=bubbles)
+
+  equipment:list[MepEquipment]=[]
+  flattened=True
+  flattened_reason=''
+  layer_map:dict[str,str]={}
+
+  if discipline=='electrical':
+   # Electrical: try layered PDF — only load drawings for electrical
+   drawings=page.get_drawings()
+   layer_names={normalise(d.get('layer')) for d in drawings}
+   layer_names.discard('')
+   layer_map={name:name for name in layer_names}
+   is_layered=len(layer_names)>1
+   if is_layered:
+    flattened=False
+    eq_layers={'e-lite-eqpm','e-equipment'}
+    eq_frags:list[list[float]]=[]
+    for d in drawings:
+     layer=normalise(d.get('layer'))
+     if layer.lower() not in eq_layers:continue
+     rr=rect(d['rect'])
+     eq_frags.append(rr)
+    del drawings  # free memory
+    if eq_frags:
+     cell=30.0
+     buckets:dict[tuple[int,int],list[int]]={}
+     for i,box in enumerate(eq_frags):
+      gx=int(box[0]//cell);gy=int(box[1]//cell)
+      for dx in range(-1,2):
+       for dy in range(-1,2):
+        buckets.setdefault((gx+dx,gy+dy),[]).append(i)
+     parent=list(range(len(eq_frags)));rank=[0]*len(eq_frags)
+     def find(i):
+      while parent[i]!=i:parent[i]=parent[parent[i]];i=parent[i]
+      return i
+     def union(a,b):
+      a,b=find(a),find(b)
+      if a==b:return
+      if rank[a]<rank[b]:parent[a]=b
+      elif rank[a]>rank[b]:parent[b]=a
+      else:parent[b]=a;rank[a]+=1
+     for idxs in buckets.values():
+      for ai in range(len(idxs)):
+       for bi in range(ai+1,len(idxs)):
+        ia,ib=idxs[ai],idxs[bi]
+        a,b=eq_frags[ia],eq_frags[ib]
+        if a[0]<b[2] and b[0]<a[2] and a[1]<b[3] and b[1]<a[3]:
+         union(ia,ib)
+     groups:dict[int,list[int]]={}
+     for i in range(len(eq_frags)):groups.setdefault(find(i),[]).append(i)
+     for group in groups.values():
+      xs=[c for i in group for c in (eq_frags[i][0],eq_frags[i][2])]
+      ys=[c for i in group for c in (eq_frags[i][1],eq_frags[i][3])]
+      cx=(min(xs)+max(xs))/2;cy=(min(ys)+max(ys))/2
+      kind='lighting' if any('lite' in normalise(eq_frags[g][0] if False else '').lower() for g in group[:0]) else 'power'
+      equipment.append(MepEquipment(tag=None,xy_pt=[cx,cy],bbox=[min(xs),min(ys),max(xs),max(ys)],discipline='electrical',kind=kind))
+   else:
+    # Flattened electrical — fall through to text extraction below
+    flattened_reason=f"Single-layer PDF; ~{len(drawings)} paths on one layer"
+    del drawings
+
+  if flattened:
+   # HVAC/Plumbing/flattened electrical: text-only extraction (no get_drawings needed)
+   if not flattened_reason:
+    flattened=True
+    flattened_reason='Text-based extraction'
+   for block in page.get_text('dict')['blocks']:
+    for line in block.get('lines',[]):
+     for span in line.get('spans',[]):
+      text=span['text'].strip()
+      if not text:continue
+      rr=rect(span['bbox'])
+      cx,cy=(rr[0]+rr[2])/2,(rr[1]+rr[3])/2
+      if _HVAC_TAG_RE.match(text):
+       equipment.append(MepEquipment(tag=text,xy_pt=[cx,cy],bbox=rr,discipline='mechanical',kind=_kind_from_tag(text)))
+      elif _PLUMB_TAG_RE.match(text):
+       equipment.append(MepEquipment(tag=text,xy_pt=[cx,cy],bbox=rr,discipline='plumbing',kind=_kind_from_tag(text)))
+
+  # Save raster — same DPI as architectural (43.2) to avoid OOM on large MEP sheets
+  raster_path.parent.mkdir(parents=True,exist_ok=True)
+  pix=page.get_pixmap(matrix=pymupdf.Matrix(.6,.6),alpha=False)
+  pix.save(raster_path)
+
+  return MepSheetData(
+   sheet_id=sheet.sheet_id,
+   discipline=discipline,
+   equipment=equipment,
+   grid=grid,
+   flattened=flattened,
+   flattened_reason=flattened_reason,
+   layer_map=layer_map,
+  )
+
 
 def extract_cached(sheet:Sheet,path:Path,raster:Path,digest:str|None=None)->tuple[SheetGeometry,bool]:
  digest=digest or file_digest(path)

@@ -5,7 +5,7 @@ import type { KonvaEventObject } from 'konva/lib/Node'
 import { MousePointer2, Hand, Ruler, Plus, Minus, Maximize, PencilLine, Scissors, Link, Copy, Trash2, LockKeyhole, RotateCw, Magnet, X, Eye, EyeOff } from 'lucide-react'
 import { assetMime, distance, floorBounds, interiorPoint, lengthLabel, placementCommand, polygonArea, projectPoint, type Asset, type EditorProps, type Point } from './editor-geometry'
 import { base } from '../api'
-import type { Check, Floor, SheetCard } from '../types'
+import type { Check, Floor, SheetCard, MepData, MepDisciplineLayer } from '../types'
 import './editor-view.css'
 
 type Tool = 'select' | 'pan' | 'wall' | 'measure'
@@ -39,6 +39,7 @@ const LAYER_STOPS: { id: LayerStop; label: string }[] = [
 ]
 const revealedSheets = new Set<string>()
 const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+const MEP_COLORS: Record<string, string> = { mechanical: '#2196F3', electrical: '#FF9800', plumbing: '#4CAF50' }
 
 function loadRaster(url: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -178,6 +179,10 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const [sonarSettled, setSonarSettled] = useState(true)
   const [blastAt, setBlastAt] = useState(0)
   const [shownCount, setShownCount] = useState(0)
+  const [mepData, setMepData] = useState<MepData | null>(null)
+  const [activeDiscipline, setActiveDiscipline] = useState<string>('architectural')
+  const [mepRasters, setMepRasters] = useState<{sheetId: string, img: HTMLImageElement, layer: MepDisciplineLayer}[]>([])
+  const [mepOpacity, setMepOpacity] = useState(0.45)
   const sheet = useMemo(() => (sheets || []).find(s => s.extracted && s.floor_ids?.includes(floorId)) || (sheets || []).find(s => s.extracted), [sheets, floorId])
   const revealKey = sheet?.sheet_id || floorId
   const baseVertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
@@ -247,6 +252,50 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     else setRaster(null)
     return () => { live = false }
   }, [sheet?.sheet_id, sheet?.geometry_url, sheet?.raster_url, projectId])
+  // Fetch mep.json once when project loads
+  useEffect(() => {
+    if (!projectId) { setMepData(null); return }
+    let live = true
+    fetch(`${base}/projects/${projectId}/mep`).then(r => r.json()).then((data: MepData) => {
+      console.log('[MEP] fetched', projectId, 'floors=', data.floors?.length, 'raw=', data)
+      if (live && data.floors?.length) setMepData(data); else if (live) setMepData(null)
+    }).catch((e) => { console.error('[MEP] fetch error', e); if (live) setMepData(null) })
+    return () => { live = false }
+  }, [projectId])
+  // Compute available disciplines for current floor
+  const mepFloor = useMemo(() => mepData?.floors?.find(f => f.floor_id === floorId) || mepData?.floors?.[0] || null, [mepData, floorId])
+  const availableDisciplines = useMemo(() => {
+    const set = new Set<string>(['architectural'])
+    if (mepFloor) for (const d of mepFloor.disciplines) set.add(d.discipline)
+    const result = [...set]
+    console.log('[MEP] availableDisciplines=', result, 'mepFloor=', mepFloor?.floor_id, 'floorId=', floorId)
+    return result
+  }, [mepFloor])
+  const activeLayers: MepDisciplineLayer[] = useMemo(() => {
+    if (activeDiscipline === 'architectural' || !mepFloor) return []
+    return mepFloor.disciplines.filter(d => d.discipline === activeDiscipline)
+  }, [activeDiscipline, mepFloor])
+  const allMepEquipment = useMemo(() => activeLayers.flatMap(l => l.equipment), [activeLayers])
+  // Load MEP rasters — only sheets with equipment, capped at 8 to limit memory
+  const rasterLayers = useMemo(() => activeLayers.filter(l => l.raster_url && l.equipment.length > 0).slice(0, 8), [activeLayers])
+  useEffect(() => {
+    setMepRasters([])
+    if (!rasterLayers.length || !projectId) return
+    let live = true
+    const loads = rasterLayers.map(l =>
+      loadRaster(`${base}/projects/${projectId}/files/${l.raster_url}`)
+        .then(img => ({ sheetId: l.sheet_id, img, layer: l }))
+        .catch(() => null)
+    )
+    Promise.all(loads).then(results => {
+      if (live) setMepRasters(results.filter((r): r is {sheetId: string, img: HTMLImageElement, layer: MepDisciplineLayer} => r !== null))
+    })
+    return () => { live = false }
+  }, [rasterLayers.map(l => l.sheet_id).join(','), projectId])
+  // Reset to architectural if discipline no longer available
+  useEffect(() => {
+    if (!availableDisciplines.includes(activeDiscipline)) setActiveDiscipline('architectural')
+  }, [availableDisciplines, activeDiscipline])
   useEffect(() => {
     if (!floorWalls.length) { setRevealing(false); return }
     if (reducedMotion() || revealedSheets.has(revealKey)) { revealedSheets.add(revealKey); setRevealing(false); return }
@@ -506,12 +555,34 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
           <button key={stop.id} type="button" className={layerStop === stop.id ? 'active' : layerStop > stop.id ? 'passed' : ''} onClick={() => setLayerStop(stop.id)}>{stop.label}</button>
         ))}
       </div>
-      {raster && <div className="xray-raster">
+      {raster && activeDiscipline === 'architectural' && <div className="xray-raster">
         <button type="button" title="Toggle source raster" onClick={() => setRasterOpacity(o => o > 0 ? 0 : 0.3)}>{rasterOpacity > 0 ? <Eye size={11} /> : <EyeOff size={11} />}</button>
         <span>Raster</span>
         <input type="range" min={0} max={0.8} step={0.05} value={rasterOpacity} aria-label="Raster opacity" onChange={e => setRasterOpacity(Number(e.target.value))} />
       </div>}
+      {activeDiscipline !== 'architectural' && mepRasters.length > 0 && <div className="xray-raster">
+        <button type="button" title="Toggle MEP overlay" onClick={() => setMepOpacity(o => o > 0 ? 0 : 0.45)}>{mepOpacity > 0 ? <Eye size={11} /> : <EyeOff size={11} />}</button>
+        <span>MEP ({activeLayers.length} sheets, {allMepEquipment.length} items)</span>
+        <input type="range" min={0} max={0.8} step={0.05} value={mepOpacity} aria-label="MEP overlay opacity" onChange={e => setMepOpacity(Number(e.target.value))} />
+      </div>}
     </div>
+    <div className="discipline-tabs">
+      {availableDisciplines.length > 1
+        ? availableDisciplines.map(d => (
+            <button key={d} type="button" className={activeDiscipline === d ? 'active' : ''} onClick={() => setActiveDiscipline(d)}>{d.charAt(0).toUpperCase() + d.slice(1)}</button>
+          ))
+        : <span style={{padding:'5px 10px',fontSize:10,color:'#999'}}>MEP: {mepData ? `${mepData.floors.length} floors` : 'loading...'}</span>
+      }
+    </div>
+    {activeLayers.length > 0 && <div className="mep-badge" role="status">
+      {(() => {
+        const best = activeLayers.find(l => l.registration.confidence !== 'manual')
+        return best
+          ? `Aligned to grid ${best.registration.matched_labels.join(', ')} · ${best.registration.rms_error_ft.toFixed(2)} ft RMS`
+          : 'Manual alignment'
+      })()}
+      <span className={`mep-confidence-${activeLayers[0].registration.confidence}`}>{activeLayers[0].registration.confidence}</span>
+    </div>}
     {selection.length > 0 && <div className="editor-selection-tools" role="toolbar" aria-label="Selection tools">
       <span>{selection.length > 1 ? `${selection.length} selected` : selectedWall ? 'Wall' : selectedOpening?.kind || selectedObject?.asset_id.replaceAll('_', ' ') || selectedRoom?.name || 'Selection'}</span>
       {(selectedWall || selectedObject) && <><button title="Rotate 15°" aria-label="Rotate selection 15 degrees" onClick={() => rotate(15)}><RotateCw size={14} /></button><button title="Duplicate" aria-label="Duplicate selection" onClick={() => onCommand(selection.map(id => ({ kind: 'duplicate', target_id: id, params: { dx: 2, dy: 2 } })))}><Copy size={14} /></button></>}
@@ -534,6 +605,23 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
           </Group>
         })}
         {rasterOpacity > 0 && raster && world.width > 0 && <KonvaImage image={raster} x={0} y={world.height} width={world.width} height={world.height} scaleY={-1} opacity={rasterOpacity} listening={false} />}
+        {activeDiscipline !== 'architectural' && mepRasters.length > 0 && world.width > 0 && mepRasters.map(({ sheetId, img, layer }) => {
+          const tf = layer.transform
+          const s = Math.sqrt(tf[0] * tf[0] + tf[3] * tf[3])
+          const rot = Math.atan2(tf[3], tf[0])
+          const pxPerPt = 0.6
+          return <KonvaImage
+            key={sheetId}
+            image={img}
+            x={tf[2] / scale}
+            y={world.height - tf[5] / scale}
+            scaleX={s / scale / pxPerPt}
+            scaleY={-s / scale / pxPerPt}
+            rotation={rot * 180 / Math.PI}
+            opacity={mepOpacity}
+            listening={false}
+          />
+        })}
         {walls.map(wall => {
           const a = vertexAt(wall.start_id), b = vertexAt(wall.end_id)
           if (!a || !b) return null
@@ -576,6 +664,15 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
           return (chosen || length > 5) ? <Group key={wall.id} x={(a.x + b.x) / 2 - normal.x * (wall.thickness_ft / 2 + .55)} y={(a.y + b.y) / 2 - normal.y * (wall.thickness_ft / 2 + .55)} rotation={angle * 180 / Math.PI + (angle > Math.PI / 2 || angle < -Math.PI / 2 ? 180 : 0)}><Text text={lengthLabel(length, units)} x={-3} y={-.27} width={6} align="center" fontSize={Math.max(.28, Math.min(.5, 10 / view.scale))} fill="#72777b" /></Group> : null
         })}
       </Layer>
+      {allMepEquipment.length > 0 && <Layer listening={false}>
+        {allMepEquipment.map((eq, i) => {
+          const color = MEP_COLORS[activeDiscipline] || '#999'
+          return <Group key={`mep-${i}`} x={eq.xy_ft[0]} y={eq.xy_ft[1]}>
+            <Circle radius={0.35} fill={color} opacity={0.85} />
+            {eq.tag && <Text x={0.5} y={-0.25} text={eq.tag} fontSize={Math.max(0.35, Math.min(0.55, 10 / view.scale))} fill={color} fontFamily="Inter, -apple-system, sans-serif" />}
+          </Group>
+        })}
+      </Layer>}
     </Stage>
     {revealing && <PlotterOverlay segs={plotter.segs} labels={plotter.labels} fixtures={sheetFixtures} rooms={plotter.roomPolys} view={view} size={size} skip={reducedMotion()} />}
     {!revealing && <PlanFx view={view} size={size} floorId={floorId} hatch={hatch} pings={pingRooms} flash={flash} fixtures={sheetFixtures} showFixtures={fixturesVisible} pinging={!!sonarKey && !sonarSettled} flashing={blastAt > 0 && blastHere.length > 0} />}

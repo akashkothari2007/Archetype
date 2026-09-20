@@ -105,6 +105,13 @@ def apply_commands(building: Building, commands: list[ModelCommand|dict], actor:
             neighbors=[wall for wall in b.walls if wall.id!=w.id and (wall.start_id in keys or wall.end_id in keys)]
             fixed=[wall for wall in neighbors if wall.locked or wall.structural!='nonstructural']
             before=unary_union([LineString([(a.x,a.y),(c.x,c.y)]).buffer(wall.thickness_ft/2,cap_style=2) for wall in fixed for a,c in [wall_points(b,wall)]])
+            # Snapshot neighbor orientations before the move
+            _AXIS_TOL=0.05
+            nbr_orient={}
+            for nb in neighbors:
+                a,c=wall_points(b,nb)
+                if abs(a.y-c.y)<_AXIS_TOL:nbr_orient[nb.id]='h'
+                elif abs(a.x-c.x)<_AXIS_TOL:nbr_orient[nb.id]='v'
             opening_positions={}
             for o in b.openings:
                 if o.wall_id in {wall.id for wall in neighbors}:
@@ -113,6 +120,43 @@ def apply_commands(building: Building, commands: list[ModelCommand|dict], actor:
             for key in keys:vs[key].x+=dx;vs[key].y+=dy
             after=unary_union([LineString([(a.x,a.y),(c.x,c.y)]).buffer(wall.thickness_ft/2,cap_style=2) for wall in fixed for a,c in [wall_points(b,wall)]])
             if before.symmetric_difference(after).area>1e-4:raise CommandError('Partition movement changes locked structural geometry')
+            # Auto-correct diagonals: if a neighbor was axis-aligned and is now diagonal,
+            # propagate the offset to its other endpoint, or decouple the vertex if pinned.
+            decoupled={}  # moved_vid -> new_vid (avoid duplicate vertices per shared endpoint)
+            for nb in neighbors:
+                orient=nbr_orient.get(nb.id)
+                if not orient:continue  # was already diagonal, leave it
+                if nb.locked or nb.structural!='nonstructural':continue
+                a,c=wall_points(b,nb)
+                still_aligned=(abs(a.y-c.y)<_AXIS_TOL) if orient=='h' else (abs(a.x-c.x)<_AXIS_TOL)
+                if still_aligned:continue  # still axis-aligned, fine
+                # Determine which endpoint was NOT moved (the "far" one)
+                moved_vid=nb.start_id if nb.start_id in keys else nb.end_id
+                far_vid=nb.end_id if moved_vid==nb.start_id else nb.start_id
+                # Check if far vertex is pinned to a locked/structural wall
+                far_pinned=any(ow for ow in b.walls if ow.id!=nb.id and (ow.start_id==far_vid or ow.end_id==far_vid) and (ow.locked or ow.structural!='nonstructural'))
+                if far_pinned:
+                    # Decouple: create a new vertex at the original position and redirect
+                    # the neighbor, adding a short step wall to bridge the gap.
+                    if moved_vid not in decoupled:
+                        ox=vs[moved_vid].x-dx;oy=vs[moved_vid].y-dy
+                        step_len=math.hypot(dx,dy)
+                        if step_len<0.02:
+                            for key in keys:vs[key].x-=dx;vs[key].y-=dy
+                            raise CommandError(f'Offset too small to decouple vertex on {nb.id}')
+                        nv=Vertex(id=uid('v'),floor_id=nb.floor_id,x=ox,y=oy)
+                        b.vertices.append(nv);vs[nv.id]=nv
+                        sw=BuildingWall(id=uid('wall'),floor_id=nb.floor_id,start_id=nv.id,end_id=moved_vid,
+                                        thickness_ft=w.thickness_ft,height_ft=w.height_ft,structural='nonstructural',locked=False)
+                        b.walls.append(sw)
+                        decoupled[moved_vid]=nv.id
+                    new_vid=decoupled[moved_vid]
+                    if nb.start_id==moved_vid:nb.start_id=new_vid
+                    else:nb.end_id=new_vid
+                else:
+                    # Propagate: move far vertex to restore alignment
+                    if orient=='h':vs[far_vid].y+=dy
+                    else:vs[far_vid].x+=dx
             for o in b.openings:
                 if o.id in opening_positions:
                     host=ws[o.wall_id];a,c=wall_points(b,host);length=wall_length(b,host);x,y=opening_positions[o.id]

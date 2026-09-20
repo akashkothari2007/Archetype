@@ -50,7 +50,7 @@ KEYWORD_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 TITLE_KEYWORDS = tuple(name for name, _ in KEYWORD_PATTERNS)
 
 USABLE_ROLES = frozenset(
-    {"unit_plan", "enlarged_plan", "floor_plan", "schedule"}
+    {"unit_plan", "enlarged_plan", "floor_plan", "schedule", "mep_plan"}
 )
 DRAWING_STAT_ROLES = frozenset({"floor_plan", "enlarged_plan", "unit_plan"})
 ENLARGED_MIN_PTS_PER_FT = 13.0
@@ -74,6 +74,7 @@ REASONS: dict[str, str] = {
     "detail": "Construction detail. No room data.",
     "roof": "Roof plan. No rooms.",
     "site": "Site plan. Property lines and grading, nothing interior.",
+    "mep_plan": "MEP plan sheet. Equipment overlay for coordination view.",
     "unknown": "Title block did not parse, so the sheet role is undetermined.",
 }
 
@@ -213,9 +214,16 @@ def assign_role(
     sheet_no: str | None,
     title: str | None,
     pts_per_ft: float | None,
+    discipline: str | None = None,
 ) -> str:
     no = sheet_no or ""
     t = title or ""
+    # MEP discipline check FIRST — M/E/P sheets never produce architectural geometry.
+    if discipline in ("mechanical", "electrical", "plumbing"):
+        if any(kw in t for kw in ("PLAN", "FLOOR", "LAYOUT")):
+            return "mep_plan"
+        # Non-plan MEP sheets (schedules, details, risers) → unknown, skipped
+        return "unknown"
     if no.startswith("A.8") or "UNIT PLAN" in t:
         return "unit_plan"
     if "FLOOR PLAN" in t:
@@ -261,7 +269,11 @@ def classify_page(
     scale_text, pts_per_ft = find_scale(title_block)
     if scale_text is None:
         scale_text, pts_per_ft = find_scale(text)
-    role = assign_role(sheet_no, keyword_title or title, pts_per_ft)
+    disc = discipline_of(sheet_no)
+    # For MEP sheets, prefer the full field title (has FLOOR/PLAN/LAYOUT keywords)
+    # over the keyword-parsed title which may be misleading (e.g. "SITE").
+    role_title = title if disc in ("mechanical", "electrical", "plumbing") else (keyword_title or title)
+    role = assign_role(sheet_no, role_title, pts_per_ft, discipline=disc)
     use = role in USABLE_ROLES
     levels = parse_levels(field_title) or parse_levels(title)
 
@@ -280,7 +292,7 @@ def classify_page(
         page=page_no,
         sheet_no=sheet_no,
         title=title,
-        discipline=discipline_of(sheet_no),
+        discipline=disc,
         role=role,  # type: ignore[arg-type]
         scale_text=scale_text,
         scale_pts_per_ft=pts_per_ft,
@@ -296,6 +308,18 @@ def classify_page(
         ),
         geometry_file=None,
     )
+
+
+def _discipline_from_filename(name: str) -> str | None:
+    """Infer MEP discipline from document filename."""
+    lower = name.lower()
+    if any(w in lower for w in ("hvac", "mech", "mechanical")):
+        return "mechanical"
+    if "plumb" in lower:
+        return "plumbing"
+    if "elec" in lower:
+        return "electrical"
+    return None
 
 
 def classify_document(
@@ -317,8 +341,30 @@ def classify_document(
             sheets.append(sheet)
             if on_progress:
                 on_progress(index + 1, total, sheet)
-        counts = collections.Counter(s.discipline for s in sheets)
-        discipline = counts.most_common(1)[0][0] if counts else "unknown"
+        # Determine document-level discipline.
+        # Filename is the strongest signal (user named the file), then sheet numbers.
+        file_disc = _discipline_from_filename(path.name)
+        if file_disc:
+            discipline = file_disc
+        else:
+            known = [s.discipline for s in sheets if s.discipline != "unknown"]
+            counts = collections.Counter(known)
+            discipline = counts.most_common(1)[0][0] if counts else "unknown"
+        # Backfill: pages with unknown discipline in an MEP document inherit the
+        # document discipline, then re-classify their role.
+        if discipline in ("mechanical", "electrical", "plumbing"):
+            for sheet in sheets:
+                if sheet.discipline == "unknown":
+                    sheet.discipline = discipline
+                    new_role = assign_role(
+                        sheet.sheet_no,
+                        sheet.title,
+                        sheet.scale_pts_per_ft,
+                        discipline=discipline,
+                    )
+                    sheet.role = new_role
+                    sheet.use = new_role in USABLE_ROLES
+                    sheet.reason = reason_for(new_role, sheet.use, sheet.title)
         document = Document(
             doc_id=doc_id,
             filename=path.name,

@@ -37,6 +37,7 @@ SKIP_LABELS = {
     'site':'site — no interior',
     'slab_edge':'slab edge — no rooms',
     'enlarged_plan':'enlarged — gated',
+    'mep_plan':'MEP plan — equipment overlay',
     'unknown':'title did not parse',
 }
 
@@ -526,6 +527,25 @@ def sheet_card(sheet:Sheet,geom:SheetGeometry|None=None,extracted=False)->dict:
         'levels':list(sheet.levels or []),
         'scale_pts_per_ft':sheet.scale_pts_per_ft,
         'size_pt':list(geom.size_pt) if geom else None,
+        'discipline':sheet.discipline if sheet.discipline!='unknown' else 'architectural',
+    }
+
+def sheet_card_mep(sheet:Sheet,mep_data=None)->dict:
+    title=sheet.title or ''
+    return {
+        'sheet_id':sheet.sheet_id,'sheet_no':sheet.sheet_no or f'p.{sheet.page}','title':title,'role':sheet.role,
+        'page':sheet.page,'use':sheet.use,'extracted':True,
+        'reason':'',
+        'walls':0,'rooms':0,'doors':0,'windows':0,
+        'thumb_url':'',
+        'raster_url':f'sheets/{sheet.sheet_id}.raster.png',
+        'geometry_url':'',
+        'levels':list(sheet.levels or []),
+        'scale_pts_per_ft':sheet.scale_pts_per_ft,
+        'size_pt':None,
+        'discipline':sheet.discipline if sheet.discipline!='unknown' else 'architectural',
+        'equipment_count':len(mep_data.equipment) if mep_data else 0,
+        'mep_data_url':f'sheets/{sheet.sheet_id}.mep.json' if mep_data else '',
     }
 
 def _type_ref(name:str,category:str)->str:
@@ -750,13 +770,15 @@ def import_document(document:dict,project_dir:str,progress_path:str|None=None)->
         print(f"[import] cad {path.name} {time.perf_counter()-started:.2f}s",flush=True)
         return {'building':building.model_dump(mode='json'),'sheets':[],'timings':{'total':time.perf_counter()-started}}
     from plancheck.engines.classify import classify_document
-    from plancheck.services.pdf_extract import extract_cached,file_digest
+    from plancheck.services.pdf_extract import extract_cached,file_digest,extract_mep
+    from plancheck.services.mep import register_sheet,assign_rooms,build_mep_json
     total_t=time.perf_counter()
     emit_progress(progress_path,{'kind':'phase','phase':'classify','message':f'Classifying pages in {path.name}','progress':0.02})
     classify_t=time.perf_counter()
     _document,sheets=classify_document(path,did)
     print(f"[import] classify {path.name} {time.perf_counter()-classify_t:.2f}s ({len(sheets)} pages)",flush=True)
-    selected=[s for s in sheets if should_extract_sheet(s)]
+    selected=[s for s in sheets if should_extract_sheet(s) and s.role!='mep_plan']
+    mep_sheets=[s for s in sheets if s.role=='mep_plan']
     cards=[sheet_card(s,extracted=False) for s in sheets]
     emit_progress(progress_path,{'kind':'classified','sheets':cards,'progress':0.15,'message':f'Classifying {len(sheets)} pages'})
     atomic_json(root/'sources'/did/'sheets.json',{'sheets':[s.model_dump() for s in sheets]})
@@ -793,15 +815,51 @@ def import_document(document:dict,project_dir:str,progress_path:str|None=None)->
     result=build_from_sheets(project,ordered)
     if not selected:result.review.append(ReviewItem(id=did+'-reference',kind='reference',message='No recognized, scaled floor-plan sheet. Source PDF retained for review; no building geometry was invented.',document_id=did))
     print(f"[import] build {path.name} {time.perf_counter()-build_t:.2f}s walls={len(result.walls)} rooms={len(result.rooms)}",flush=True)
+    # MEP extraction — save raw MepSheetData per sheet.
+    # Registration + mep.json assembly happens later (post-merge) because
+    # the architectural geometry may come from a different document.
+    mep_sheet_infos=[]
+    if mep_sheets:
+        for msheet in mep_sheets:
+            try:
+                mep_raster=root/'sheets'/f'{msheet.sheet_id}.raster.png'
+                mep_data=extract_mep(msheet,path,mep_raster)
+                atomic_json(root/'sheets'/f'{msheet.sheet_id}.mep.json',mep_data.model_dump(mode='json'))
+                print(f"[import] mep extract p.{msheet.page} {msheet.sheet_no or ''} equipment={len(mep_data.equipment)} bubbles={len(mep_data.grid.bubbles)}",flush=True)
+                disc=msheet.discipline
+                if disc=='unknown':
+                    fname=(msheet.title or '').lower()
+                    if any(w in fname for w in ['hvac','mech','mechanical']):disc='mechanical'
+                    elif 'plumb' in fname:disc='plumbing'
+                    elif 'elec' in fname:disc='electrical'
+                levels=msheet.levels or []
+                mep_sheet_infos.append({'sheet_id':msheet.sheet_id,'discipline':disc,'page':msheet.page,'raster_url':f'sheets/{msheet.sheet_id}.raster.png','levels':levels})
+            except Exception as exc:
+                print(f"[import] mep extract failed p.{msheet.page}: {exc}",flush=True)
     rooms_by_sheet={}
     for room in result.rooms:
         rooms_by_sheet[room.source.sheet_id]=rooms_by_sheet.get(room.source.sheet_id,0)+1
+    mep_sids={s.sheet_id for s in mep_sheets}
     final_cards=[]
     for sheet in sheets:
-        geom=geometries.get(sheet.sheet_id)
-        card=sheet_card(sheet,geom,extracted=sheet.sheet_id in geometries)
-        if sheet.sheet_id in rooms_by_sheet:card['rooms']=rooms_by_sheet[sheet.sheet_id]
-        final_cards.append(card)
+        if sheet.sheet_id in mep_sids:
+            mep_data_for_card=None
+            for info in mep_sheet_infos:
+                if info['sheet_id']==sheet.sheet_id:mep_data_for_card=info;break
+            card=sheet_card_mep(sheet,type('_',(),{'equipment':[]})() if not mep_data_for_card else type('_',(),{'equipment':[None]*mep_data_for_card.get('equipment_count',0)})()) if mep_data_for_card else sheet_card(sheet)
+            # Re-read actual equipment count from mep.json on disk
+            mep_json_path=root/'sheets'/f'{sheet.sheet_id}.mep.json'
+            if mep_json_path.exists():
+                try:
+                    mdata=json.loads(mep_json_path.read_text())
+                    card['equipment_count']=len(mdata.get('equipment',[]))
+                except Exception:pass
+            final_cards.append(card)
+        else:
+            geom=geometries.get(sheet.sheet_id)
+            card=sheet_card(sheet,geom,extracted=sheet.sheet_id in geometries)
+            if sheet.sheet_id in rooms_by_sheet:card['rooms']=rooms_by_sheet[sheet.sheet_id]
+            final_cards.append(card)
     elapsed=time.perf_counter()-total_t
     print(f"[import] total {path.name} {elapsed:.2f}s",flush=True)
-    return {'building':result.model_dump(mode='json'),'sheets':final_cards,'timings':{'total':elapsed,'pages':len(sheets),'extracted':len(selected)}}
+    return {'building':result.model_dump(mode='json'),'sheets':final_cards,'timings':{'total':elapsed,'pages':len(sheets),'extracted':len(selected)},'mep_sheets':mep_sheet_infos}

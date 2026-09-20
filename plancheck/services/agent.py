@@ -103,71 +103,67 @@ Keep tasks small. Prefer one geometry task."""
 # ═════════════════════════════════════════════════════════════════════════════════
 # NEW ORCHESTRATOR: For unified flow with violations context
 # ═════════════════════════════════════════════════════════════════════════════════
-ORCHESTRATOR_UNIFIED_SYSTEM = """You are the Archetype orchestrator. Determine user intent and which violations (if any) to prioritize.
+ORCHESTRATOR_UNIFIED_SYSTEM = """You are the Archetype orchestrator. Break the user's request into an ordered list of steps.
 
 Return JSON only:
-{"intent":"repair"|"geometry"|"finish"|"appear"|"answer","violations_to_repair":[...],"message":"brief explanation"}
+{"steps":[{"intent":"geometry"|"finish"|"repair"|"appear"|"answer","instruction":"what to do"}],"violations_to_repair":[],"message":"brief summary"}
 
-If intent is "repair":
-  - Return violations_to_repair: list of violation IDs from all_violations that you should focus on
-  - If user said "repair ALL", return all of them
-  - If user mentioned specific issues, return only those
-  - Never include violations the user didn't mention or that seem unrelated
+Intent types:
+- geometry: move/delete walls, widen rooms, resize spaces, add doors/windows, open plan (delete wall between rooms)
+- finish: rename rooms, change materials (plaster/oak/tile/concrete/sage/terracotta/white), change time/sun/season/environment
+- appear: photoreal exterior appearance prompt
+- answer: explain something, no changes
+- repair: fix compliance violations the user mentioned
 
-If intent is "geometry", "finish", "appear", or "answer":
-  - Return violations_to_repair: empty list or null (we don't repair these)
-  - Focus on the spatial/style request only
-
-Intent guide:
-- geometry: move walls, widen rooms, resize spaces, add doors/windows
-- finish: rename rooms, change materials (plaster/oak/tile/concrete), change time/sun/season
-- appear: photoreal exterior appearance prompt only (no wall commands)
-- answer: explain something, no changes needed
-- repair: fix compliance violations explicitly mentioned by the user
+Rules:
+- One step per distinct operation. "make kitchen bigger and add concrete floors" = 2 steps (geometry + finish).
+- Order matters: geometry first, then finish, then appear. Geometry changes walls; finish changes materials/names.
+- For "open plan" or "knock down wall": use geometry intent with instruction like "delete the wall between kitchen and dining".
+- After wall deletion merges two rooms, the surviving room keeps one of the original names. In rename instructions, reference BOTH original room names (e.g. "rename the kitchen (merged with dining) to great room") so the next step can find the correct room.
+- If user says "repair" or "fix violations", set violations_to_repair to the relevant IDs.
+- If it's just one simple request, return one step. Don't over-split.
 
 Examples:
-User: "repair the kitchen area and daylight" with violations=[kitchen_area, master_daylight, hallway_circulation]
-→ {"intent":"repair","violations_to_repair":["kitchen_area","master_daylight"],...}
+User: "make kitchen bigger, concrete floors, sage walls, winter sunrise"
+→ {"steps":[{"intent":"geometry","instruction":"make the kitchen bigger"},{"intent":"finish","instruction":"change kitchen floors to concrete and walls to sage"},{"intent":"finish","instruction":"set season to winter and time to sunrise"}],...}
 
-User: "widen the kitchen" with violations=[kitchen_area, ...]
-→ {"intent":"geometry","violations_to_repair":[],...}
+User: "knock down the wall between kitchen and dining and rename it great room"
+→ {"steps":[{"intent":"geometry","instruction":"delete the wall between kitchen and dining to create open plan"},{"intent":"finish","instruction":"rename the kitchen (merged with dining after wall deletion) to great room"}],...}
+
+User: "widen the hallway"
+→ {"steps":[{"intent":"geometry","instruction":"widen the hallway"}],...}
 
 User: "fix everything"
-→ {"intent":"repair","violations_to_repair":[all violation IDs],...}"""
+→ {"steps":[{"intent":"repair","instruction":"repair all violations"}],"violations_to_repair":[all IDs],...}
+
+User: "how big is the kitchen?"
+→ {"steps":[{"intent":"answer","instruction":"how big is the kitchen?"}],...}"""
 
 GEOMETRY_SYSTEM = """You are the Archetype geometry editor. Keep reasoning SHORT. Output JSON quickly.
 {"commands":[{"kind":"...","target_id":"","params":{}}],"message":"short explanation","blocked":[{"target_id":"","reason":"..."}]}
 
 Allowed kinds: offset_partition, update_wall, create_wall, split_wall, place_opening, update_opening, delete, place_object, update_object, duplicate.
-NEVER use move_wall — it bypasses locked-wall safety and creates broken geometry.
+NEVER use move_wall.
 
-CRITICAL — how offset_partition works:
-  It moves BOTH endpoints of the target wall by (dx, dy).
-  Vertices are SHARED. Every wall in "shares_vertex_with" shares an endpoint vertex.
-  Moving a vertex drags all walls connected to it — their endpoints shift too.
-  The command FAILS if any locked/structural wall sharing those vertices changes shape.
-  Unlocked nonstructural neighbors may stretch or change angle — that is allowed.
-  If you want neighbors to move in parallel (keep layout rectangular), also offset them by the same (dx, dy).
-  But only do this if the neighbor's OTHER end is not shared with a locked wall — check its "shares_vertex_with" and "adjacent_locked_ids".
-
-Command guide:
-- offset_partition: widen/enlarge/shrink rooms by moving a wall. Check adjacent_locked_ids first — nonempty means that vertex touches a locked wall and the command will FAIL. Pick a different wall.
-- place_opening: add a door or window. Params: wall_id, kind (door|window), offset_ft, width_ft, height_ft, sill_ft. Target a wall that is long enough.
-- update_opening / delete: modify or remove existing openings/objects.
+Commands:
+- offset_partition: widen/enlarge/shrink rooms by moving a wall. The tool auto-handles diagonal prevention and vertex decoupling. Pick an unlocked nonstructural wall. Prefer walls with empty adjacent_locked_ids.
+- delete: remove a wall (for open plan), opening, or object. Use target_id of the wall to delete. Can only delete unlocked nonstructural walls. Great for "open plan" or "knock down wall" requests — find the shared wall between two rooms and delete it.
+- place_opening: add a door or window. Params: wall_id, kind (door|window), offset_ft, width_ft, height_ft, sill_ft.
+- update_opening: modify an existing opening's params.
 - place_object / update_object / duplicate: furniture and fixtures.
+- create_wall: new wall. Params: floor_id, x1, y1, x2, y2.
+- split_wall: split a wall at offset_ft.
 
 Rules:
-- Never move a wall where locked is true or structural is not nonstructural.
-- Unlocked nonstructural neighbors that stretch when a vertex moves — that's fine, no need to offset them too unless you want to keep them parallel.
+- Never modify locked or structural walls.
 - Use only entity ids from the brief. Do not invent ids.
-- If every possible wall is stuck (locked chain), return blocked with a clear reason.
-- If the issue is on a floor not in the brief, return blocked immediately.
+- If every possible wall is locked, return blocked with a clear reason.
 - If this is a retry, fix the failed commands using the error text.
 - Pick the simplest solution. Output JSON."""
 
 GEOMETRY_RETRY_SYSTEM = """Return only commands JSON, no reasoning.
 {"commands":[{"kind":"offset_partition","target_id":"","params":{"dx":0,"dy":0}}],"message":"","blocked":[]}
-Use offset_partition. NEVER use move_wall. If the target wall has adjacent_locked_ids, pick a different wall. Unlocked neighbors will stretch — that's fine. Use only ids from the brief. Fix dry_run_error."""
+Use offset_partition. NEVER use move_wall. The tool handles diagonal prevention automatically. Use only ids from the brief. Fix dry_run_error."""
 
 FINISH_SYSTEM = """You are a bounded Archetype finish subagent. Return JSON only:
 {"commands":[{"kind":"...","target_id":"","params":{}}],"message":"short user-facing text","blocked":[{"reason":"..."}]}
@@ -2013,98 +2009,154 @@ def respond_new(
         log.warning("agent.orchestrator_error error=%s", exc)
         return _result(f"Error deciding what to do: {exc}", intent="answer")
 
-    intent = plan.get("intent", "answer").lower()
+    # Parse multi-intent steps (backwards-compatible with old single-intent format)
+    steps = plan.get("steps") or []
+    if not steps:
+        # Old format fallback: single intent
+        intent = plan.get("intent", "answer").lower()
+        instruction = prompt
+        steps = [{"intent": intent, "instruction": instruction}]
+
     violations_to_repair = plan.get("violations_to_repair") or violations_to_repair
 
-    log.info("agent.orchestrator_result intent=%s violations_to_repair=%d",
-             intent, len(violations_to_repair or []))
-
-    # Override: if repair intent, ALWAYS fix new issues
-    if intent == "repair":
-        fix_new_issues = True
-        log.info("agent.override repair_intent forcing fix_new_issues=true")
+    intent_names = [s.get("intent", "?") for s in steps]
+    log.info("agent.orchestrator_result steps=%d intents=%s violations_to_repair=%d",
+             len(steps), intent_names, len(violations_to_repair or []))
 
     # ─────────────────────────────────────────────────────────────────────
-    # Step 2: Execute based on intent
+    # Step 2: Execute each intent step, chaining building state
     # ─────────────────────────────────────────────────────────────────────
 
-    if intent == "repair":
-        return _execute_repair_flow(
-            building, rules, prompt, violations_to_repair,
-            snapshot_ids, all_violations, fix_new_issues, report,
-            floor_id=floor_id, selected_ids=selected_ids,
-        )
+    current_building = building
+    all_commands: list[dict] = []
+    all_blocked: list[dict] = []
+    all_messages: list[str] = []
+    total_llm_calls = 1  # orchestrator counts as 1
+    all_new_issues: list[dict] = []
+    all_fixed: list[dict] = []
+    all_unfixed: list[dict] = []
+    appearance_prompt = None
+    primary_intent = steps[0]["intent"] if steps else "answer"
+    room_context = ""  # track room name changes across geometry steps
 
-    elif intent == "geometry":
-        return _execute_geometry_flow(
-            building, rules, prompt,
-            snapshot_ids, all_violations, fix_new_issues, report,
-            floor_id=floor_id, selected_ids=selected_ids,
-        )
+    for step_idx, step in enumerate(steps):
+        step_intent = step.get("intent", "answer").lower()
+        step_instruction = step.get("instruction", prompt)
+        # Inject room context from prior geometry steps so LLM knows current room names
+        if room_context and step_intent in ("finish", "appear", "answer"):
+            step_instruction = f"{step_instruction}\n\nNote: {room_context}"
+        progress_base = step_idx / max(len(steps), 1)
+        progress_step = 1.0 / max(len(steps), 1)
 
-    elif intent == "finish":
-        result = finish_subagent(prompt, _scoped_brief(building, rules, selected_ids, prompt, floor_id))
+        log.info("agent.step %d/%d intent=%s instruction=%r",
+                 step_idx + 1, len(steps), step_intent, step_instruction[:60])
+
         if report:
-            report(phase="done", progress=1.0, message="Applied finish")
+            report(phase="working", progress=progress_base,
+                   message=f"Step {step_idx + 1}/{len(steps)}: {step_intent}")
 
-        final_building = apply_commands(building, result.get("commands", []))
-        log.info("agent.finish_flow done commands=%d", len(result.get("commands", [])))
-
-        return {
-            "intent": "finish",
-            "message": result.get("message", "Applied finish"),
-            "commands": result.get("commands", []),
-            "blocked": result.get("blocked", []),
-            "llm_calls_made": 1,
-            "new_issues_found": [],
-            "fixed_new_issues": [],
-            "unfixed_new_issues": [],
-        }
-
-    elif intent == "appear":
-        result = appear_subagent(prompt, _scoped_brief(building, rules, selected_ids, prompt, floor_id))
-        if report:
-            report(phase="done", progress=1.0, message="Applied appearance")
-
-        log.info("agent.appear_flow done")
-
-        return {
-            "intent": "appear",
-            "message": result.get("message", "Applied appearance styling"),
-            "commands": [],
-            "blocked": [],
-            "llm_calls_made": 1,
-            "new_issues_found": [],
-            "fixed_new_issues": [],
-            "unfixed_new_issues": [],
-            "appearance_prompt": result.get("appearance_prompt"),
-        }
-
-    else:  # answer
-        log.info("agent.answer_flow answering question")
-        brief = _scoped_brief(building, rules, selected_ids, prompt, floor_id)
-        try:
-            answer_text = complete(
-                SUBAGENT,
-                [
-                    {"role": "system", "content": "You are a helpful building design assistant. Answer the user's question about their building using the context provided. Be concise and friendly."},
-                    {"role": "user", "content": f"Building context:\n{brief}\n\nQuestion: {prompt}"},
-                ],
-                json_mode=False,
-                timeout=15,
+        if step_intent == "repair":
+            fix_new_issues = True
+            result = _execute_repair_flow(
+                current_building, rules, step_instruction, violations_to_repair,
+                snapshot_ids, all_violations, fix_new_issues, None,
+                floor_id=floor_id, selected_ids=selected_ids,
             )
-        except LLMError:
-            answer_text = plan.get("message", "I can help with geometry, repairs, finishes, or styling. What would you like?")
-        return {
-            "intent": "answer",
-            "message": answer_text,
-            "commands": [],
-            "blocked": [],
-            "llm_calls_made": 2,
-            "new_issues_found": [],
-            "fixed_new_issues": [],
-            "unfixed_new_issues": [],
-        }
+            all_commands.extend(result.get("commands", []))
+            all_blocked.extend(result.get("blocked", []))
+            all_messages.append(result.get("message", ""))
+            total_llm_calls += result.get("llm_calls_made", 0)
+            all_new_issues.extend(result.get("new_issues_found", []))
+            all_fixed.extend(result.get("fixed_new_issues", []))
+            all_unfixed.extend(result.get("unfixed_new_issues", []))
+            if result.get("commands"):
+                current_building = apply_commands(current_building, result["commands"])
+
+        elif step_intent == "geometry":
+            old_rooms = {r.id: r.name for r in current_building.rooms}
+            result = _execute_geometry_flow(
+                current_building, rules, step_instruction,
+                snapshot_ids, all_violations, fix_new_issues, None,
+                floor_id=floor_id, selected_ids=selected_ids,
+            )
+            all_commands.extend(result.get("commands", []))
+            all_blocked.extend(result.get("blocked", []))
+            all_messages.append(result.get("message", ""))
+            total_llm_calls += result.get("llm_calls_made", 0)
+            all_new_issues.extend(result.get("new_issues_found", []))
+            all_fixed.extend(result.get("fixed_new_issues", []))
+            all_unfixed.extend(result.get("unfixed_new_issues", []))
+            if result.get("commands"):
+                current_building = apply_commands(current_building, result["commands"])
+                # Track room name changes so later steps know the current names
+                new_rooms = {r.name for r in current_building.rooms}
+                lost = [n for n in old_rooms.values() if n not in new_rooms]
+                if lost:
+                    names = ", ".join(f'"{r.name}" ({r.id})' for r in current_building.rooms if r.floor_id == floor_id)
+                    room_context = f"After geometry changes, the current rooms on {floor_id} are: {names}."
+
+        elif step_intent == "finish":
+            brief = _scoped_brief(current_building, rules, selected_ids, step_instruction, floor_id)
+            result = finish_subagent(step_instruction, brief)
+            cmds = result.get("commands", [])
+            all_commands.extend(cmds)
+            all_blocked.extend(result.get("blocked", []))
+            all_messages.append(result.get("message", ""))
+            total_llm_calls += 1
+            if cmds:
+                current_building = apply_commands(current_building, cmds)
+            log.info("agent.finish_step done commands=%d", len(cmds))
+
+        elif step_intent == "appear":
+            brief = _scoped_brief(current_building, rules, selected_ids, step_instruction, floor_id)
+            result = appear_subagent(step_instruction, brief)
+            all_messages.append(result.get("message", ""))
+            appearance_prompt = result.get("appearance_prompt")
+            total_llm_calls += 1
+            log.info("agent.appear_step done")
+
+        else:  # answer
+            brief = _scoped_brief(current_building, rules, selected_ids, step_instruction, floor_id)
+            try:
+                answer_text = complete(
+                    SUBAGENT,
+                    [
+                        {"role": "system", "content": "You are a helpful building design assistant. Answer the user's question about their building using the context provided. Be concise and friendly."},
+                        {"role": "user", "content": f"Building context:\n{brief}\n\nQuestion: {step_instruction}"},
+                    ],
+                    json_mode=False,
+                    timeout=15,
+                )
+            except LLMError:
+                answer_text = plan.get("message", "I can help with geometry, repairs, finishes, or styling.")
+            all_messages.append(answer_text)
+            total_llm_calls += 1
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Final: Combine results from all steps
+    # ─────────────────────────────────────────────────────────────────────
+
+    if report:
+        report(phase="done", progress=1.0, message="All steps complete")
+
+    combined_message = " | ".join(m for m in all_messages if m)
+    log.info("agent.chain_done steps=%d total_commands=%d total_llm=%d",
+             len(steps), len(all_commands), total_llm_calls)
+
+    result = {
+        "intent": primary_intent,
+        "intents": intent_names,
+        "message": combined_message,
+        "commands": all_commands,
+        "blocked": all_blocked,
+        "llm_calls_made": total_llm_calls,
+        "new_issues_found": all_new_issues,
+        "fixed_new_issues": all_fixed,
+        "unfixed_new_issues": all_unfixed,
+    }
+    if appearance_prompt:
+        result["appearance_prompt"] = appearance_prompt
+    return result
 
 
 def _execute_repair_flow(
@@ -2345,6 +2397,7 @@ def _execute_geometry_flow(
                     log.warning("agent.geometry.retry_also_failed error=%s", error)
                     original_commands = []
                     original_blocked = original_blocked + [{"reason": error}]
+                    original_message = f"Could not apply the geometry edit: {error}"
         if original_commands and candidate is not None:
             building_after_geo = candidate
 

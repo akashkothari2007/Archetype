@@ -22,6 +22,9 @@ export type SheetCard = {
   floor_ids?:string[]
   scale_pts_per_ft?:number|null
   size_pt?:number[]|null
+  discipline?:string
+  equipment_count?:number
+  mep_data_url?:string
 }
 export type ImportSummary = {
   name:string
@@ -50,3 +53,32 @@ export type Job = {
   totals?:{pages?:number;pages_read?:number;walls?:number;rooms?:number;doors?:number;windows?:number;skipped?:number;rules?:number}
 };
 export type ProjectSummary = {project_id:string;name:string;updated_at:string;revision:number;source:string;ready:boolean};
+export type MepEquipment = {
+  tag:string|null
+  xy_ft:[number,number]
+  in_room:string|null
+  kind:string
+  assumed_z_ft:number
+  z_assumed:true
+}
+export type MepRegistration = {
+  rms_error_ft:number
+  confidence:'high'|'medium'|'low'|'manual'
+  matched_labels:string[]
+}
+export type MepDisciplineLayer = {
+  discipline:string
+  sheet_id:string
+  page:number
+  raster_url:string
+  transform:number[]
+  registration:MepRegistration
+  equipment:MepEquipment[]
+}
+export type MepFloor = {
+  floor_id:string
+  disciplines:MepDisciplineLayer[]
+}
+export type MepData = {
+  floors:MepFloor[]
+}

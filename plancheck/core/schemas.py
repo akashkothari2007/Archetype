@@ -29,6 +29,7 @@ SheetRole = Literal[
     "detail",
     "roof",
     "site",
+    "mep_plan",
     "unknown",
 ]
 DocumentSlot = Literal["drawings", "standards"]
@@ -244,11 +245,33 @@ class SheetGeometry(BaseModel):
     clear_spaces: list[ClearSpace] = Field(default_factory=list)
     excluded: ExcludedSummary = Field(default_factory=ExcludedSummary)
     raster: RasterRef = Field(default_factory=RasterRef)
+    discipline: str = "architectural"
     doc_id: str = ""
     source_rotation: int = 0
     regions: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     extraction_stats: dict[str, int] = Field(default_factory=dict)
+
+
+class MepEquipment(BaseModel):
+    tag: str | None = None
+    xy_pt: Point2
+    bbox: BBox4 | None = None
+    discipline: str
+    kind: str
+    layer: str | None = None
+
+
+class MepSheetData(BaseModel):
+    """MEP-specific extraction results stored alongside SheetGeometry."""
+
+    sheet_id: str
+    discipline: str
+    equipment: list[MepEquipment] = Field(default_factory=list)
+    grid: SheetGrid = Field(default_factory=SheetGrid)
+    flattened: bool = False
+    flattened_reason: str = ""
+    layer_map: dict[str, str] = Field(default_factory=dict)
 
 
 class BBoxFt(BaseModel):

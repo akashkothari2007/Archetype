@@ -195,6 +195,15 @@ def add_rule(pid:str,body:dict=Body(...)):
         s['rules'].append(rule.model_dump());return recheck(s)
     return repo().commit(pid,body['expected_revision'],update)
 
+@router.get('/projects/{pid}/mep')
+def get_mep(pid:str):
+    """Return mep.json for the project, or empty structure if none."""
+    load(pid)
+    mep_path=repo().path(pid)/'mep.json'
+    if mep_path.is_file():
+        return json.loads(mep_path.read_text(encoding='utf8'))
+    return {'floors':[]}
+
 @router.get('/projects/{pid}/files/{relative:path}')
 def get_file(pid:str,relative:str):
     base=repo().path(pid).resolve();path=(base/relative).resolve()
@@ -268,6 +277,7 @@ def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported buil
             if message:
                 recompute();report(progress=progress or 0,phase=phase or 'working',message=message,sheets_done=list(sheets_done),totals=dict(totals))
 
+        all_mep_infos=[]
         futures={}
         for document in documents:
             if document['role']=='standards' and document['name'].lower().endswith('.pdf'):
@@ -288,6 +298,7 @@ def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported buil
                 else:
                     building=merge_buildings(building,Building.model_validate(payload.get('building',payload)))
                     for card in payload.get('sheets') or []:upsert(card)
+                    all_mep_infos.extend(payload.get('mep_sheets') or [])
                     recompute()
                     drain(progress=0.9,phase='build',message='Building rooms and openings')
         drain()
@@ -320,6 +331,45 @@ def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported buil
         project=repo().commit(pid,project.revision,recheck)
         summary['violations']=sum(1 for c in project.checks if c.get('status')=='fail')
         print(f"[import] save {elapsed:.2f}s walls={len(building.walls)} rooms={len(building.rooms)}",flush=True)
+        # MEP registration + mep.json assembly (after project save so file persists)
+        if all_mep_infos:
+            try:
+                from plancheck.services.mep import register_sheet,assign_rooms,build_mep_json
+                from plancheck.core.schemas import MepSheetData,SheetGeometry
+                arch_geom=None;arch_scale=1.0
+                for card in sheets_done:
+                    if card.get('extracted') and card.get('geometry_url') and card.get('discipline','architectural')=='architectural':
+                        gpath=base/card['geometry_url']
+                        if gpath.is_file():
+                            g=SheetGeometry.model_validate_json(gpath.read_text())
+                            if g.grid.bubbles and g.scale_pts_per_ft:
+                                arch_geom=g;arch_scale=g.scale_pts_per_ft;break
+                registrations={};room_dicts=[{'id':r.id,'polygon':r.polygon} for r in building.rooms]
+                for info in all_mep_infos:
+                    mep_path=base/'sheets'/f'{info["sheet_id"]}.mep.json'
+                    if not mep_path.is_file():continue
+                    mep_data=MepSheetData.model_validate_json(mep_path.read_text())
+                    if arch_geom:
+                        reg=register_sheet(arch_geom,mep_data,arch_scale)
+                        if reg.get('equipment') and room_dicts:assign_rooms(reg['equipment'],room_dicts)
+                        registrations[info['sheet_id']]=reg
+                    else:
+                        registrations[info['sheet_id']]={'transform':[1,0,0,0,1,0],'matched_labels':[],'rms_error_ft':9999.0,'confidence':'manual','equipment':[{'tag':eq.tag,'xy_ft':[eq.xy_pt[0]/arch_scale,eq.xy_pt[1]/arch_scale],'in_room':None,'kind':eq.kind,'assumed_z_ft':1.5,'z_assumed':True} for eq in mep_data.equipment]}
+                floor_map={}
+                for info in all_mep_infos:
+                    levels=info.get('levels') or []
+                    if levels:
+                        try:floor_map[info['sheet_id']]=f'level-{int(str(levels[0]).strip())}'
+                        except (TypeError,ValueError):pass
+                    if info['sheet_id'] not in floor_map:
+                        floor_map[info['sheet_id']]=building.floors[0].id if building.floors else 'unknown'
+                mep_result=build_mep_json(all_mep_infos,registrations,floor_map)
+                from plancheck.services.repository import atomic_json as _aj
+                _aj(base/'mep.json',mep_result)
+                print(f"[import] mep.json written floors={len(mep_result.get('floors',[]))} sheets={len(all_mep_infos)} registered={len(registrations)}",flush=True)
+            except Exception as exc:
+                import traceback;traceback.print_exc()
+                print(f"[import] mep.json assembly failed: {exc}",flush=True)
         return {'project_id':pid,'review_count':len(building.review),'summary':summary}
     return {'job_id':jobs.submit(work,'Importing your sources'),'project_id':pid}
 
