@@ -66,6 +66,9 @@
         "environment": {
           "$ref": "#/$defs/Environment"
         },
+        "site": {
+          "$ref": "#/$defs/Site"
+        },
         "review": {
           "items": {
             "$ref": "#/$defs/ReviewItem"
@@ -87,6 +90,7 @@
         "objects",
         "type_catalogue",
         "environment",
+        "site",
         "review"
       ]
     },
@@ -235,6 +239,12 @@
           "default": "Warm minimal",
           "title": "Style",
           "type": "string"
+        },
+        "prompt": {
+          "default": "",
+          "maxLength": 4000,
+          "title": "Prompt",
+          "type": "string"
         }
       },
       "title": "DesignBrief",
@@ -245,7 +255,8 @@
         "floors",
         "rooms",
         "area",
-        "style"
+        "style",
+        "prompt"
       ]
     },
     "DesktopProject": {
@@ -308,6 +319,19 @@
           "title": "Files",
           "type": "array"
         },
+        "sheets": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Sheets",
+          "type": "array"
+        },
+        "import_meta": {
+          "additionalProperties": true,
+          "title": "Import Meta",
+          "type": "object"
+        },
         "can_undo": {
           "default": false,
           "title": "Can Undo",
@@ -330,6 +354,8 @@
         "rules",
         "checks",
         "files",
+        "sheets",
+        "import_meta",
         "can_undo",
         "can_redo"
       ],
@@ -339,12 +365,12 @@
     "Environment": {
       "properties": {
         "sun_azimuth": {
-          "default": 135,
+          "default": 228,
           "title": "Sun Azimuth",
           "type": "number"
         },
         "time": {
-          "default": 14,
+          "default": 16.75,
           "maximum": 24,
           "minimum": 0,
           "title": "Time",
@@ -703,6 +729,11 @@
           "title": "Needs Review",
           "type": "boolean"
         },
+        "instance_count": {
+          "default": 0,
+          "title": "Instance Count",
+          "type": "integer"
+        },
         "source": {
           "$ref": "#/$defs/Source"
         }
@@ -718,10 +749,73 @@
         "floor_material",
         "confidence",
         "needs_review",
+        "instance_count",
         "source"
       ],
       "title": "Room",
       "type": "object"
+    },
+    "Site": {
+      "description": "Where the building stands on the globe. Unsited projects leave lat/lon null.",
+      "properties": {
+        "lat": {
+          "anyOf": [
+            {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lat"
+        },
+        "lon": {
+          "anyOf": [
+            {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lon"
+        },
+        "rotation_deg": {
+          "default": 0,
+          "maximum": 360,
+          "minimum": -360,
+          "title": "Rotation Deg",
+          "type": "number"
+        },
+        "ground_offset_ft": {
+          "default": 0,
+          "maximum": 500,
+          "minimum": -500,
+          "title": "Ground Offset Ft",
+          "type": "number"
+        },
+        "address": {
+          "default": "",
+          "maxLength": 240,
+          "title": "Address",
+          "type": "string"
+        }
+      },
+      "title": "Site",
+      "type": "object",
+      "required": [
+        "lat",
+        "lon",
+        "rotation_deg",
+        "ground_offset_ft",
+        "address"
+      ]
     },
     "Source": {
       "properties": {

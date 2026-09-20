@@ -116,7 +116,11 @@ def apply_commands(building: Building, commands: list[ModelCommand|dict], actor:
             for o in b.openings:
                 if o.id in opening_positions:
                     host=ws[o.wall_id];a,c=wall_points(b,host);length=wall_length(b,host);x,y=opening_positions[o.id]
+                    if length<.02:raise CommandError('Wall must be longer than 0.02 feet')
                     o.offset_ft=((x-a.x)*(c.x-a.x)+(y-a.y)*(c.y-a.y))/length
+                    max_off=length-o.width_ft
+                    if max_off<-1e-5:raise CommandError('Partition movement leaves an opening off its wall')
+                    o.offset_ft=min(max(float(o.offset_ft),0.0),max(0.0,max_off))
             changed.add(w.floor_id)
         elif k=='update_wall':
             w=require(ws);_wall_allowed(w,actor)
@@ -185,6 +189,11 @@ def apply_commands(building: Building, commands: list[ModelCommand|dict], actor:
             else:raise CommandError('Choose a wall or room surface')
         elif k=='set_environment':
             b.environment=b.environment.model_copy(update=p)
+        elif k=='set_site':
+            permitted={'lat','lon','rotation_deg','ground_offset_ft','address'}
+            if set(p)-permitted:raise CommandError('Unsupported site change')
+            if ('lat' in p)!=('lon' in p):raise CommandError('Set latitude and longitude together')
+            b.site=b.site.model_copy(update=p)
         elif k=='rename_room':
             r=require(rooms);r.name=str(p['name']);r.category=str(p.get('category',r.category));r.needs_review=False
         elif k=='apply_room_material_to_type':

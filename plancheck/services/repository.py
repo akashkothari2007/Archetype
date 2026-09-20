@@ -32,7 +32,7 @@ class FileProjectRepository:
     def manifest(self,pid):
         p=self.path(pid)/'project.json'
         if not p.exists():raise FileNotFoundError('Project not found')
-        data=json.loads(p.read_text())
+        data=json.loads(p.read_text(encoding='utf8'))
         if 'current_revision' not in data:raise ValueError('Legacy project needs model migration before editing')
         return data
     def list(self):
@@ -40,10 +40,10 @@ class FileProjectRepository:
         out=[]
         for path in self.root.glob('*/project.json'):
             try:
-                m=json.loads(path.read_text());out.append({'project_id':m['project_id'],'name':m['name'],'updated_at':m.get('updated_at',m.get('created_at','')),'revision':m.get('current_revision',0),'source':m.get('source','import'),'ready':'current_revision' in m})
+                m=json.loads(path.read_text(encoding='utf8'));out.append({'project_id':m['project_id'],'name':m['name'],'updated_at':m.get('updated_at',m.get('created_at','')),'revision':m.get('current_revision',0),'source':m.get('source','import'),'ready':'current_revision' in m})
             except (ValueError,KeyError,OSError):continue
         return sorted(out,key=lambda p:p['updated_at'],reverse=True)
-    def _snapshot(self,pid,revision):return json.loads((self.path(pid)/'revisions'/str(revision)/'model.json').read_text())
+    def _snapshot(self,pid,revision):return json.loads((self.path(pid)/'revisions'/str(revision)/'model.json').read_text(encoding='utf8'))
     def load(self,pid):
         m=self.manifest(pid);s=self._snapshot(pid,m['current_revision'])
         return DesktopProject(project_id=pid,name=m['name'],revision=m['current_revision'],created_at=m['created_at'],updated_at=m['updated_at'],brief=m.get('brief'),building=s['building'],rules=s.get('rules',[]),checks=s.get('checks',[]),coverage=s.get('coverage') or {},files=self.files(pid,m),sheets=m.get('sheets',[]),import_meta=m.get('import_meta') or {},can_undo=bool(m.get('undo')),can_redo=bool(m.get('redo')))

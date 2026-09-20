@@ -87,9 +87,21 @@ class PlacedObject(Entity):
 
 
 class Environment(BaseModel):
-    sun_azimuth: FiniteFloat = 135
-    time: FiniteFloat = Field(default=14, ge=0, le=24)
+    sun_azimuth: FiniteFloat = 228
+    time: FiniteFloat = Field(default=16.75, ge=0, le=24)
     season: Literal["spring", "summer", "autumn", "winter"] = "summer"
+
+
+class Site(BaseModel):
+    """Where the building stands on the globe. Unsited projects leave lat/lon null."""
+
+    lat: FiniteFloat | None = Field(default=None, ge=-90, le=90)
+    lon: FiniteFloat | None = Field(default=None, ge=-180, le=180)
+    # Clockwise from true north to the plan's +y axis.
+    rotation_deg: FiniteFloat = Field(default=0, ge=-360, le=360)
+    # Signed adjustment from the surveyed grade the terrain mesh reports.
+    ground_offset_ft: FiniteFloat = Field(default=0, ge=-500, le=500)
+    address: str = Field(default="", max_length=240)
 
 
 class ReviewItem(Entity):
@@ -134,6 +146,7 @@ class Building(BaseModel):
     objects: list[PlacedObject] = Field(default_factory=list)
     type_catalogue: list[TypeCatalogueEntry] = Field(default_factory=list)
     environment: Environment = Field(default_factory=Environment)
+    site: Site = Field(default_factory=Site)
     review: list[ReviewItem] = Field(default_factory=list)
 
 
@@ -144,6 +157,7 @@ class DesignBrief(BaseModel):
     rooms: str = "3 bedrooms, 2 bathrooms, kitchen, living room"
     area: str = "2,400 sq ft"
     style: str = "Warm minimal"
+    prompt: str = Field(default="", max_length=4000)
 
 
 class ModelCommand(BaseModel):
@@ -190,4 +204,5 @@ class BuildingPatch(BaseModel):
     checks: list[dict[str, Any]] = Field(default_factory=list)
     coverage: dict[str, Any] = Field(default_factory=dict)
     environment: dict[str, Any] | None = None
+    site: dict[str, Any] | None = None
 

@@ -1,0 +1,25 @@
+model_name: triposplat
+description: >
+  TripoSplat (VAST-AI, MIT) turns one image into 3D Gaussians. Archetype calls this
+  to build the photoreal exterior overlay from the Flux isometric guide.
+python_version: py311
+requirements:
+  # torch/torchvision are pinned as a matching pair; the rest float so they stay
+  # inside the bounds Baseten's base server enforces via constraints.txt.
+  - torch==2.6.0
+  - torchvision==0.21.0
+  - numpy
+  - safetensors
+  - pillow
+  - tqdm
+resources:
+  accelerator: L4
+  use_gpu: true
+# Weights land read-only at mount_location before the container starts, so load()
+# never downloads. Revision is pinned to the commit Archetype was tested against.
+weights:
+  - source: hf://VAST-AI/TripoSplat@56a96e603204ec410c4da60c13ea4fa09a2169a9
+    mount_location: /models/triposplat
+runtime:
+  # One splat at a time: a single request already saturates the GPU.
+  predict_concurrency: 1

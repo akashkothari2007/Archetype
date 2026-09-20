@@ -9,6 +9,7 @@ export type EditorProps = {
   onSelect: (id: string | null) => void
   units: 'metric' | 'imperial'
   busy?: boolean
+  projectId?: string
 }
 export const assetMime = 'application/archetype-asset'
 export type Asset = { id: string; label: string; kind: 'fixture' | 'furniture' | 'door' | 'window' | 'material'; width: number; depth: number; height: number; preview?: string; model?: string; color?: string }
@@ -66,6 +67,30 @@ export function interiorPoint(polygon: number[][]): Point {
   }
   return best
 }
+export function wallExterior(a: Point, b: Point, rooms: { polygon: number[][] }[]) {
+  const length = Math.hypot(b.x - a.x, b.y - a.y)
+  if (length < 0.01 || !rooms.length) return null
+  const nx = -(b.y - a.y) / length, ny = (b.x - a.x) / length
+  const center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+  const sideOf = (p: Point) => (p.x - center.x) * nx + (p.y - center.y) * ny
+  let hasA = false, hasB = false
+  for (const room of rooms) {
+    const inside = (sign: number, dist: number) => pointInPolygon({ x: center.x + nx * sign * dist, y: center.y + ny * sign * dist }, room.polygon)
+    if ([0.35, 1.1, 2.4].some(dist => inside(1, dist))) hasA = true
+    if ([0.35, 1.1, 2.4].some(dist => inside(-1, dist))) hasB = true
+    if (hasA && hasB) break
+    const centroid = interiorPoint(room.polygon)
+    const along = projectPoint(centroid, a, b)
+    if (along.distance > Math.max(8, length)) continue
+    const side = sideOf(centroid)
+    if (side > 0.15) hasA = true
+    if (side < -0.15) hasB = true
+  }
+  if (hasA === hasB) return null
+  const sign = hasA ? -1 : 1
+  return { length, center, angle: Math.atan2(b.y - a.y, b.x - a.x), sign, outward: { x: nx * sign, y: ny * sign } }
+}
+
 export function floorBounds(building: Building, floorId: string) {
   const points = building.vertices.filter(v => v.floor_id === floorId)
   if (!points.length) return { minX: 0, maxX: 40, minY: 0, maxY: 30, width: 40, height: 30, cx: 20, cy: 15 }
