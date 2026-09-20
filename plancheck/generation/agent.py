@@ -1,9 +1,12 @@
-"""The generate job: at most two model calls, then deterministic geometry.
+"""The generate job: research the building kind, then at most two model calls.
 
-The model is asked once for a space program. Packing, compiling, validating,
-checking and repairing all run here, exactly once per attempt. If the geometry
-cannot be built the model gets one corrective turn with the real error, and
-that is the end of it -- there is no free-running tool loop to spin in.
+Host-side research names the building, consults the internal program library,
+and gathers rooms. Those findings are shown in chat and injected into the
+planner prompt. The model is then asked once for a space program. Packing,
+compiling, validating, checking and repairing all run here, exactly once per
+attempt. If the geometry cannot be built the model gets one corrective turn
+with the real error, and that is the end of it -- there is no free-running
+tool loop to spin in.
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from plancheck.core.settings import get_settings
 from plancheck.generation import defaults, prompts
 from plancheck.generation.compiler import CompileError, compile_building
 from plancheck.generation.layout import LayoutError, pack_floors
-from plancheck.generation.program import BuildingProgram, FloorLayout
+from plancheck.generation.program import BuildingProgram, FloorLayout, ensure_wet_rooms
+from plancheck.generation.research import ResearchDossier, explore, expand_repeated_spaces
 from plancheck.services.commands import CommandError, apply_commands
 from plancheck.services.compliance import check_building
 from plancheck.services.llm import GENERATION, LLMError, complete_json
@@ -51,6 +55,7 @@ class GenerationResult:
     llm_calls: int = 0
     notes: str = ""
     recovered_from: list[str] = field(default_factory=list)
+    research: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -62,6 +67,7 @@ class GenerationSession:
     floors: int
     area_sqft: float
     kind: str = ""
+    dossier: ResearchDossier | None = None
     program: BuildingProgram | None = None
     layouts: dict[str, FloorLayout] = field(default_factory=dict)
     overrides: dict[str, FloorLayout] = field(default_factory=dict)
@@ -85,22 +91,45 @@ def _digest(payload: dict[str, Any]) -> str:
 
 
 DEMO_STEPS = (
-    ("analyzing", "Reading your design brief"),
-    ("planning", "Arranging the two-storey demo layout"),
-    ("working", "Connecting walls and openings"),
-    ("working", "Preparing materials and fixtures"),
-    ("validating", "Validating editable geometry"),
+    ("planning", 0.48, "planning", "Writing a space program from those rooms"),
+    ("working", 0.62, "working", "Arranging the two-storey demo layout"),
+    ("working", 0.74, "working", "Connecting walls and openings"),
+    ("working", 0.84, "working", "Preparing materials and fixtures"),
+    ("validating", 0.92, "working", "Validating editable geometry"),
 )
 
 
-def _demo(report: Reporter) -> GenerationResult:
+def _emit_research(report: Reporter, dossier: ResearchDossier, pause: float = 0.0) -> None:
+    for event in dossier.trace():
+        log.info("generation.research kind=%s %s", event.get("kind"), event.get("message"))
+        report(**event)
+        if pause:
+            time.sleep(pause)
+
+
+def _demo(brief: DesignBrief, report: Reporter) -> GenerationResult:
     from plancheck.mocks.generation import demo_home, demo_rules
 
     log.info("generation.agent=demo path=fixed-house (no LLM)")
-    for index, (phase, message) in enumerate(DEMO_STEPS):
+    use = defaults.normalise_use(brief.building_use, brief.name, brief.prompt, brief.rooms)
+    kind = defaults.detect_kind(brief.building_use, brief.name, brief.prompt, brief.rooms)
+    active = defaults.profile(use)
+    dossier = explore(
+        brief,
+        use,
+        kind,
+        defaults.parse_floor_count(
+            brief.floors, brief.prompt, brief.rooms, brief.name, default=active.default_floors
+        ),
+        defaults.parse_area_sqft(
+            brief.area, brief.prompt, brief.rooms, default=active.default_area_sqft
+        ),
+    )
+    _emit_research(report, dossier, pause=0.28)
+    for index, (phase, progress, kind_name, message) in enumerate(DEMO_STEPS):
         log.info("generation.demo step=%d/%d phase=%s %s", index + 1, len(DEMO_STEPS), phase, message)
-        report(phase=phase, progress=0.1 + index * 0.16, message=message)
-        time.sleep(0.32)
+        report(phase=phase, progress=progress, kind=kind_name, label="Planning", message=message)
+        time.sleep(0.28)
     building = demo_home()
     log.info(
         "generation.demo done floors=%d rooms=%d walls=%d openings=%d",
@@ -109,7 +138,7 @@ def _demo(report: Reporter) -> GenerationResult:
         len(building.walls),
         len(building.openings),
     )
-    return GenerationResult(building=building, rules=demo_rules())
+    return GenerationResult(building=building, rules=demo_rules(), research=dossier.recap())
 
 
 def _parse_payload(payload: dict[str, Any]) -> tuple[BuildingProgram | None, dict[str, FloorLayout]]:
@@ -158,8 +187,8 @@ def _run_pipeline(session: GenerationSession, report: Reporter) -> tuple[Buildin
         raise LayoutError("No program is available to pack")
 
     log.info("generation.host stage=pack use=%s\n%s", program.building_use, program.summary())
-    report(phase="working", progress=0.55, message="Arranging rooms on every floor")
-    layouts = pack_floors(program, session.area_sqft)
+    report(phase="working", progress=0.55, kind="working", label="Arranging", message="Arranging rooms on every floor")
+    layouts = pack_floors(program, session.area_sqft, session.kind)
     for floor_id, layout in session.overrides.items():
         if floor_id in layouts:
             log.info("generation.host stage=pack override floor=%s", floor_id)
@@ -169,7 +198,7 @@ def _run_pipeline(session: GenerationSession, report: Reporter) -> tuple[Buildin
         log.info("generation.host stage=pack layout %s", layout.summary())
 
     log.info("generation.host stage=compile")
-    report(phase="working", progress=0.7, message="Building walls, doors and windows")
+    report(phase="working", progress=0.7, kind="working", label="Building", message="Building walls, doors and windows")
     building = compile_building(program, layouts)
     log.info(
         "generation.host stage=compile done floors=%d rooms=%d walls=%d openings=%d objects=%d review=%d",
@@ -181,7 +210,7 @@ def _run_pipeline(session: GenerationSession, report: Reporter) -> tuple[Buildin
         len(building.review),
     )
 
-    report(phase="validating", progress=0.85, message="Measuring against your requirements")
+    report(phase="validating", progress=0.85, kind="working", label="Checking", message="Measuring against your requirements")
     categories = {space.category for space in program.spaces}
     rules = defaults.rule_pack(program.building_use, categories)
     log.info("generation.host stage=check rules=%d categories=%s", len(rules), sorted(categories))
@@ -223,6 +252,7 @@ def _ask(session: GenerationSession, errors: list[str]) -> dict[str, Any]:
         program=session.program.model_dump(mode="json") if session.program else None,
         layouts=[layout.summary() for layout in session.layouts.values()],
         kind=session.kind,
+        research=session.dossier.payload() if session.dossier else None,
     )
     session.llm_calls += 1
     log.info(
@@ -257,7 +287,7 @@ def generate_from_brief(brief: DesignBrief, report: Reporter | None = None) -> G
         log.info("generation.brief.prompt\n%s", brief.prompt)
 
     if provider in DEMO_PROVIDERS:
-        result = _demo(report)
+        result = _demo(brief, report)
         log.info("generation.done path=demo elapsed=%.1fs", time.monotonic() - started)
         return result
     if provider not in LIVE_PROVIDERS:
@@ -286,17 +316,18 @@ def generate_from_brief(brief: DesignBrief, report: Reporter | None = None) -> G
         deadline=time.monotonic() + DEADLINE_S,
         kind=kind,
     )
+    session.dossier = explore(brief, use, kind, session.floors, session.area_sqft, live=True)
     log.info(
-        "generation.interpreted kind=%s packer=%s storeys=%d area_sqft=%.0f model=%s deadline_s=%.0f",
+        "generation.interpreted kind=%s packer=%s storeys=%d area_sqft=%.0f model=%s deadline_s=%.0f rooms=%d",
         kind,
         session.use,
         session.floors,
         session.area_sqft,
         settings.generation_slug(),
         DEADLINE_S,
+        len(session.dossier.rooms),
     )
-
-    report(phase="analyzing", progress=0.08, message="Reading your design brief")
+    _emit_research(report, session.dossier)
     errors: list[str] = []
     history: list[str] = []
     seen: set[str] = set()
@@ -307,8 +338,10 @@ def generate_from_brief(brief: DesignBrief, report: Reporter | None = None) -> G
             break
         report(
             phase="planning",
-            progress=0.2 if attempt == 0 else 0.45,
-            message="Planning the spaces and how they connect"
+            progress=0.4 if attempt == 0 else 0.5,
+            kind="planning",
+            label="Planning",
+            message="Writing a space program from those rooms"
             if attempt == 0
             else "Revising the plan after the first attempt",
         )
@@ -339,6 +372,13 @@ def generate_from_brief(brief: DesignBrief, report: Reporter | None = None) -> G
             continue
 
         if program is not None:
+            counts = {
+                room.category: room.count
+                for room in (session.dossier.rooms if session.dossier else [])
+                if room.count > 1
+            }
+            program = expand_repeated_spaces(program, counts)
+            program = ensure_wet_rooms(program)
             session.program = program
             session.overrides = {}
             log.info("generation.program accepted\n%s", program.summary())
@@ -374,6 +414,7 @@ def generate_from_brief(brief: DesignBrief, report: Reporter | None = None) -> G
             llm_calls=session.llm_calls,
             notes=session.program.notes,
             recovered_from=history,
+            research=session.dossier.recap() if session.dossier else {},
         )
 
     detail = errors[0] if errors else "the model did not answer in time"

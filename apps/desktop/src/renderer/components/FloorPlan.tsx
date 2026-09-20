@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Stage, Layer, Group, Line, Rect, Circle, Text, Shape, Image as KonvaImage } from 'react-konva'
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
-import { MousePointer2, Hand, Ruler, Plus, Minus, Maximize, PencilLine, Scissors, Link, Copy, Trash2, LockKeyhole, RotateCw, Magnet, X } from 'lucide-react'
+import { MousePointer2, Hand, Ruler, Plus, Minus, Maximize, PencilLine, Scissors, Link, Copy, Trash2, LockKeyhole, RotateCw, Magnet, X, Download } from 'lucide-react'
 import { assetMime, distance, floorBounds, interiorPoint, isTypingTarget, lengthLabel, placementCommand, polygonArea, projectPoint, type Asset, type EditorProps, type Point } from './editor-geometry'
 import { computeLayerCounts, type LayerStop } from './plan-layers'
 import { base } from '../api'
@@ -29,6 +29,7 @@ type FloorPlanProps = EditorProps & {
   checkPulse?: number
   layerStop: LayerStop
   onLayerCounts: (counts: number[]) => void
+  onExportSchematic?: () => void
 }
 const revealedSheets = new Set<string>()
 const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -139,7 +140,7 @@ const PlanFx = memo(function PlanFx({
   )
 })
 
-export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, units, busy, checks = [], sheets, projectId, onFloor, checkPulse = 0, layerStop, onLayerCounts }: FloorPlanProps) {
+export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, units, busy, checks = [], sheets, projectId, onFloor, checkPulse = 0, layerStop, onLayerCounts, onExportSchematic }: FloorPlanProps) {
   const host = useRef<HTMLDivElement>(null)
   const stage = useRef<Konva.Stage>(null)
   const wallDrag = useRef<{ pointer: Point; a: Point; b: Point } | null>(null)
@@ -176,9 +177,9 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     const v = baseVertices.get(id); if (!v) return undefined
     const p = preview[id]; return p ? { ...v, ...p } : v
   }, [baseVertices, preview])
-  const floorWalls = building.walls.filter(w => w.floor_id === floorId)
-  const rooms = building.rooms.filter(r => r.floor_id === floorId)
-  const floorObjects = building.objects.filter(o => o.floor_id === floorId)
+  const floorWalls = useMemo(() => building.walls.filter(w => w.floor_id === floorId), [building.walls, floorId])
+  const rooms = useMemo(() => building.rooms.filter(r => r.floor_id === floorId), [building.rooms, floorId])
+  const floorObjects = useMemo(() => building.objects.filter(o => o.floor_id === floorId), [building.objects, floorId])
   const walls = floorWalls.filter(w => w.structural === 'loadbearing' || layerStop >= 1)
   const openingsVisible = layerStop >= 2
   const fixturesVisible = layerStop >= 3
@@ -384,7 +385,8 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     floorFixtures: floorObjects.filter(o => o.kind === 'fixture').length,
     floorFurniture: floorObjects.filter(o => o.kind !== 'fixture').length,
   }), [sheetGeom, floorWalls, building.openings, floorObjects])
-  useEffect(() => { onLayerCounts(layerCounts) }, [layerCounts, onLayerCounts])
+  const countsSig = layerCounts.join(',')
+  useEffect(() => { onLayerCounts(layerCounts) }, [countsSig, onLayerCounts])
   function markInteract() {
     interacting.current = true
     host.current?.classList.add('is-interacting')
@@ -484,6 +486,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     <div className="editor-floating-tools" role="toolbar" aria-label="Drawing tools">
       {[['select', MousePointer2, 'Select · V'], ['pan', Hand, 'Pan · H'], ['wall', PencilLine, 'Draw wall · W'], ['measure', Ruler, 'Measure · M']].map(([id, Icon, title]) => { const I = Icon as typeof MousePointer2; return <button key={id as string} className={tool === id ? 'active' : ''} title={title as string} aria-label={title as string} onClick={() => { setTool(id as Tool); setStart(null) }}><I size={17} /></button> })}
       <span className="editor-tool-divider" /><button className={snap ? 'active' : ''} title="Snap to grid and geometry" aria-label="Toggle snapping" aria-pressed={snap} onClick={() => setSnap(!snap)}><Magnet size={17} /></button>
+      {onExportSchematic && <><span className="editor-tool-divider" /><button title="Export schematic" aria-label="Export schematic" onClick={() => onExportSchematic()}><Download size={16} /></button></>}
     </div>
     {selection.length > 0 && <div className="editor-selection-tools" role="toolbar" aria-label="Selection tools">
       <span>{selection.length > 1 ? `${selection.length} selected` : selectedWall ? 'Wall' : selectedOpening?.kind || selectedObject?.asset_id.replaceAll('_', ' ') || selectedRoom?.name || 'Selection'}</span>
@@ -564,9 +567,16 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
       {selectedRoom && <><div className="editor-property-title">Room</div><input key={selectedRoom.id} aria-label="Room name" defaultValue={selectedRoom.name} onBlur={e => { if (e.target.value && e.target.value !== selectedRoom.name) onCommand((matching ? matchingRooms : [selectedRoom]).map(r => ({ kind: 'rename_room', target_id: r.id, params: { name: e.target.value } }))) }} />{(selectedRoom.instance_count || 0) > 1 && <span className="editor-property-muted">×{selectedRoom.instance_count} units</span>}{matchingRooms.length > 1 && <label className="editor-match-label"><input type="checkbox" checked={matching} onChange={e => setMatching(e.target.checked)} />Apply to {matchingRooms.length} matching rooms</label>}<span className="editor-property-muted">{selectedRoom.needs_review ? 'Boundary needs review' : 'Shared partitions affect adjacent rooms'}</span></>}
     </div>}
     {unlock && selectedWall && <div className="editor-review-dialog" role="dialog" aria-label="Review wall classification"><strong>Review this wall</strong><p>Confirm the structural classification before enabling edits. Connected walls may still be locked.</p><select aria-label="Structural classification" value={structural} onChange={e => setStructural(e.target.value as typeof structural)}><option value="nonstructural">Nonstructural partition</option><option value="loadbearing">Load-bearing wall</option><option value="unknown">Unknown</option></select><textarea aria-label="Review reason" value={reason} onChange={e => setReason(e.target.value)} placeholder="Record the reason and drawing reference" /><div><button onClick={() => setUnlock(false)}>Cancel</button><button disabled={!reason.trim()} onClick={() => { onCommand([{ kind: 'unlock_wall', target_id: selectedWall.id, params: { structural, reason } }]); setUnlock(false); setReason('') }}>Save review and unlock</button></div></div>}
-    <div className="editor-canvas-hint">{spacePanning ? 'Drag to pan · Release Space to resume editing' : tool === 'wall' ? 'Click to start a wall, click to connect · Esc to finish' : tool === 'measure' ? 'Click two points to measure' : tool === 'pan' ? 'Drag to pan · Pinch to zoom' : 'Select to edit · Hold Space to pan · Pinch to zoom'}</div>
+    {(spacePanning || tool === 'wall' || tool === 'measure' || tool === 'pan') && <div className="editor-canvas-hint">{spacePanning ? 'Drag to pan · Release Space to resume editing' : tool === 'wall' ? 'Click to start a wall, click to connect · Esc to finish' : tool === 'measure' ? 'Click two points to measure' : 'Drag to pan · Pinch to zoom'}</div>}
     {notice && <div className="editor-notice" role="status">{notice}</div>}
-    <div className="editor-zoom"><div className="editor-scale"><span style={{ width: scaleDistance / scaleUnits * view.scale }} /><small>{scaleDistance} {units === 'metric' ? 'm' : 'ft'}</small></div><button aria-label="Zoom out" onClick={() => zoom(1 / 1.2)}><Minus size={14} /></button><span>{Math.round(view.scale / 20 * 100)}%</span><button aria-label="Zoom in" onClick={() => zoom(1.2)}><Plus size={14} /></button><button aria-label="Fit floor plan" onClick={fit}><Maximize size={14} /></button></div>
+    <div className="editor-view-controls">
+      <div className="editor-zoom"><div className="editor-scale"><span style={{ width: scaleDistance / scaleUnits * view.scale }} /><small>{scaleDistance} {units === 'metric' ? 'm' : 'ft'}</small></div><button aria-label="Zoom out" onClick={() => zoom(1 / 1.2)}><Minus size={14} /></button><span>{Math.round(view.scale / 20 * 100)}%</span><button aria-label="Zoom in" onClick={() => zoom(1.2)}><Plus size={14} /></button><button aria-label="Fit floor plan" onClick={fit}><Maximize size={14} /></button></div>
+      {!!building.floors.length && <label className="editor-floor-switch">
+        <select aria-label="Active floor" value={floorId} onChange={e => { onFloor?.(e.target.value); onSelect(null) }} onKeyDown={event => event.stopPropagation()}>
+          {building.floors.map(floor => <option key={floor.id} value={floor.id}>{floor.name}</option>)}
+        </select>
+      </label>}
+    </div>
   </div>
 }
 function DimensionInput({ value, units, onSave, disabled }: { value: number; units: 'metric' | 'imperial'; onSave: (v: number) => void; disabled?: boolean }) {

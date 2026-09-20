@@ -2,12 +2,17 @@ import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import type { Building } from '../types'
 import { materials, wallExterior, type Point } from './editor-geometry'
+import { surfaceOf } from './material-catalog'
 import { SurfaceMaterial } from './scene-materials'
 import { FloorSlab } from './scene-landscape'
 
 type Wall = Building['walls'][number]
 type Vertices = Map<string, { id: string; x: number; y: number }>
 export const colors = Object.fromEntries(materials.map(m => [m.id, m.color]))
+function finishColor(id: string) {
+  const surface = surfaceOf(id)
+  return surface.tint ? (colors[id] || surface.color) : '#ffffff'
+}
 
 export function groundElevationOf(building: Building) {
   return Math.min(...building.floors.map(f => f.elevation_ft), 0)
@@ -19,22 +24,42 @@ export function buildingHeightFt(building: Building) {
   const top = topFloorOf(building)
   return (top?.elevation_ft || 0) + (top?.height_ft || 9) - groundElevationOf(building)
 }
+export function floorsThrough(building: Building, floorId?: string | null) {
+  const ordered = [...building.floors].sort((a, b) => a.elevation_ft - b.elevation_ft)
+  if (!floorId) return ordered
+  const selected = building.floors.find(floor => floor.id === floorId)
+  if (!selected) return []
+  return ordered.filter(floor => floor.elevation_ft <= selected.elevation_ft)
+}
+export function floorWorldY(building: Building, floorId: string) {
+  const floor = building.floors.find(item => item.id === floorId)
+  return (floor?.elevation_ft || 0) - groundElevationOf(building)
+}
+export function cutawayHeightFt(building: Building, floorId: string) {
+  const floor = building.floors.find(item => item.id === floorId)
+  return (floor?.elevation_ft || 0) + (floor?.height_ft || 9) - groundElevationOf(building)
+}
+export function storeySlabThickness(building: Building, floor: Building['floors'][number]) {
+  const below = building.floors.filter(item => item.elevation_ft < floor.elevation_ft).sort((a, b) => b.elevation_ft - a.elevation_ft)[0]
+  return below ? Math.max(.32, floor.elevation_ft - below.elevation_ft - below.height_ft) : .32
+}
 
-/** The whole exterior, every storey stacked from grade. Shared by the 3D view and the site view. */
-export function BuildingShell({ building, hideShell = false, selectedId = null, dragTarget = null, onSelect }: { building: Building; hideShell?: boolean; selectedId?: string | null; dragTarget?: string | null; onSelect: (id: string) => void }) {
+/** Exterior massing stacked from grade. Pass throughFloorId to hide the roof and every storey above that cut. */
+export function BuildingShell({ building, hideShell = false, selectedId = null, dragTarget = null, onSelect, throughFloorId, photoreal = true }: { building: Building; hideShell?: boolean; selectedId?: string | null; dragTarget?: string | null; onSelect: (id: string) => void; throughFloorId?: string | null; photoreal?: boolean }) {
   const ground = groundElevationOf(building)
   const topFloor = topFloorOf(building)
+  const floors = floorsThrough(building, throughFloorId)
+  const showRoof = !throughFloorId
   const vertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
-  return <>{building.floors.map(floor => {
+  return <>{floors.map(floor => {
     const floorRooms = building.rooms.filter(r => r.floor_id === floor.id)
     const floorWalls = building.walls.filter(w => w.floor_id === floor.id)
-    const below = building.floors.filter(f => f.elevation_ft < floor.elevation_ft).sort((a, b) => b.elevation_ft - a.elevation_ft)[0]
-    const slabThickness = below ? Math.max(.32, floor.elevation_ft - below.elevation_ft - below.height_ft) : .32
+    const slabThickness = storeySlabThickness(building, floor)
     return <group key={floor.id} position={[0, floor.elevation_ft - ground, 0]}>
       {!hideShell && floorRooms.map(room => <group key={room.id}><FloorSlab polygon={room.polygon} y={-slabThickness} thickness={slabThickness} /><RoomFloor room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} /></group>)}
-      {!hideShell && <Walls3D walls={floorWalls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} photoreal />}
+      {!hideShell && <Walls3D walls={floorWalls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} photoreal={photoreal} />}
       {!hideShell && <FloorDressing walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} foundation={floor.elevation_ft === ground} />}
-      {!hideShell && floor.id === topFloor?.id && <ConceptRoof walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} />}
+      {!hideShell && showRoof && floor.id === topFloor?.id && <ConceptRoof walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} />}
     </group>
   })}</>
 }
@@ -65,9 +90,24 @@ export function Walls3D({ walls, vertices, openings, selectedId, dragTarget, onS
 }
 
 function InstancedWalls({ walls, vertices, selectedId, dragTarget, onSelect, photoreal }: { walls: Wall[]; vertices: Vertices; selectedId: string | null; dragTarget: string | null; onSelect: (id: string) => void; photoreal: boolean }) {
+  const groups = useMemo(() => {
+    const map = new Map<string, Wall[]>()
+    for (const wall of walls) {
+      const id = wall.material || 'plaster'
+      const list = map.get(id)
+      if (list) list.push(wall)
+      else map.set(id, [wall])
+    }
+    return [...map.entries()]
+  }, [walls])
+  return <>{groups.map(([material, group]) => <InstancedWallGroup key={material} walls={group} material={material} vertices={vertices} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} photoreal={photoreal} />)}</>
+}
+
+function InstancedWallGroup({ walls, material, vertices, selectedId, dragTarget, onSelect, photoreal }: { walls: Wall[]; material: string; vertices: Vertices; selectedId: string | null; dragTarget: string | null; onSelect: (id: string) => void; photoreal: boolean }) {
   const mesh = useRef<THREE.InstancedMesh>(null)
   const ids = useMemo(() => walls.map(w => w.id), [walls])
   const count = walls.length
+  const baseColor = finishColor(material)
   useLayoutEffect(() => {
     const node = mesh.current
     if (!node || !count) return
@@ -90,7 +130,7 @@ function InstancedWalls({ walls, vertices, selectedId, dragTarget, onSelect, pho
       dummy.scale.set(Math.max(length, .01), wall.height_ft, Math.max(wall.thickness_ft, .05))
       dummy.updateMatrix()
       node.setMatrixAt(i, dummy.matrix)
-      color.set(photoreal ? '#ffffff' : (colors[wall.material] || '#eeeae2'))
+      color.set('#ffffff')
       if (selectedId === wall.id) color.lerp(highlight, .45)
       if (dragTarget === wall.id) color.multiplyScalar(.45)
       node.setColorAt(i, color)
@@ -98,11 +138,11 @@ function InstancedWalls({ walls, vertices, selectedId, dragTarget, onSelect, pho
     node.instanceMatrix.needsUpdate = true
     if (node.instanceColor) node.instanceColor.needsUpdate = true
     node.userData = { kind: 'wall-instances', instanceIds: ids }
-  }, [walls, vertices, selectedId, dragTarget, count, ids, photoreal])
+  }, [walls, vertices, selectedId, dragTarget, count, ids])
   if (!count) return null
   return <instancedMesh key={count} ref={mesh} args={[undefined, undefined, count]} castShadow receiveShadow frustumCulled={false} userData={{ kind: 'wall-instances', instanceIds: ids }} onClick={e => { e.stopPropagation(); const id = ids[e.instanceId ?? -1]; if (id) onSelect(id) }}>
     <boxGeometry args={[1, 1, 1]} />
-    <SurfaceMaterial finish="plaster" photoreal={photoreal} />
+    <SurfaceMaterial finish={material} color={baseColor} photoreal={photoreal} />
   </instancedMesh>
 }
 
@@ -122,9 +162,9 @@ function WallMesh({ wall, a, b, openings, faded, selected, onSelect, photoreal }
     if (cursor < length) result.push({ x: (cursor + length) / 2, y: wall.height_ft / 2, width: length - cursor, height: wall.height_ft })
     return result.filter(p => p.width > .001 && p.height > .001)
   }, [openings, length, wall.height_ft])
-  const color = photoreal ? '#ffffff' : (colors[wall.material] || '#eeeae2')
+  const color = finishColor(wall.material)
   return <group position={[a.x, 0, a.y]} rotation={[0, -angle, 0]} userData={{ entityId: wall.id, kind: 'wall' }} onClick={e => { e.stopPropagation(); onSelect(wall.id) }}>
-    {pieces.map((piece, i) => <mesh key={i} position={[piece.x, piece.y, 0]} castShadow receiveShadow><boxGeometry args={[piece.width, piece.height, wall.thickness_ft]} /><SurfaceMaterial finish="plaster" color={color} faded={faded} selected={selected} photoreal={photoreal} /></mesh>)}
+    {pieces.map((piece, i) => <mesh key={i} position={[piece.x, piece.y, 0]} castShadow receiveShadow><boxGeometry args={[piece.width, piece.height, wall.thickness_ft]} /><SurfaceMaterial finish={wall.material} color={color} faded={faded} selected={selected} photoreal={photoreal} /></mesh>)}
     {openings.map(opening => <OpeningDressing key={opening.id} opening={opening} wallThickness={wall.thickness_ft} photoreal={photoreal} />)}
   </group>
 }
@@ -152,9 +192,8 @@ function DoorLeaf({ opening, wallThickness }: { opening: Building['openings'][nu
 
 export function RoomFloor({ room, faded, selected, onSelect }: { room: Building['rooms'][number]; faded: boolean; selected: boolean; onSelect: (id: string) => void }) {
   const geometry = useMemo(() => { const shape = new THREE.Shape(); room.polygon.forEach(([x, y], i) => i === 0 ? shape.moveTo(x, -y) : shape.lineTo(x, -y)); shape.closePath(); return new THREE.ShapeGeometry(shape) }, [room.polygon])
-  const usesOak = ['oak', 'walnut'].includes(room.floor_material)
   useEffect(() => () => geometry.dispose(), [geometry])
-  return <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]} position={[0, .025, 0]} receiveShadow userData={{ entityId: room.id, kind: 'room' }} onClick={e => { e.stopPropagation(); onSelect(room.id) }}><SurfaceMaterial finish={usesOak ? 'wood' : 'stone'} color={room.floor_material === 'walnut' ? '#ad876a' : usesOak ? '#ffffff' : colors[room.floor_material] || '#d5d0c3'} faded={faded} selected={selected} /></mesh>
+  return <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]} position={[0, .025, 0]} receiveShadow userData={{ entityId: room.id, kind: 'room' }} onClick={e => { e.stopPropagation(); onSelect(room.id) }}><SurfaceMaterial finish={room.floor_material || 'oak'} color={finishColor(room.floor_material || 'oak')} faded={faded} selected={selected} /></mesh>
 }
 
 function edgeCenter(a: Point, b: Point) {

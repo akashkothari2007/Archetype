@@ -6,10 +6,17 @@ export const GOOGLE_TILES_ASSET_ID = 2275207
 export const ionToken: string = import.meta.env.VITE_CESIUM_ION_TOKEN || ''
 export const emptySite = { lat: null as number | null, lon: null as number | null, rotation_deg: 0, ground_offset_ft: 0, address: '' }
 
-/** Hover far above the ellipsoid until terrain is measured, then frame the massing. */
+/** Hover used until terrain is probed. Higher than Everest so inland cities are not underground. */
+export const SITE_APPROACH_HOVER_M = 12_000
+
+/** Camera distance that frames the building lot. Terrain height is ellipsoid height in metres. */
 export function siteCameraOffset(spanM: number, groundM: number | null) {
-  if (groundM == null) return { terrain: 0, hover: 8000, lookUp: 0 }
-  return { terrain: groundM, hover: Math.max(spanM * 3.4, 28), lookUp: spanM * 0.38 }
+  const framed = groundM != null
+  return {
+    terrain: groundM ?? 0,
+    hover: framed ? Math.max(spanM * 1.85, 24) : SITE_APPROACH_HOVER_M,
+    lookUp: framed ? spanM * 0.18 : 0,
+  }
 }
 
 export type LatLon = { lat: number; lon: number }
@@ -167,15 +174,29 @@ export function geocodeSearchUrl(query: string) {
   return `https://api.cesium.com/v1/geocode/search?text=${encodeURIComponent(query)}`
 }
 
+/** Prefer the feature point so an address does not jump to the middle of a huge bbox. */
+export function placesFromGeocode(body: { features?: any[] } | null | undefined, query = ''): Place[] {
+  return (body?.features || []).flatMap((feature: any) => {
+    const coords = feature.geometry?.type === 'Point' ? feature.geometry.coordinates : null
+    const box = feature.bbox
+    let lon: number | undefined
+    let lat: number | undefined
+    if (Array.isArray(coords) && coords.length >= 2) {
+      lon = Number(coords[0])
+      lat = Number(coords[1])
+    } else if (Array.isArray(box) && box.length >= 4) {
+      lon = (Number(box[0]) + Number(box[2])) / 2
+      lat = (Number(box[1]) + Number(box[3])) / 2
+    }
+    if (lon == null || lat == null || !isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return []
+    return [{ name: String(feature.properties?.label || feature.properties?.name || query), lon, lat }]
+  }).slice(0, 6)
+}
+
 export async function geocode(query: string, signal?: AbortSignal): Promise<Place[]> {
   if (!ionToken) throw new Error('Set VITE_CESIUM_ION_TOKEN in .env to search for a location.')
   const url = geocodeSearchUrl(query)
   const response = await fetch(url, { headers: { Authorization: `Bearer ${ionToken}` }, signal })
   if (!response.ok) throw new Error(response.status === 401 ? 'The Cesium ion token was rejected. Check it has the geocode scope.' : `Search failed (${response.status}).`)
-  const body = await response.json()
-  return (body.features || []).flatMap((feature: any) => {
-    const box = feature.bbox
-    if (!Array.isArray(box) || box.length < 4) return []
-    return [{ name: String(feature.properties?.label || feature.properties?.name || query), lon: (box[0] + box[2]) / 2, lat: (box[1] + box[3]) / 2 }]
-  }).slice(0, 6)
+  return placesFromGeocode(await response.json(), query)
 }

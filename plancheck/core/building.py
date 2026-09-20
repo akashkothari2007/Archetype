@@ -85,6 +85,7 @@ class PlacedObject(Entity):
     width_ft: FiniteFloat = Field(default=2, gt=0)
     depth_ft: FiniteFloat = Field(default=2, gt=0)
     height_ft: FiniteFloat = Field(default=2, gt=0)
+    splat: str = ""
 
 
 class Environment(BaseModel):

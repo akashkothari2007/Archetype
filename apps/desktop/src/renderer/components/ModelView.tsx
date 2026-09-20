@@ -4,21 +4,32 @@ import { OrbitControls, TransformControls, GizmoHelper, GizmoViewcube, useGLTF }
 import * as THREE from 'three'
 import { Footprints, Orbit, RotateCw, Maximize, LoaderCircle, X, Sparkles, Eye, EyeOff } from 'lucide-react'
 import type { Building } from '../types'
-import { assetMime, floorBounds, furniture, interiorPoint, isTypingTarget, placementCommand, pointInPolygon, projectPoint, roomLookYaw, type Asset, type EditorProps, type Point } from './editor-geometry'
+import { assetMime, floorBounds, floorsBounds, furniture, interiorPoint, isTypingTarget, placementCommand, pointInPolygon, projectPoint, roomLookYaw, type Asset, type EditorProps, type Point } from './editor-geometry'
 import './editor-view.css'
-import { Daylight, Landscape, FloorSlab } from './scene-landscape'
-import { BuildingShell, RoomFloor, Walls3D, groundElevationOf, topFloorOf } from './scene-building'
+import { Daylight, Landscape } from './scene-landscape'
+import { BuildingShell, cutawayHeightFt, floorWorldY, floorsThrough, groundElevationOf, topFloorOf } from './scene-building'
+import { ComplianceFailFx } from './scene-compliance'
+import type { CheckHit } from './compliance-scene'
 import { SiteView } from './SiteView'
 import { consumeSiteView, requestSiteView } from './site-intent'
 import { emptySite, type SiteReport } from './site-geometry'
 import { api, base, waitJob } from '../api'
 import { captureGuide } from './appearance-capture'
 import { AppearanceContext, useAppearance, type AppearancePalette } from './appearance-context'
+import { FurnitureDraw } from './furniture-draw'
+import { consumeImagineFurniture, furnitureFromSketch, type InkBounds } from './furniture-imagine'
+import { ObjectSplat } from './scene-splat'
 
 type CameraAction = { kind: 'fit' | 'rotate' | 'teleport'; point?: Point; nonce: number }
 type Hit = { id: string; point: Point; kind: string } | null
 type View = 'exterior' | 'cutaway' | 'site'
 type CamSnap = { pos: [number, number, number]; target: [number, number, number] } | null
+type ViewMeasure = {
+  snapshot: () => string
+  unproject: (nx: number, ny: number) => Point | null
+  worldPerPixel: (at: Point, canvasHeight: number) => number
+  yawToward: (at: Point) => number
+}
 const ORBIT_FOV = 42
 const WALK_FOV = 72
 const EYE_HEIGHT = 5.3
@@ -74,8 +85,8 @@ async function appearanceMeta(projectId: string, fallback?: unknown) {
   }
 }
 
-export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | null) => void; visible?: boolean }) {
-  const { building, floorId, onCommand, onSelect, selectedId, busy, projectId, registerPaint } = props
+export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | null) => void; visible?: boolean; checks?: CheckHit[] }) {
+  const { building, floorId, onCommand, onSelect, selectedId, busy, projectId, registerPaint, onFloor } = props
   const host = useRef<HTMLDivElement>(null)
   const cameraStore = useRef<CamSnap>(null)
   const [walking, setWalking] = useState(false)
@@ -89,12 +100,17 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
   const [objectTool, setObjectTool] = useState<'translate' | 'rotate'>('translate')
   const [spacePanning, setSpacePanning] = useState(false)
   const [painting, setPainting] = useState(false)
+  const [imagining, setImagining] = useState(false)
+  const [imagineShot, setImagineShot] = useState('')
+  const [imaginingBusy, setImaginingBusy] = useState(false)
   const [appearanceOpen, setAppearanceOpen] = useState(false)
   const [appearancePrompt, setAppearancePrompt] = useState('')
   const [showEnhanced, setShowEnhanced] = useState(true)
   const [report, setReport] = useState<SiteReport | null>(null)
+  const [placing, setPlacing] = useState(false)
   const [look, setLook] = useState(emptyLook)
   const grab = useRef<(() => ReturnType<typeof captureGuide>) | null>(null)
+  const measure = useRef<ViewMeasure | null>(null)
   const raycast = useRef<(x: number, y: number) => Hit>(() => null)
   const rooms = building.rooms.filter(r => r.floor_id === floorId)
   const bounds = useMemo(() => floorBounds(building, floorId), [building, floorId])
@@ -106,9 +122,14 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
     setCurrentRoom(current => current === id ? current : id)
     setCameraPoint(current => current && Math.abs(current.x - point.x) < .01 && Math.abs(current.y - point.y) < .01 ? current : point)
   }, [])
-  useEffect(() => { setAction({ kind: 'fit', nonce: Date.now() }); setWalking(false); setCurrentRoom(null) }, [floorId])
+  useEffect(() => { setAction({ kind: 'fit', nonce: Date.now() }); setWalking(false); setCurrentRoom(null); setImagining(false); setImagineShot(''); setImaginingBusy(false) }, [floorId])
   // The Site tab in the library panel shows the buildability readout measured here.
   useEffect(() => { window.dispatchEvent(new CustomEvent('archetype:site-report', { detail: onSite ? report : null })) }, [report, onSite])
+  useEffect(() => {
+    const listener = (event: Event) => setPlacing(!!(event as CustomEvent<boolean>).detail)
+    window.addEventListener('archetype:site-placing', listener)
+    return () => window.removeEventListener('archetype:site-placing', listener)
+  }, [])
   useEffect(() => {
     const listener = (event: Event) => { setDragAsset((event as CustomEvent<Asset | null>).detail); setDragTarget(null) }
     const show = () => { consumeSiteView(); setView('site'); setWalking(false) }
@@ -117,18 +138,18 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
     if (consumeSiteView()) show()
     return () => { window.removeEventListener('archetype:asset-drag', listener); window.removeEventListener('archetype:show-site', show) }
   }, [])
-  useEffect(() => { if (!notice || painting) return; const t = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(t) }, [notice, painting])
+  useEffect(() => { if (!notice || painting || imaginingBusy) return; const t = setTimeout(() => setNotice(''), 4000); return () => clearTimeout(t) }, [notice, painting, imaginingBusy])
   useEffect(() => {
     const isActive = () => !!host.current?.contains(document.activeElement)
     const down = (event: KeyboardEvent) => {
       if (isTypingTarget(event.target) || isTypingTarget(document.activeElement)) return
-      if (event.code === 'Space' && isActive() && !walking) { event.preventDefault(); setSpacePanning(true) }
+      if (event.code === 'Space' && isActive() && !walking && !imagining) { event.preventDefault(); setSpacePanning(true) }
     }
     const up = (event: KeyboardEvent) => { if (event.code === 'Space') setSpacePanning(false) }
     const release = () => setSpacePanning(false)
     window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', release)
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', release) }
-  }, [walking])
+  }, [walking, imagining])
   useEffect(() => {
     if (!projectId) return
     let cancelled = false
@@ -167,11 +188,64 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
       setNotice(noticeText(error))
     } finally { setPainting(false) }
   }
+  function cancelImagine() {
+    if (imaginingBusy) return
+    setImagining(false)
+    setImagineShot('')
+    setNotice('')
+  }
+  async function startImagine() {
+    if (!projectId || imagining || painting || imaginingBusy) return
+    if (document.pointerLockElement) document.exitPointerLock()
+    setAppearanceOpen(false)
+    const needsInterior = onSite || (view === 'exterior' && !walking)
+    if (needsInterior) {
+      setView('cutaway')
+      setWalking(false)
+    }
+    for (let i = 0; i < 40 && !measure.current; i++) await new Promise(r => setTimeout(r, 50))
+    if (!measure.current) { setNotice('The 3D view is still starting.'); return }
+    if (needsInterior) await new Promise(r => setTimeout(r, 400))
+    setImagineShot(measure.current.snapshot())
+    setImagining(true)
+    setNotice('')
+  }
+  const latestImagine = useRef(startImagine)
+  latestImagine.current = startImagine
+  useEffect(() => {
+    const open = () => { consumeImagineFurniture(); void latestImagine.current() }
+    window.addEventListener('archetype:imagine-furniture', open)
+    if (consumeImagineFurniture()) open()
+    return () => window.removeEventListener('archetype:imagine-furniture', open)
+  }, [])
+  async function generateFurniture(image: string, ink: InkBounds, prompt: string) {
+    if (!projectId || !measure.current || imaginingBusy) return
+    const view = { width: host.current?.clientWidth || 1, height: host.current?.clientHeight || 1 }
+    const room = rooms.find(r => r.id === currentRoom) || rooms[0]
+    const fallback = cameraPoint || (room ? interiorPoint(room.polygon) : { x: bounds.cx, y: bounds.cy })
+    const pose = furnitureFromSketch(ink, view, measure.current.unproject, measure.current.worldPerPixel, measure.current.yawToward, fallback)
+    setImaginingBusy(true)
+    setNotice('Painting the furniture with Flux…')
+    try {
+      const { job_id } = await api(`/projects/${projectId}/imagine-furniture`, { image, prompt, floor_id: floorId, ...pose })
+      const result = await waitJob(job_id, job => { if (job.message) setNotice(job.message) }, 1_080_000)
+      const object = result?.object
+      if (!object?.id || !object.splat) throw new Error('The furniture finished without a 3D model.')
+      onCommand([{ kind: 'place_object', target_id: '', params: object }])
+      onSelect(object.id)
+      setImagining(false)
+      setImagineShot('')
+      setNotice('Imagined furniture placed in the room.')
+    } catch (error) {
+      setNotice(noticeText(error))
+    } finally { setImaginingBusy(false) }
+  }
   const latestPaint = useRef<PaintFn>(paint)
   latestPaint.current = paint
   useEffect(() => { registerPaint?.(prompt => latestPaint.current(prompt)); return () => registerPaint?.(null) }, [registerPaint])
-  return <div ref={host} tabIndex={0} className={`editor-modelview ${dragAsset ? 'asset-dragging' : ''}${spacePanning ? ' space-panning' : ''}`} aria-label="3D model editor" onPointerDown={() => host.current?.focus()} onDragOver={event => { event.preventDefault(); const hit = raycast.current(event.clientX, event.clientY); setDragTarget(hit?.id || null) }} onDragLeave={event => { if (!host.current?.contains(event.relatedTarget as Node)) setDragTarget(null) }} onDrop={event => {
+  return <div ref={host} tabIndex={0} className={`editor-modelview ${dragAsset ? 'asset-dragging' : ''}${spacePanning && !imagining ? ' space-panning' : ''}${imagining ? ' imagining' : ''}`} aria-label="3D model editor" onPointerDown={() => host.current?.focus()} onDragOver={event => { if (imagining) return; event.preventDefault(); const hit = raycast.current(event.clientX, event.clientY); setDragTarget(hit?.id || null) }} onDragLeave={event => { if (!host.current?.contains(event.relatedTarget as Node)) setDragTarget(null) }} onDrop={event => {
     event.preventDefault()
+    if (imagining) return
     try {
       const data = event.dataTransfer.getData(assetMime)
       if (!data) return
@@ -186,21 +260,28 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
   }}>
     <SceneBoundary>{props.visible === false ? null : onSite
       ? <SiteView building={building} report={report} onReport={setReport} onCommand={onCommand} palette={look.palette} enhanced={showEnhanced && !!look.palette} />
-      : <AppearanceContext.Provider value={{ ...look, splatUrl: null, apply: exterior && !walking && showEnhanced && !!look.palette }}><Canvas shadows={{ type: THREE.PCFShadowMap }} dpr={[1, 1.5]} camera={{ position: [bounds.cx + 30, 38, bounds.cy + 40], fov: ORBIT_FOV, near: .2, far: 8000 }} gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05, preserveDrawingBuffer: true }} onPointerMissed={() => onSelect(null)}>
-        <Scene {...props} exterior={exterior && !walking} walking={walking} spacePanning={spacePanning} objectTool={objectTool} action={action} dragTarget={dragTarget} raycast={raycast} grab={grab} setRoom={setSceneRoom} cameraStore={cameraStore} />
+      : <AppearanceContext.Provider value={{ ...look, splatUrl: null, apply: exterior && !walking && showEnhanced && !!look.palette }}><Canvas shadows={{ type: THREE.PCFShadowMap }} dpr={[1, 1.5]} camera={{ position: [bounds.cx + 30, 38, bounds.cy + 40], fov: ORBIT_FOV, near: .2, far: 8000 }} gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05, preserveDrawingBuffer: true }} onPointerMissed={() => { if (!imagining) onSelect(null) }}>
+        <Scene {...props} exterior={exterior && !walking} walking={walking} locked={imagining} spacePanning={spacePanning && !imagining} objectTool={objectTool} action={action} dragTarget={dragTarget} raycast={raycast} grab={grab} measure={measure} setRoom={setSceneRoom} cameraStore={cameraStore} />
       </Canvas></AppearanceContext.Provider>}</SceneBoundary>
-    {!onSite && <div className="editor-floating-tools editor-model-tools" role="toolbar" aria-label="3D navigation">
+    {!onSite && !imagining && <div className="editor-floating-tools editor-model-tools" role="toolbar" aria-label="3D navigation">
       <button className={!walking ? 'active' : ''} aria-label="Orbit view" title="Orbit view" onClick={() => setWalking(false)}><Orbit size={17} /></button>
       <button className={walking ? 'active' : ''} aria-label="Walk through the building" title="Walk through" onClick={() => { setWalking(true); const room = rooms.find(r => r.id === currentRoom) || rooms[0]; if (room) setAction({ kind: 'teleport', point: interiorPoint(room.polygon), nonce: Date.now() }) }}><Footprints size={17} /></button>
       <span className="editor-tool-divider" /><button title="Rotate view 45°" aria-label="Rotate view 45 degrees" onClick={() => setAction({ kind: 'rotate', nonce: Date.now() })}><RotateCw size={17} /></button><button title="Fit model" aria-label="Fit model" onClick={() => { setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}><Maximize size={16} /></button>
-      <span className="editor-tool-divider" /><button className={appearanceOpen || look.palette && showEnhanced ? 'active' : ''} title="Configure the enhanced exterior" aria-label="Configure enhanced exterior" disabled={!projectId} onClick={() => setAppearanceOpen(open => !open)}>{painting ? <LoaderCircle size={17} className="editor-spin" /> : <Sparkles size={17} />}</button>
+      <span className="editor-tool-divider" /><button className={appearanceOpen || look.palette && showEnhanced ? 'active' : ''} title="Configure the enhanced exterior" aria-label="Configure enhanced exterior" disabled={!projectId || painting} onClick={() => setAppearanceOpen(open => !open)}>{painting ? <LoaderCircle size={17} className="editor-spin" /> : <Sparkles size={17} />}</button>
     </div>}
-    <div className="editor-scene-modes" role="group" aria-label="Building presentation">
-      <button aria-pressed={exterior && !walking} onClick={() => { setView('exterior'); setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}>{look.palette && showEnhanced ? 'Enhanced exterior' : 'CAD exterior'}</button>
-      <button aria-pressed={view === 'cutaway' || walking} onClick={() => { setView('cutaway'); setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}>Floor cutaway</button>
-      <button aria-pressed={onSite} title="Place the building in a Google Earth view of the real site" onClick={() => { setWalking(false); requestSiteView() }}>On site</button>
-    </div>
-    {appearanceOpen && !onSite && <form className="editor-appearance-panel" onSubmit={event => { event.preventDefault(); if (!painting) void paint(appearancePrompt) }}>
+    {!imagining && <div className="editor-scene-bar">
+      <div className="editor-scene-modes" role="group" aria-label="Building presentation">
+        <button aria-pressed={exterior && !walking} onClick={() => { setView('exterior'); setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}>{look.palette && showEnhanced ? 'Enhanced exterior' : 'CAD exterior'}</button>
+        <button aria-pressed={view === 'cutaway' || walking} onClick={() => { setView('cutaway'); setWalking(false); setAction({ kind: 'fit', nonce: Date.now() }) }}>Floor cutaway</button>
+        <button aria-pressed={onSite} title="Place the building in a Google Earth view of the real site" onClick={() => { setWalking(false); requestSiteView() }}>On site</button>
+      </div>
+      {!onSite && !!building.floors.length && <label className="editor-floor-switch">
+        <select aria-label="Active floor" value={floorId} onChange={e => { onFloor?.(e.target.value); onSelect(null) }} onKeyDown={event => event.stopPropagation()}>
+          {building.floors.map(floor => <option key={floor.id} value={floor.id}>{floor.name}</option>)}
+        </select>
+      </label>}
+    </div>}
+    {appearanceOpen && !onSite && !imagining && <form className="editor-appearance-panel" onSubmit={event => { event.preventDefault(); if (!painting) void paint(appearancePrompt) }}>
       <header><div><strong>Exterior appearance</strong><span>Presentation only · interior stays measured</span></div><button type="button" aria-label="Close exterior appearance" onClick={() => setAppearanceOpen(false)}><X size={14} /></button></header>
       <label htmlFor="exterior-style">Describe any façade style</label>
       <textarea id="exterior-style" value={appearancePrompt} onChange={event => setAppearancePrompt(event.target.value)} placeholder="e.g. creamy limestone, bronze windows, planted roof edges…" rows={4} />
@@ -208,14 +289,15 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
       {look.palette && <button type="button" className="editor-appearance-compare" onClick={() => setShowEnhanced(show => !show)}>{showEnhanced ? <Eye size={14} /> : <EyeOff size={14} />}{showEnhanced ? 'Showing enhanced exterior' : 'Showing CAD exterior'}</button>}
       <div className="editor-appearance-actions"><button type="button" onClick={() => setAppearanceOpen(false)}>Done</button><button type="submit" disabled={painting}>{painting ? <><LoaderCircle size={13} className="editor-spin" /> Generating…</> : <><Sparkles size={13} />{look.palette ? 'Regenerate exterior' : 'Generate exterior'}</>}</button></div>
     </form>}
-    <div className="editor-model-label"><span className="editor-live-dot" />{onSite ? (sited ? `${site.address || 'Placed on site'} · Google Earth 3D` : 'Google Earth 3D · use the Site tab or click the globe to place') : exterior && !walking ? 'Whole building · Concept roof & landscape' : `${building.floors.find(f => f.id === floorId)?.name} · ${walking ? 'Walkthrough' : 'Floor cutaway'}`}</div>
-    {selectedId && !walking && !onSite && <div className="editor-model-selection">{building.walls.some(w => w.id === selectedId) ? 'Wall selected' : building.rooms.find(r => r.id === selectedId)?.name || 'Object selected'}{building.objects.some(o => o.id === selectedId) && <><button className={objectTool === 'translate' ? 'active' : ''} onClick={() => setObjectTool('translate')}>Move</button><button className={objectTool === 'rotate' ? 'active' : ''} onClick={() => setObjectTool('rotate')}>Rotate</button></>}<button aria-label="Clear selection" onClick={() => onSelect(null)}><X size={12} /></button></div>}
+    {imagining && imagineShot && <FurnitureDraw snapshot={imagineShot} busy={imaginingBusy} onCancel={cancelImagine} onGenerate={(image, ink, prompt) => void generateFurniture(image, ink, prompt)} />}
+    {selectedId && !walking && !onSite && !imagining && <div className="editor-model-selection">{building.walls.some(w => w.id === selectedId) ? 'Wall selected' : building.rooms.find(r => r.id === selectedId)?.name || 'Object selected'}{building.objects.some(o => o.id === selectedId) && <><button className={objectTool === 'translate' ? 'active' : ''} onClick={() => setObjectTool('translate')}>Move</button><button className={objectTool === 'rotate' ? 'active' : ''} onClick={() => setObjectTool('rotate')}>Rotate</button></>}<button aria-label="Clear selection" onClick={() => onSelect(null)}><X size={12} /></button></div>}
     {onSite && sited && !report && <div className="editor-updating" role="status"><LoaderCircle size={13} className="editor-spin" />Streaming the site and measuring the ground</div>}
     {painting && <div className="editor-updating" role="status"><LoaderCircle size={13} className="editor-spin" />Preparing the enhanced exterior</div>}
-    {busy && !painting && <div className="editor-updating" role="status"><LoaderCircle size={13} className="editor-spin" />Updating design · showing saved model</div>}
+    {imaginingBusy && <div className="editor-updating" role="status"><LoaderCircle size={13} className="editor-spin" />Imagining furniture from your drawing</div>}
+    {busy && !painting && !imaginingBusy && <div className="editor-updating" role="status"><LoaderCircle size={13} className="editor-spin" />Updating design · showing saved model</div>}
     {notice && <div className="editor-notice" role="status">{notice}</div>}
-    <div className="editor-canvas-hint">{onSite ? (sited ? 'Click the building to rotate · Drag empty space to orbit · Scroll to zoom · Imagery © Google' : 'Use the Site tab to search, or click the globe to place · Drag to orbit · Imagery © Google') : walking ? 'Click the model to look around · W A S D to walk · Esc releases the pointer' : spacePanning ? 'Drag to pan · Release Space to orbit' : 'Drag to orbit · Hold Space to pan · Scroll to zoom'}</div>
-    {rooms.length > 0 && !onSite && (!exterior || walking) && <div className="editor-minimap"><div>{currentRoom ? rooms.find(r => r.id === currentRoom)?.name : 'Floor overview'}<span>Click a room to enter</span></div><svg viewBox={`${bounds.minX - 1} ${bounds.minY - 1} ${bounds.width + 2} ${bounds.height + 2}`} role="group" aria-label="Floor minimap">
+    {(imagining || onSite || walking || spacePanning) && <div className="editor-canvas-hint">{imagining ? (imaginingBusy ? 'Flux and TripoSplat are building the piece you drew' : 'Paint on the frozen room · colors and brush stay in this view') : onSite ? (placing ? 'Move the blue building onto the lot and click once to drop it · Imagery © Google' : sited ? 'Click the building to rotate · Drag empty space to orbit · Scroll to zoom · Imagery © Google' : 'Search an address in the Site tab, then click once to place · Imagery © Google') : walking ? 'Click the model to look around · W A S D to walk · Esc releases the pointer' : 'Drag to pan · Release Space to orbit'}</div>}
+    {rooms.length > 0 && !onSite && !imagining && (!exterior || walking) && <div className="editor-minimap"><div>{currentRoom ? rooms.find(r => r.id === currentRoom)?.name : 'Floor overview'}<span>Click a room to enter</span></div><svg viewBox={`${bounds.minX - 1} ${bounds.minY - 1} ${bounds.width + 2} ${bounds.height + 2}`} role="group" aria-label="Floor minimap">
       {rooms.map(room => <polygon key={room.id} tabIndex={0} role="button" aria-label={`Enter ${room.name}`} points={room.polygon.map(p => p.join(',')).join(' ')} fill={room.id === currentRoom ? '#7d939f' : '#b9bdbe'} fillOpacity={room.id === currentRoom ? .75 : .4} stroke="#657077" strokeWidth={.12} onClick={() => { setWalking(true); setAction({ kind: 'teleport', point: interiorPoint(room.polygon), nonce: Date.now() }) }} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { setWalking(true); setAction({ kind: 'teleport', point: interiorPoint(room.polygon), nonce: Date.now() }) } }} />)}
       {building.walls.filter(w => w.floor_id === floorId).map(w => { const a = building.vertices.find(v => v.id === w.start_id), b = building.vertices.find(v => v.id === w.end_id); return a && b ? <line key={w.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#4b5459" strokeWidth={Math.max(w.thickness_ft, .12)} pointerEvents="none" /> : null })}
       {cameraPoint && <circle cx={cameraPoint.x} cy={cameraPoint.y} r={Math.max(.25, bounds.width / 75)} fill="#2e647d" stroke="white" strokeWidth={.16} pointerEvents="none" />}
@@ -223,24 +305,37 @@ export function ModelView(props: EditorProps & { registerPaint?: (fn: PaintFn | 
   </div>
 }
 
-function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, walking, spacePanning, objectTool, action, dragTarget, raycast, grab, setRoom, cameraStore }: EditorProps & { exterior: boolean; walking: boolean; spacePanning: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; grab: RefObject<(() => ReturnType<typeof captureGuide>) | null>; setRoom: (id: string | null, p: Point) => void; cameraStore: RefObject<CamSnap> }) {
-  const look = useAppearance()
-  const bounds = useMemo(() => floorBounds(exterior ? { ...building, vertices: building.vertices.map(v => ({ ...v, floor_id: floorId })) } : building, floorId), [building, floorId, exterior])
+function Scene({ building, floorId, projectId, onSelect, onCommand, selectedId, checks = [], exterior, walking, locked, spacePanning, objectTool, action, dragTarget, raycast, grab, measure, setRoom, cameraStore }: EditorProps & { checks?: CheckHit[]; exterior: boolean; walking: boolean; locked: boolean; spacePanning: boolean; objectTool: 'translate' | 'rotate'; action: CameraAction; dragTarget: string | null; raycast: RefObject<(x: number, y: number) => Hit>; grab: RefObject<(() => ReturnType<typeof captureGuide>) | null>; measure: RefObject<ViewMeasure | null>; setRoom: (id: string | null, p: Point) => void; cameraStore: RefObject<CamSnap> }) {
+  const stacked = useMemo(() => exterior ? building.floors : floorsThrough(building, floorId), [building, floorId, exterior])
+  const floorPlan = useMemo(() => floorBounds(building, floorId), [building, floorId])
+  const bounds = useMemo(() => floorsBounds(building, stacked.map(floor => floor.id)), [building, stacked])
   const walls = building.walls.filter(w => w.floor_id === floorId), rooms = building.rooms.filter(r => r.floor_id === floorId)
   const objects = building.objects.filter(o => o.floor_id === floorId)
+  const currentIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const wall of walls) ids.add(wall.id)
+    for (const room of rooms) ids.add(room.id)
+    for (const object of objects) ids.add(object.id)
+    return ids
+  }, [walls, rooms, objects])
   const vertices = useMemo(() => new Map(building.vertices.map(v => [v.id, v])), [building.vertices])
   const controls = useRef<any>(null)
   const { camera, gl, scene, invalidate } = useThree()
   const keys = useRef(new Set<string>())
   const lastRoom = useRef(0)
+  const lockedRef = useRef(locked)
+  lockedRef.current = locked
   const groundElevation = groundElevationOf(building)
   const topFloor = topFloorOf(building)
+  const floorY = floorWorldY(building, floorId)
+  const eyeY = floorY + EYE_HEIGHT
+  const selectCurrent = useCallback((id: string) => { if (currentIds.has(id)) onSelect(id) }, [currentIds, onSelect])
   // Save camera state into the parent ref when this Canvas unmounts so it
   // can be restored when the 3D panel becomes visible again.
   useEffect(() => () => {
     const tgt = controls.current?.target
-    cameraStore.current = { pos: [camera.position.x, camera.position.y, camera.position.z], target: tgt ? [tgt.x, tgt.y, tgt.z] : [bounds.cx, 0, bounds.cy] }
-  }, [camera, bounds.cx, bounds.cy, cameraStore])
+    cameraStore.current = { pos: [camera.position.x, camera.position.y, camera.position.z], target: tgt ? [tgt.x, tgt.y, tgt.z] : [bounds.cx, floorY, bounds.cy] }
+  }, [camera, bounds.cx, bounds.cy, cameraStore, floorY])
   useEffect(() => {
     grab.current = () => {
       const height = (topFloor?.elevation_ft || 0) + (topFloor?.height_ft || 9) - groundElevation
@@ -248,6 +343,28 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
     }
     return () => { grab.current = null }
   }, [gl, scene, bounds, topFloor?.elevation_ft, topFloor?.height_ft, groundElevation, grab])
+  useEffect(() => {
+    const persp = camera as THREE.PerspectiveCamera
+    measure.current = {
+      snapshot: () => {
+        gl.render(scene, camera)
+        return gl.domElement.toDataURL('image/png')
+      },
+      unproject: (nx, ny) => {
+        const ray = new THREE.Raycaster()
+        ray.setFromCamera(new THREE.Vector2(nx, ny), camera)
+        const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -floorY), new THREE.Vector3())
+        return point ? { x: point.x, y: point.z } : null
+      },
+      worldPerPixel: (at, canvasHeight) => {
+        const dist = camera.position.distanceTo(new THREE.Vector3(at.x, floorY, at.y))
+        const fov = ((camera as THREE.PerspectiveCamera).fov * Math.PI) / 180
+        return 2 * dist * Math.tan(fov / 2) / Math.max(canvasHeight, 1)
+      },
+      yawToward: at => Math.atan2(camera.position.x - at.x, camera.position.z - at.y) * 180 / Math.PI,
+    }
+    return () => { measure.current = null }
+  }, [camera, gl, scene, measure, floorY])
   useEffect(() => {
     const orbit = controls.current
     if (!orbit) return
@@ -263,58 +380,62 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
       for (const hit of hits) {
         if (hit.object.userData.kind === 'wall-instances' && hit.instanceId != null) {
           const id = (hit.object.userData.instanceIds as string[] | undefined)?.[hit.instanceId]
-          if (id) return { id, kind: 'wall', point: { x: hit.point.x, y: hit.point.z } }
+          if (id && currentIds.has(id)) return { id, kind: 'wall', point: { x: hit.point.x, y: hit.point.z } }
         }
-        let object: THREE.Object3D | null = hit.object; while (object && !object.userData.entityId) object = object.parent; if (object?.userData.entityId) return { id: object.userData.entityId, kind: object.userData.kind, point: { x: hit.point.x, y: hit.point.z } }
+        let object: THREE.Object3D | null = hit.object; while (object && !object.userData.entityId) object = object.parent
+        if (object?.userData.entityId && currentIds.has(object.userData.entityId)) return { id: object.userData.entityId, kind: object.userData.kind, point: { x: hit.point.x, y: hit.point.z } }
       }
-      const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3())
-      return point && point.x >= bounds.minX - 2 && point.x <= bounds.maxX + 2 && point.z >= bounds.minY - 2 && point.z <= bounds.maxY + 2 ? { id: '', kind: 'ground', point: { x: point.x, y: point.z } } : null
+      const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -floorY), new THREE.Vector3())
+      return point && point.x >= floorPlan.minX - 2 && point.x <= floorPlan.maxX + 2 && point.z >= floorPlan.minY - 2 && point.z <= floorPlan.maxY + 2 ? { id: '', kind: 'ground', point: { x: point.x, y: point.z } } : null
     }
-  }, [camera, gl, scene, raycast, bounds, exterior])
+  }, [camera, gl, scene, raycast, floorPlan, exterior, currentIds, floorY])
   useEffect(() => {
     const persp = camera as THREE.PerspectiveCamera
     persp.fov = walking ? WALK_FOV : ORBIT_FOV
     persp.updateProjectionMatrix()
   }, [walking, camera])
   useEffect(() => {
+    if (lockedRef.current) return
     const saved = cameraStore.current
     if (saved) {
       camera.position.set(saved.pos[0], saved.pos[1], saved.pos[2])
       controls.current?.target.set(saved.target[0], saved.target[1], saved.target[2])
       cameraStore.current = null
     } else if (action.kind === 'fit') {
-      const height = exterior ? (topFloor?.elevation_ft || 0) + (topFloor?.height_ft || 9) - groundElevation : 9
+      const height = exterior ? (topFloor?.elevation_ft || 0) + (topFloor?.height_ft || 9) - groundElevation : cutawayHeightFt(building, floorId)
       const distance = Math.max(bounds.width, bounds.height, height * 2, 20) * (exterior ? 1.55 : 1)
-      const targetY = exterior ? height * .35 : 1
-      camera.position.set(bounds.cx + distance * .85, targetY + distance * .65, bounds.cy - distance * 1.25)
+      const targetY = exterior ? height * .35 : floorY + 1
+      camera.position.set(bounds.cx + distance * .9, targetY + distance * .48, bounds.cy - distance * 1.15)
       controls.current?.target.set(bounds.cx, targetY, bounds.cy)
       camera.lookAt(bounds.cx, targetY, bounds.cy)
     } else if (action.kind === 'rotate') {
       if (walking) { camera.rotation.order = 'YXZ'; camera.rotation.y -= Math.PI / 4 }
-      else { const center = controls.current?.target || new THREE.Vector3(bounds.cx, 0, bounds.cy); const delta = camera.position.clone().sub(center).applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4); camera.position.copy(center).add(delta); camera.lookAt(center) }
+      else { const center = controls.current?.target || new THREE.Vector3(bounds.cx, floorY, bounds.cy); const delta = camera.position.clone().sub(center).applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4); camera.position.copy(center).add(delta); camera.lookAt(center) }
     } else if (action.point) {
       const room = building.rooms.find(r => r.floor_id === floorId && pointInPolygon(action.point!, r.polygon))
       const yaw = room ? roomLookYaw(room.polygon, action.point) : Math.PI
-      camera.position.set(action.point.x, EYE_HEIGHT, action.point.y)
+      camera.position.set(action.point.x, eyeY, action.point.y)
       camera.rotation.order = 'YXZ'; camera.rotation.set(-.12, yaw, 0)
-      controls.current?.target.set(action.point.x, EYE_HEIGHT, action.point.y + 4)
+      controls.current?.target.set(action.point.x, eyeY, action.point.y + 4)
     }
     controls.current?.update()
     invalidate()
-  }, [action, bounds, camera, exterior, topFloor?.elevation_ft, topFloor?.height_ft, groundElevation, invalidate, cameraStore])
+  }, [action, bounds, building, camera, exterior, eyeY, floorId, floorY, topFloor?.elevation_ft, topFloor?.height_ft, groundElevation, invalidate, cameraStore])
   useEffect(() => {
-    if (!walking && document.pointerLockElement === gl.domElement) document.exitPointerLock()
+    if (!walking || locked) {
+      if (document.pointerLockElement === gl.domElement) document.exitPointerLock()
+    }
     keys.current.clear()
-    const down = (e: KeyboardEvent) => { if (!walking || ['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return; if (['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { keys.current.add(e.key.toLowerCase()); e.preventDefault() } }
+    const down = (e: KeyboardEvent) => { if (!walking || locked || ['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return; if (['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { keys.current.add(e.key.toLowerCase()); e.preventDefault() } }
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase())
     const blur = () => keys.current.clear()
-    const look = (e: MouseEvent) => { if (walking && document.pointerLockElement === gl.domElement) { camera.rotation.order = 'YXZ'; camera.rotation.y -= e.movementX * .002; camera.rotation.x = THREE.MathUtils.clamp(camera.rotation.x - e.movementY * .002, -Math.PI * .46, Math.PI * .46); invalidate() } }
-    const capture = () => { if (walking) gl.domElement.requestPointerLock()?.catch(() => undefined) }
+    const look = (e: MouseEvent) => { if (walking && !locked && document.pointerLockElement === gl.domElement) { camera.rotation.order = 'YXZ'; camera.rotation.y -= e.movementX * .002; camera.rotation.x = THREE.MathUtils.clamp(camera.rotation.x - e.movementY * .002, -Math.PI * .46, Math.PI * .46); invalidate() } }
+    const capture = () => { if (walking && !locked) gl.domElement.requestPointerLock()?.catch(() => undefined) }
     window.addEventListener('keydown', down); window.addEventListener('keyup', up); window.addEventListener('blur', blur); document.addEventListener('mousemove', look); gl.domElement.addEventListener('click', capture)
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur); document.removeEventListener('mousemove', look); gl.domElement.removeEventListener('click', capture) }
-  }, [walking, camera, gl])
+  }, [walking, locked, camera, gl, invalidate])
   function collides(p: Point) {
-    if (p.x < bounds.minX || p.x > bounds.maxX || p.y < bounds.minY || p.y > bounds.maxY) return true
+    if (p.x < floorPlan.minX || p.x > floorPlan.maxX || p.y < floorPlan.minY || p.y > floorPlan.maxY) return true
     for (const wall of walls) {
       const a = vertices.get(wall.start_id), b = vertices.get(wall.end_id)
       if (!a || !b) continue
@@ -332,7 +453,7 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
     return false
   }
   useFrame(({ clock }, delta) => {
-    if (walking) {
+    if (walking && !locked) {
       const k = keys.current, forward = Number(k.has('w') || k.has('arrowup')) - Number(k.has('s') || k.has('arrowdown')), lateral = Number(k.has('d') || k.has('arrowright')) - Number(k.has('a') || k.has('arrowleft'))
       if (forward || lateral) {
         const direction = new THREE.Vector3(); camera.getWorldDirection(direction); direction.y = 0; direction.normalize()
@@ -343,12 +464,12 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
           if (!collides({ x: camera.position.x + move.x / steps, y: camera.position.z })) camera.position.x += move.x / steps
           if (!collides({ x: camera.position.x, y: camera.position.z + move.z / steps })) camera.position.z += move.z / steps
         }
-        camera.position.y = EYE_HEIGHT
+        camera.position.y = eyeY
         invalidate()
       }
     }
     // Room tracking drives the cutaway minimap and walkthrough only.
-    if ((!exterior || walking) && clock.elapsedTime - lastRoom.current > .3) {
+    if (!locked && (!exterior || walking) && clock.elapsedTime - lastRoom.current > .3) {
       const target = walking ? camera.position : controls.current?.target || camera.position
       const point = { x: target.x, y: target.z }, room = rooms.find(r => pointInPolygon(point, r.polygon))
       setRoom(room?.id || null, point); lastRoom.current = clock.elapsedTime
@@ -361,20 +482,24 @@ function Scene({ building, floorId, onSelect, onCommand, selectedId, exterior, w
       {exterior
         ? <BuildingShell building={building} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} />
         : <group>
-          {rooms.map(room => <group key={room.id}><FloorSlab polygon={room.polygon} y={-.32} thickness={.32} /><RoomFloor room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} /></group>)}
-          <Walls3D walls={walls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} photoreal={false} />
-          {objects.map(object => <PlacedEntity key={object.id} object={object} selected={selectedId === object.id} walking={walking} tool={objectTool} onSelect={onSelect} onCommand={onCommand} />)}
+          <BuildingShell building={building} throughFloorId={floorId} photoreal={false} selectedId={selectedId} dragTarget={dragTarget} onSelect={selectCurrent} />
+          {stacked.flatMap(floor => building.objects.filter(object => object.floor_id === floor.id).map(object => (
+            <PlacedEntity key={object.id} object={object} elevation={floorWorldY(building, floor.id)} selected={selectedId === object.id} walking={walking || locked || floor.id !== floorId} tool={objectTool} projectId={projectId} onSelect={onSelect} onCommand={onCommand} />
+          )))}
         </group>}
+      <ComplianceFailFx building={building} checks={checks} selectedId={selectedId} floorIds={stacked.map(floor => floor.id)} />
     </Suspense>
-    {!walking && <OrbitControls ref={controls} makeDefault minDistance={3} maxDistance={Math.max(bounds.width, bounds.height) * 8} maxPolarAngle={Math.PI * .485} enablePan enableDamping dampingFactor={.09} />}
-    {!walking && <group userData={{ captureHide: true }}><GizmoHelper alignment="top-right" margin={[58, 65]}><GizmoViewcube color="#eeefef" hoverColor="#c8d6df" textColor="#64727b" strokeColor="#e0e1e1" opacity={.8} /></GizmoHelper></group>}
+    {!walking && <OrbitControls ref={controls} makeDefault enabled={!locked} enableRotate={!locked} enablePan={!locked} enableZoom={!locked} minDistance={3} maxDistance={Math.max(bounds.width, bounds.height) * 8} maxPolarAngle={Math.PI * .56} enableDamping dampingFactor={.09} />}
+    {!walking && !locked && <group userData={{ captureHide: true }}><GizmoHelper alignment="top-right" margin={[58, 65]}><GizmoViewcube color="#eeefef" hoverColor="#c8d6df" textColor="#64727b" strokeColor="#e0e1e1" opacity={.8} /></GizmoHelper></group>}
   </>
 }
 
-function PlacedEntity({ object, selected, walking, tool, onSelect, onCommand }: { object: Building['objects'][number]; selected: boolean; walking: boolean; tool: 'translate' | 'rotate'; onSelect: EditorProps['onSelect']; onCommand: EditorProps['onCommand'] }) {
+function PlacedEntity({ object, selected, walking, tool, projectId, onSelect, onCommand, elevation = 0 }: { object: Building['objects'][number]; selected: boolean; walking: boolean; tool: 'translate' | 'rotate'; projectId?: string; onSelect: EditorProps['onSelect']; onCommand: EditorProps['onCommand']; elevation?: number }) {
   const ref = useRef<THREE.Group>(null)
-  const node = <group ref={ref} position={[object.x, .02, object.y]} rotation={[0, -object.rotation_deg * Math.PI / 180, 0]} userData={{ entityId: object.id, kind: 'object' }} onClick={e => { e.stopPropagation(); onSelect(object.id) }}>
-    {object.kind === 'furniture' && furniture.some(a => a.id === object.asset_id) ? <Suspense fallback={<LoadingObject object={object} />}><FurnitureModel object={object} selected={selected} /></Suspense> : <FixtureModel object={object} selected={selected} />}
+  const splat = 'splat' in object ? String(object.splat || '') : ''
+  const splatUrl = splat && projectId ? `${base}/projects/${projectId}/files/${splat}` : ''
+  const node = <group ref={ref} position={[object.x, elevation + .02, object.y]} rotation={[0, -object.rotation_deg * Math.PI / 180, 0]} userData={{ entityId: object.id, kind: 'object' }} onClick={e => { e.stopPropagation(); onSelect(object.id) }}>
+    {splatUrl ? <Suspense fallback={<LoadingObject object={object} />}><ObjectSplat url={splatUrl} width={object.width_ft} height={object.height_ft} depth={object.depth_ft} />{selected && <mesh position={[0, object.height_ft / 2, 0]}><boxGeometry args={[object.width_ft * 1.02, object.height_ft * 1.02, object.depth_ft * 1.02]} /><meshBasicMaterial color="#408cb0" wireframe transparent opacity={.4} /></mesh>}</Suspense> : object.kind === 'furniture' && furniture.some(a => a.id === object.asset_id) ? <Suspense fallback={<LoadingObject object={object} />}><FurnitureModel object={object} selected={selected} /></Suspense> : <FixtureModel object={object} selected={selected} />}
   </group>
   return selected && !walking ? <TransformControls mode={tool} showX={tool === 'translate'} showY={tool === 'rotate'} showZ={tool === 'translate'} size={.7} translationSnap={.25} rotationSnap={Math.PI / 12} onMouseUp={() => { const node = ref.current; if (!node) return; const rotation = -node.rotation.y * 180 / Math.PI; if (Math.abs(node.position.x - object.x) + Math.abs(node.position.z - object.y) + Math.abs(rotation - object.rotation_deg) < .001) return; onCommand([{ kind: 'update_object', target_id: object.id, params: { x: node.position.x, y: node.position.z, rotation_deg: rotation } }]) }}>{node}</TransformControls> : node
 }

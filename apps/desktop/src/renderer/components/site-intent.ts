@@ -1,6 +1,9 @@
 let wantView = false
 let wantPlace = false
 let wantFrame = 0
+let wantLook: SiteLook | null = null
+
+export type SiteLook = { lat: number; lon: number; address: string }
 
 export function requestSiteView() {
   wantView = true
@@ -13,6 +16,14 @@ export function requestSitePlace() {
 }
 
 export function requestSiteFrame() {
+  wantFrame += 1
+  requestSiteView()
+}
+
+/** Fly to an address at building scale and start placing, without dropping the pin yet. */
+export function requestSiteLook(lat: number, lon: number, address = '') {
+  wantLook = { lat, lon, address }
+  wantPlace = true
   wantFrame += 1
   requestSiteView()
 }
@@ -37,4 +48,14 @@ export function consumeSiteFrame() {
 
 export function peekSitePlace() {
   return wantPlace
+}
+
+export function consumeSiteLook() {
+  const look = wantLook
+  wantLook = null
+  return look
+}
+
+export function peekSiteLook() {
+  return wantLook
 }

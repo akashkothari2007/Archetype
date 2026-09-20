@@ -1,10 +1,10 @@
 import {describe,expect,it} from 'vitest';
-import {duplicateNameIds,findNameConflict,normalizeProjectName,projectNameKey} from './project-names';
+import {normalizeProjectName,projectNameKey,uniqueProjectName} from './project-names';
 
 const projects=[
   {project_id:'a',name:'Willow House'},
   {project_id:'b',name:'North Annex'},
-  {project_id:'c',name:'willow  house'},
+  {project_id:'c',name:'Willow House (2)'},
 ];
 
 describe('project names',()=>{
@@ -13,13 +13,11 @@ describe('project names',()=>{
     expect(projectNameKey('WILLOW HOUSE')).toBe('willow house');
   });
 
-  it('finds another project with the same name',()=>{
-    expect(findNameConflict(projects,'willow house','c')?.project_id).toBe('a');
-    expect(findNameConflict(projects,'North Annex','b')).toBeNull();
-    expect(findNameConflict(projects,'  ')).toBeNull();
-  });
-
-  it('marks every project that shares a name',()=>{
-    expect([...duplicateNameIds(projects)].sort()).toEqual(['a','c']);
+  it('keeps a free name and numbers copies',()=>{
+    expect(uniqueProjectName(projects,'North Annex','b')).toBe('North Annex');
+    expect(uniqueProjectName(projects,'Willow House')).toBe('Willow House (3)');
+    expect(uniqueProjectName(projects,'willow house')).toBe('willow house (3)');
+    expect(uniqueProjectName(projects,'Willow House (2)')).toBe('Willow House (3)');
+    expect(uniqueProjectName(projects,'  ')).toBe('');
   });
 });

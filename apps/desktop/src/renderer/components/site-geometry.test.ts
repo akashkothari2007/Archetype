@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Building } from '../types'
-import { assessSite, fitPlane, geocodeSearchUrl, haversineMeters, parseLatLon, planToLocal, samplePlan, siteCameraOffset, siteFootprint, siteSun, siteSunFrom, siteSunLightPosition, type Sample } from './site-geometry'
+import { assessSite, fitPlane, geocodeSearchUrl, haversineMeters, parseLatLon, placesFromGeocode, planToLocal, samplePlan, SITE_APPROACH_HOVER_M, siteCameraOffset, siteFootprint, siteSun, siteSunFrom, siteSunLightPosition, type Sample } from './site-geometry'
 
 const model: Building = {
   schema_version: 2, units: 'feet',
@@ -108,6 +108,16 @@ describe('coordinate entry', () => {
     expect(geocodeSearchUrl('東京')).toContain(encodeURIComponent('東京'))
     expect(geocodeSearchUrl('London')).not.toMatch(/country/i)
   })
+  it('uses the feature point for an address instead of the middle of a street-scale bbox', () => {
+    const places = placesFromGeocode({
+      features: [{
+        geometry: { type: 'Point', coordinates: [-80.5449, 43.4723] },
+        bbox: [-81, 43, -80, 44],
+        properties: { label: '200 University Ave W' },
+      }],
+    })
+    expect(places).toEqual([{ name: '200 University Ave W', lon: -80.5449, lat: 43.4723 }])
+  })
   it('measures a city-scale jump as kilometres and a lot move as metres', () => {
     expect(haversineMeters({ lat: 43.47, lon: -80.54 }, { lat: 40.71, lon: -74.01 })).toBeGreaterThan(500_000)
     expect(haversineMeters({ lat: 43.4723, lon: -80.5449 }, { lat: 43.4724, lon: -80.5449 })).toBeLessThan(20)
@@ -143,14 +153,20 @@ describe('site sun', () => {
 })
 
 describe('site camera offset', () => {
-  it('stays above typical inland terrain until the pad height is known', () => {
-    expect(siteCameraOffset(40, null)).toEqual({ terrain: 0, hover: 8000, lookUp: 0 })
+  it('stays kilometres up until terrain height is known so the camera is not underground', () => {
+    const approaching = siteCameraOffset(40, null)
+    expect(approaching.terrain).toBe(0)
+    expect(approaching.hover).toBe(SITE_APPROACH_HOVER_M)
+    expect(approaching.hover).toBeGreaterThan(8849)
+    expect(approaching.lookUp).toBe(0)
   })
-  it('frames the massing once the pad height is known', () => {
+  it('frames the massing once the pad height is known, including sea level', () => {
     const framed = siteCameraOffset(40, 900)
     expect(framed.terrain).toBe(900)
-    expect(framed.hover).toBe(136)
-    expect(framed.lookUp).toBeCloseTo(15.2)
-    expect(siteCameraOffset(5, 12).hover).toBe(28)
+    expect(framed.hover).toBeCloseTo(74)
+    expect(framed.lookUp).toBeCloseTo(7.2)
+    expect(siteCameraOffset(5, 12).hover).toBe(24)
+    expect(siteCameraOffset(40, 0).hover).toBeCloseTo(74)
+    expect(siteCameraOffset(40, 0).terrain).toBe(0)
   })
 })

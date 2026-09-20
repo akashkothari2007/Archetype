@@ -83,6 +83,8 @@ def test_host_routes_hallway_to_geometry():
     assert host_intent(HALLWAY_PROMPT) == "geometry"
     assert host_intent(KITCHEN_PROMPT) == "geometry"
     assert host_intent("fix the failed area checks") == "repair"
+    assert host_intent("Furnish the living room") == "finish"
+    assert host_intent("add a sofa") == "finish"
 
 
 def test_widen_hallway_floor_2_mock():
@@ -147,6 +149,8 @@ def test_brief_includes_mentioned_floor_walls():
     assert w11["locked"] is False
     assert w11["shared_locked"] is True
     assert "upper-w7" in w11["adjacent_locked_ids"]
+    assert any(item["id"] == "sofa_02" for item in brief["furniture_catalog"])
+    assert len(brief["furniture_catalog"]) > 20
 
 
 def test_orchestrator_repair_override_still_emits_geometry(monkeypatch):

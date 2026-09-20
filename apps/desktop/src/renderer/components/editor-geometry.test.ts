@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Building } from '../types'
-import { fixtures, floorBounds, interiorPoint, lengthLabel, placementCommand, pointInPolygon, polygonArea, projectPoint, roomLookYaw } from './editor-geometry'
+import { catalogAsset, fixtures, floorBounds, floorsBounds, furniture, interiorPoint, lengthLabel, materials, placementCommand, pointInPolygon, polygonArea, projectPoint, roomLookYaw } from './editor-geometry'
 
 const model: Building = {
   schema_version: 2, units: 'feet',
@@ -26,6 +26,21 @@ describe('floor geometry and asset placement', () => {
   it('keeps object dimensions and positions in canonical feet', () => {
     const bath = fixtures.find(a => a.id === 'bath')!
     expect(placementCommand(bath, { x: 4.5, y: 2 }, model, 'f1')).toMatchObject({ kind: 'place_object', params: { asset_id: 'bath', floor_id: 'f1', x: 4.5, y: 2, width_ft: 2.5, depth_ft: 5.5 } })
+  })
+  it('exposes a full default furniture catalog with 3D models', () => {
+    expect(furniture.length).toBeGreaterThan(20)
+    expect(furniture.some(item => item.id === 'sofa_02' && item.model?.endsWith('.gltf'))).toBe(true)
+    expect(furniture.some(item => item.id === 'GothicBed_01')).toBe(true)
+    expect(furniture.some(item => item.id === 'dining_table')).toBe(true)
+    expect(catalogAsset('sofa_02')).toMatchObject({label: 'Leather sofa', preview: 'assets/sofa_02/preview.png'})
+    expect(catalogAsset('bath')?.label).toBe('Bathtub')
+  })
+  it('lists painted and textured finishes in the materials library', () => {
+    expect(materials.some(item => item.id === 'plaster' && item.color === '#f3efe7')).toBe(true)
+    expect(materials.some(item => item.id === 'brick' && item.preview?.includes('brick_wall_001'))).toBe(true)
+    expect(materials.some(item => item.id === 'marble' && item.preview?.includes('marble_01'))).toBe(true)
+    expect(materials.some(item => item.id === 'herringbone' && item.preview?.includes('herringbone_parquet'))).toBe(true)
+    expect(materials.length).toBeGreaterThan(12)
   })
   it('finds an interior teleport point even for a deeply concave room', () => {
     const polygon = [[0, 0], [10, 0], [10, 2], [2, 2], [2, 10], [0, 10]]
@@ -53,5 +68,13 @@ describe('floor geometry and asset placement', () => {
     expect(floorBounds(model, 'missing').width).toBe(40)
     expect(lengthLabel(2.9999, 'imperial')).toBe('3′ 0″')
     expect(lengthLabel(10, 'metric')).toBe('3.05 m')
+  })
+  it('frames every stacked storey, not only the active floor', () => {
+    const stacked = {
+      ...model,
+      floors: [...model.floors, { id: 'f2', name: 'Upper', elevation_ft: 10, height_ft: 9 }],
+      vertices: [...model.vertices, { id: 'c', floor_id: 'f2', x: 40, y: 30 }],
+    }
+    expect(floorsBounds(stacked, ['f1', 'f2'])).toMatchObject({ minX: 0, maxX: 40, minY: 0, maxY: 30, width: 40, height: 30 })
   })
 })

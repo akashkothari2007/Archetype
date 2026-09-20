@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { computeLayerCounts } from './plan-layers'
+import { computeLayerCounts, sameLayerCounts } from './plan-layers'
 
 describe('plan layer counts', () => {
   it('uses extracted sheet geometry when present', () => {
@@ -23,5 +23,10 @@ describe('plan layer counts', () => {
       floorFixtures: 2,
       floorFurniture: 5,
     })).toEqual([1, 2, 3, 2, 5, 13])
+  })
+
+  it('treats equal count lists as unchanged', () => {
+    expect(sameLayerCounts([1, 2, 3], [1, 2, 3])).toBe(true)
+    expect(sameLayerCounts([1, 2, 3], [1, 2, 4])).toBe(false)
   })
 })

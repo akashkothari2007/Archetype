@@ -45,7 +45,17 @@ export type Job = {
   phase?:string
   error?:string
   result?:Record<string,any>
-  events?:{message:string;phase:string;progress:number}[]
+  events?:{
+    message:string
+    phase:string
+    progress:number
+    kind?:string
+    label?:string
+    detail?:string
+    sources?:{title:string;note?:string;origin?:string;url?:string;external?:boolean}[]
+    rooms?:{name:string;category?:string;why?:string;typical_area_sqft?:number;area_sqft?:number;floor?:string;from_brief?:boolean}[]
+    items?:string[]
+  }[]
   sheets_done?:SheetCard[]
   totals?:{pages?:number;pages_read?:number;walls?:number;rooms?:number;doors?:number;windows?:number;skipped?:number;rules?:number}
 };

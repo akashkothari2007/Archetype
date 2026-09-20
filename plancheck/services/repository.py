@@ -1,15 +1,16 @@
 """Filesystem unit-of-work with immutable revisions and an atomic manifest pointer."""
 from __future__ import annotations
-import json, os, shutil, uuid
+import json, os, re, shutil, uuid
 from pathlib import Path
 from datetime import datetime,timezone
-from typing import Protocol, Callable
+from typing import Iterable, Protocol, Callable
 from filelock import FileLock
 from plancheck.core.building import Building,DesignBrief,DesktopProject
 from plancheck.core.settings import get_settings
 
 class RevisionConflict(ValueError):pass
 NAME_LIMIT=160
+_COPY_SUFFIX=re.compile(r'^(.*) \((\d+)\)$')
 
 def now():return datetime.now(timezone.utc).isoformat()
 def normalize_name(name:str)->str:
@@ -18,6 +19,24 @@ def normalize_name(name:str)->str:
     if len(cleaned)>NAME_LIMIT:raise ValueError(f'Project names can be at most {NAME_LIMIT} characters.')
     return cleaned
 def name_key(name:str)->str:return normalize_name(name).casefold()
+def next_available_name(name:str,existing:Iterable[str])->str:
+    cleaned=normalize_name(name)
+    keys=set()
+    for item in existing:
+        try:keys.add(name_key(item))
+        except ValueError:continue
+    if name_key(cleaned) not in keys:return cleaned
+    match=_COPY_SUFFIX.match(cleaned)
+    stem=match.group(1) if match else cleaned
+    n=2
+    while True:
+        suffix=f' ({n})'
+        room=NAME_LIMIT-len(suffix)
+        if room<1:raise ValueError(f'Project names can be at most {NAME_LIMIT} characters.')
+        base=stem if len(stem)<=room else stem[:room].rstrip()
+        candidate=(base or stem[:1])+suffix
+        if name_key(candidate) not in keys:return candidate
+        n+=1
 def atomic_json(path:Path,data):
     path.parent.mkdir(parents=True,exist_ok=True)
     tmp=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
@@ -50,18 +69,10 @@ class FileProjectRepository:
                 m=json.loads(path.read_text(encoding='utf8'));out.append({'project_id':m['project_id'],'name':m['name'],'updated_at':m.get('updated_at',m.get('created_at','')),'revision':m.get('current_revision',0),'source':m.get('source','import'),'ready':'current_revision' in m})
             except (ValueError,KeyError,OSError):continue
         return sorted(out,key=lambda p:p['updated_at'],reverse=True)
-    def taken_by(self,name:str,exclude_id:str|None=None):
-        key=name_key(name)
-        for item in self.list():
-            if exclude_id and item['project_id']==exclude_id:continue
-            try:
-                if name_key(item['name'])==key:return item
-            except ValueError:continue
-        return None
+    def unique_name(self,name:str,exclude_id:str|None=None):
+        return next_available_name(name,(item['name'] for item in self.list() if item['project_id']!=exclude_id))
     def rename(self,pid:str,name:str):
-        cleaned=normalize_name(name)
-        clash=self.taken_by(cleaned,exclude_id=pid)
-        if clash:raise ValueError(f'A project named “{clash["name"]}” already exists.')
+        cleaned=self.unique_name(name,exclude_id=pid)
         directory=self.path(pid)
         with FileLock(str(directory/'.write.lock')):
             m=self.manifest(pid)
@@ -90,9 +101,8 @@ class FileProjectRepository:
         atomic_json(directory/'rules.json',{'rules':snapshot.get('rules',[])})
         atomic_json(directory/'mismatches.json',{'checks':snapshot.get('checks',[]),'coverage':snapshot.get('coverage') or {},'quarantined':snapshot.get('quarantined') or []})
     def create(self,name,building:Building,rules=None,brief:DesignBrief|None=None,source='generated',project_id=None,source_files=None,sheets=None,import_meta=None):
-        name=normalize_name(name)
-        clash=self.taken_by(name)
-        if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
+        name=self.unique_name(name)
+        if brief is not None and brief.name!=name:brief=brief.model_copy(update={'name':name})
         pid=project_id or 'pc-'+uuid.uuid4().hex[:12];directory=self.path(pid);directory.mkdir(parents=True,exist_ok=True)
         if (directory/'project.json').exists():raise ValueError('Project already exists')
         timestamp=now();snapshot={'building':building.model_dump(mode='json'),'rules':rules or [],'checks':[]}

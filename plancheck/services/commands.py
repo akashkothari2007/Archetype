@@ -181,7 +181,7 @@ def apply_commands(building: Building, commands: list[ModelCommand|dict], actor:
         elif k=='update_object':
             o=require(objs)
             for key,value in p.items():
-                if key not in ['x','y','rotation_deg','width_ft','depth_ft','height_ft']:raise CommandError('Unsupported object change')
+                if key not in ['x','y','rotation_deg','width_ft','depth_ft','height_ft','splat']:raise CommandError('Unsupported object change')
                 setattr(o,key,value)
         elif k=='set_material':
             if t in ws:ws[t].material=str(p['material'])

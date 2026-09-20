@@ -19,6 +19,8 @@ from plancheck.generation.defaults import (
     parse_floor_count,
     rule_pack,
 )
+from plancheck.generation.research import explore, named_from_brief, _wikipedia_hits, counts_from_brief, expand_repeated_spaces
+from plancheck.generation.prompts import build_messages
 from plancheck.generation.layout import LayoutError, pack_floors
 from plancheck.generation.program import BuildingProgram, FloorLayout
 from plancheck.mocks.generation import demo_home, demo_rules
@@ -142,6 +144,140 @@ def test_hospital_is_not_classified_as_retail_because_it_has_a_cafe():
     assert detect_kind("Hospital", "Hospital") == "hospital"
 
 
+def test_mosque_and_restaurant_keep_their_own_kinds():
+    assert detect_kind("Mosque") == "worship"
+    assert normalise_use("Mosque") == "mixed"
+    assert detect_kind("neighborhood restaurant") == "restaurant"
+    assert normalise_use("neighborhood restaurant") == "retail"
+
+
+def test_named_rooms_are_pulled_out_of_the_brief():
+    assert "studio" in named_from_brief("3 bedrooms, 2 bathrooms, kitchen and a studio")
+    assert counts_from_brief("3 bedrooms, 2 bathrooms, kitchen and a studio") == {
+        "bedroom": 3,
+        "bathroom": 2,
+    }
+    dossier = explore(
+        DesignBrief(name="Willow", building_use="Home", rooms="kitchen, living room", style="Warm minimal"),
+        "home",
+        "home",
+        2,
+        2400,
+    )
+    assert "warm_minimal" not in {room.category for room in dossier.rooms}
+
+
+def test_school_classroom_counts_are_separate_rooms():
+    assert counts_from_brief("8 classrooms and a gym", kind="school") == {"classroom": 8}
+    assert counts_from_brief("8 rooms", kind="school") == {"classroom": 8}
+    dossier = explore(
+        DesignBrief(name="Riverside School", building_use="School", rooms="8 classrooms"),
+        "office",
+        "school",
+        2,
+        20000,
+    )
+    classroom = next(room for room in dossier.rooms if room.category == "classroom")
+    assert classroom.count == 8
+    assert classroom.from_brief
+    payload = dossier.payload()
+    assert payload["required_room_counts"][0]["count"] == 8
+
+
+def test_grouped_classroom_blob_is_exploded_into_real_rooms():
+    program = BuildingProgram.model_validate(
+        {
+            "building_use": "office",
+            "storeys": [{"id": "ground", "name": "Ground"}],
+            "spaces": [
+                space("group_a", "ground", "classroom", 1600, name="Classrooms Group A (2 rooms)"),
+                space("group_b", "ground", "classroom", 1600, name="Classrooms Group B (2 rooms)"),
+                space("corr", "ground", "circulation", 220, entry=True),
+            ],
+        }
+    )
+    expanded = expand_repeated_spaces(program, {"classroom": 4})
+    classrooms = [s for s in expanded.spaces if s.category == "classroom"]
+    assert len(classrooms) == 4
+    assert not any("group" in s.name.lower() for s in classrooms)
+    layouts = pack_floors(expanded, kind="school")
+    assert {r.space_id for r in layouts["ground"].rooms} == {s.id for s in expanded.spaces}
+
+
+def test_research_explores_a_hospital_and_keeps_brief_rooms():
+    dossier = explore(
+        DesignBrief(
+            name="Riverside Hospital",
+            building_use="Hospital",
+            rooms="wards, cafe, four operating theatres",
+            area="80,000 sq ft",
+            floors="5",
+        ),
+        "office",
+        "hospital",
+        5,
+        80000,
+    )
+    assert dossier.kind == "hospital"
+    assert dossier.label == "Hospital"
+    categories = {room.category for room in dossier.rooms}
+    assert "ward" in categories
+    assert "or" in categories
+    assert any(room.from_brief for room in dossier.rooms)
+    titles = {source.title for source in dossier.sources}
+    assert any("hospital" in title.lower() for title in titles)
+    assert any("brief" in title.lower() for title in titles)
+    external = [source for source in dossier.sources if source.external]
+    assert external
+    assert all(source.url.startswith("http") for source in external)
+    assert any("wbdg.org" in source.url for source in external)
+    kinds = [event["kind"] for event in dossier.trace()]
+    assert kinds[0] == "thinking"
+    assert kinds[-3:] == ["research", "source", "rooms"]
+    assert [event["message"] for event in dossier.trace() if event["kind"] == "thinking"] == dossier.thinking
+    assert dossier.trace()[-1]["rooms"]
+
+
+def test_wikipedia_hits_are_cited_as_external_sources(monkeypatch):
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "query": {
+                        "search": [
+                            {"title": "Hospital", "snippet": "A <span>health</span> care institution."},
+                        ]
+                    }
+                }
+            ).encode()
+
+    monkeypatch.setattr("plancheck.generation.research.urllib.request.urlopen", lambda *a, **k: _Resp())
+    hits = _wikipedia_hits("Hospital")
+    assert hits[0].external
+    assert hits[0].url.endswith("Hospital")
+    assert "health care institution" in hits[0].note
+
+
+def test_planner_prompt_is_given_the_research_dossier():
+    brief = DesignBrief(name="Riverside Hospital", building_use="Hospital", rooms="wards, cafe")
+    dossier = explore(brief, "office", "hospital", 5, 80000)
+    messages = build_messages(brief, "office", 5, 80000, kind="hospital", research=dossier.payload())
+    assert "RESEARCH" in messages[0]["content"]
+    user = messages[-1]["content"]
+    assert '"kind": "hospital"' in user
+    assert "recommended_rooms" in user
+    assert "layout_scheme" in user
+    assert "ward" in user.lower()
+    assert "Archetype hospital program library" in user
+    assert "wbdg.org" in user
+
+
 def test_home_office_does_not_turn_a_house_into_an_office():
     assert normalise_use(
         "Home",
@@ -224,6 +360,60 @@ def test_packer_refuses_an_impossible_plate():
         pack_floors(program)
 
 
+def test_home_hall_is_a_compact_foyer_not_a_full_width_corridor():
+    layout = pack_floors(BuildingProgram.model_validate(HOME), kind="home")["ground"]
+    hall = next(r for r in layout.rooms if r.space_id == "hall")
+    living = next(r for r in layout.rooms if r.space_id == "living")
+    assert hall.width_ft < layout.width_ft * 0.55
+    assert living.area_sqft > hall.area_sqft
+    assert hall.x2 <= living.x1 + 1e-6 or hall.y2 <= living.y1 + 1e-6 or living.y2 <= hall.y1 + 1e-6
+
+
+def test_retail_sales_is_not_cut_by_a_hallway():
+    layout = pack_floors(BuildingProgram.model_validate(RETAIL), kind="retail")["ground"]
+    sales = next(r for r in layout.rooms if r.space_id == "sales")
+    corridor = next(r for r in layout.rooms if r.space_id == "back")
+    plate = layout.width_ft * layout.depth_ft
+    assert sales.area_sqft > 0.4 * plate
+    assert corridor.y1 > layout.depth_ft * 0.35 or corridor.width_ft < layout.width_ft * 0.55
+
+
+def test_office_still_uses_a_double_loaded_corridor():
+    layout = pack_floors(BuildingProgram.model_validate(OFFICE), kind="office")["l2"]
+    corridor = next(r for r in layout.rooms if r.space_id == "corridor")
+    assert corridor.width_ft == pytest.approx(layout.width_ft)
+
+
+def test_worship_gives_the_sanctuary_the_plate():
+    program = BuildingProgram.model_validate(
+        {
+            "building_use": "mixed",
+            "storeys": [{"id": "ground", "name": "Ground floor"}],
+            "spaces": [
+                space("lobby", "ground", "circulation", 280, entry=True),
+                space("sanctuary", "ground", "sanctuary", 2400, min_side_ft=24),
+                space("office", "ground", "office", 160),
+                space("ablution", "ground", "bathroom", 120),
+                space("store", "ground", "storage", 140),
+            ],
+        }
+    )
+    layout = pack_floors(program, kind="worship")["ground"]
+    sanctuary = next(r for r in layout.rooms if r.space_id == "sanctuary")
+    lobby = next(r for r in layout.rooms if r.space_id == "lobby")
+    assert sanctuary.area_sqft > 0.45 * layout.width_ft * layout.depth_ft
+    assert lobby.width_ft < layout.width_ft or lobby.y1 > 0
+
+
+def test_layout_scheme_matches_building_kind():
+    from plancheck.generation.layout import scheme_for
+
+    assert scheme_for("home", "home") == "cluster"
+    assert scheme_for("hospital", "office") == "corridor"
+    assert scheme_for("retail", "retail") == "edge"
+    assert scheme_for("worship", "mixed") == "hall"
+
+
 # --- compiler ---------------------------------------------------------------
 
 
@@ -302,6 +492,72 @@ def test_ground_floor_gets_an_entry_and_stairs_stack_as_objects():
     assert len(stairs) == 2
     assert len({(o.x, o.y) for o in stairs}) == 1
     assert any(o.asset_id == "toilet" for o in building.objects)
+
+
+def _rect_for(program, layouts, space_id):
+    space = program.space(space_id)
+    layout = layouts[space.floor_id]
+    return next(r for r in layout.rooms if r.space_id == space_id)
+
+
+def test_bathroom_fixtures_sit_on_a_wall_not_in_the_middle():
+    program, layouts, building = build(HOME)
+    rect = _rect_for(program, layouts, "wc")
+    toilets = [o for o in building.objects if o.asset_id == "toilet" and o.floor_id == "ground"]
+    assert toilets
+    toilet = toilets[0]
+    assert rect.x1 < toilet.x < rect.x2
+    assert rect.y1 < toilet.y < rect.y2
+    edge = min(toilet.x - rect.x1, rect.x2 - toilet.x, toilet.y - rect.y1, rect.y2 - toilet.y)
+    assert edge < 2.0
+    living = _rect_for(program, layouts, "living")
+    assert not (living.x1 < toilet.x < living.x2 and living.y1 < toilet.y < living.y2) or edge < 2.0
+
+
+def test_kitchens_get_a_sink_not_a_toilet():
+    program, layouts, building = build(HOME)
+    kitchen = _rect_for(program, layouts, "kitchen")
+    in_kitchen = [
+        o for o in building.objects
+        if kitchen.x1 < o.x < kitchen.x2 and kitchen.y1 < o.y < kitchen.y2
+    ]
+    assert {o.asset_id for o in in_kitchen} <= {"sink", "counter"}
+    assert any(o.asset_id == "sink" for o in in_kitchen)
+    assert not any(o.asset_id == "toilet" for o in in_kitchen)
+
+
+def test_a_named_washroom_still_gets_bathroom_fixtures():
+    raw = {
+        "building_use": "office",
+        "storeys": [{"id": "ground", "name": "Ground"}],
+        "spaces": [
+            space("sales", "ground", "sales", 800, min_side_ft=16, entry=True),
+            space("male", "ground", "washroom", 80, name="Male washroom"),
+        ],
+    }
+    _, layouts, building = build(raw)
+    toilets = [o for o in building.objects if o.asset_id == "toilet"]
+    assert toilets
+    rect = layouts["ground"].rooms
+    wash = next(r for r in rect if r.space_id == "male")
+    sales = next(r for r in rect if r.space_id == "sales")
+    toilet = toilets[0]
+    assert wash.x1 < toilet.x < wash.x2 and wash.y1 < toilet.y < wash.y2
+    assert not (sales.x1 + 1 < toilet.x < sales.x2 - 1 and sales.y1 + 1 < toilet.y < sales.y2 - 1)
+
+
+def test_a_storey_without_a_bathroom_gets_one():
+    from plancheck.generation.program import ensure_wet_rooms
+
+    program = BuildingProgram.model_validate(
+        {
+            "building_use": "office",
+            "storeys": [{"id": "ground", "name": "Ground"}],
+            "spaces": [space("office", "ground", "office", 400)],
+        }
+    )
+    filled = ensure_wet_rooms(program)
+    assert any(s.category == "bathroom" for s in filled.spaces)
 
 
 def test_compiler_rejects_a_storey_with_no_layout():
@@ -431,6 +687,7 @@ def live(monkeypatch):
     monkeypatch.setenv("PLANCHECK_GENERATION_PROVIDER", "baseten")
     monkeypatch.setenv("PLANCHECK_AGENT_API_KEY", "test-key")
     reset_settings()
+    monkeypatch.setattr("plancheck.generation.research._wikipedia_hits", lambda *a, **k: [])
 
 
 def scripted(monkeypatch, *replies):
@@ -457,6 +714,9 @@ def test_one_model_call_is_enough_on_the_happy_path(live, monkeypatch):
     assert len(result.building.floors) == 2
     assert result.program["building_use"] == "home"
     assert result.layouts["ground"]["rooms"]
+    prompt = calls[0][1][-1]["content"]
+    assert '"research"' in prompt
+    assert "recommended_rooms" in prompt
 
 
 def test_a_broken_program_gets_exactly_one_corrective_turn(live, monkeypatch):
@@ -521,11 +781,11 @@ def test_the_model_may_fix_one_storey_with_explicit_rectangles(live, monkeypatch
     attempts = {"n": 0}
     real = pack_floors
 
-    def once(program, area=None):
+    def once(program, area=None, kind=""):
         attempts["n"] += 1
         if attempts["n"] == 1:
             raise LayoutError("first pack failed")
-        return real(program, area)
+        return real(program, area, kind)
 
     monkeypatch.setattr("plancheck.generation.agent.pack_floors", once)
     result = generate_from_brief(DesignBrief(name="Fixed"))
@@ -554,12 +814,14 @@ def test_progress_is_reported_in_order(live, monkeypatch):
     seen = []
     generate_from_brief(
         DesignBrief(name="Studio", building_use="Office"),
-        lambda **kw: seen.append((kw.get("phase"), kw.get("progress"))),
+        lambda **kw: seen.append((kw.get("phase"), kw.get("progress"), kw.get("kind"))),
     )
-    phases = [p for p, _ in seen]
+    phases = [p for p, _, _ in seen]
     assert phases[0] == "analyzing"
-    assert "planning" in phases and "validating" in phases
-    assert [p for _, p in seen] == sorted(p for _, p in seen)
+    assert "researching" in phases and "planning" in phases and "validating" in phases
+    assert [p for _, p, _ in seen] == sorted(p for _, p, _ in seen)
+    kinds = [k for *_, k in seen]
+    assert "thinking" in kinds and "source" in kinds and "rooms" in kinds
 
 
 # --- API --------------------------------------------------------------------
@@ -598,6 +860,8 @@ def test_generate_endpoint_uses_the_agent_and_saves_a_real_plan(live, monkeypatc
     )
     assert audit["llm_calls"] == 1
     assert audit["program"]["building_use"] == "office"
+    assert job["result"]["research"]["kind"] in {"office", "home"}
+    assert job["result"]["research"]["rooms"]
 
 
 def test_generate_endpoint_reports_the_failure_and_writes_nothing(live, monkeypatch, tmp_path):

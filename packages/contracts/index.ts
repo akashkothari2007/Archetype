@@ -43,6 +43,8 @@ export type SillFt = number;
 export type Hinge = "left" | "right";
 export type Swing = "in" | "out";
 export type ClearWidthFt = number | null;
+export type Reliability = "ok" | "suspect";
+export type ReliabilityReason = string;
 export type Openings = Opening[];
 export type Id4 = string;
 export type FloorId2 = string;
@@ -55,6 +57,9 @@ export type FloorMaterial = string;
 export type Confidence1 = number;
 export type NeedsReview = boolean;
 export type InstanceCount = number;
+export type ParentRoomId = string;
+export type Reliability1 = "ok" | "suspect";
+export type ReliabilityReason1 = string;
 export type Rooms = Room[];
 export type Id5 = string;
 export type FloorId3 = string;
@@ -66,6 +71,7 @@ export type RotationDeg = number;
 export type WidthFt1 = number;
 export type DepthFt = number;
 export type HeightFt3 = number;
+export type Splat = string;
 export type Objects = PlacedObject[];
 export type TypeRef1 = string;
 export type Name2 = string;
@@ -191,8 +197,8 @@ export interface Opening {
   hinge: Hinge;
   swing: Swing;
   clear_width_ft: ClearWidthFt;
-  reliability?: 'ok' | 'suspect';
-  reliability_reason?: string;
+  reliability: Reliability;
+  reliability_reason: ReliabilityReason;
   source: Source;
 }
 export interface Room {
@@ -206,10 +212,10 @@ export interface Room {
   floor_material: FloorMaterial;
   confidence: Confidence1;
   needs_review: NeedsReview;
-  instance_count?: InstanceCount;
-  parent_room_id?: string;
-  reliability?: 'ok' | 'suspect';
-  reliability_reason?: string;
+  instance_count: InstanceCount;
+  parent_room_id: ParentRoomId;
+  reliability: Reliability1;
+  reliability_reason: ReliabilityReason1;
   source: Source;
 }
 export interface PlacedObject {
@@ -223,6 +229,7 @@ export interface PlacedObject {
   width_ft: WidthFt1;
   depth_ft: DepthFt;
   height_ft: HeightFt3;
+  splat: Splat;
 }
 /**
  * A unit-plan room type. Not a storey — instances live on floor-plan rooms.
@@ -283,6 +290,7 @@ export interface DesktopProject {
   building: Building;
   rules: Rules;
   checks: Checks;
+  coverage: Coverage;
   files: Files;
   sheets: Sheets;
   import_meta: ImportMeta;
@@ -298,6 +306,9 @@ export interface DesignBrief {
   area: Area;
   style: Style;
   prompt: Prompt;
+  [k: string]: unknown;
+}
+export interface Coverage {
   [k: string]: unknown;
 }
 export interface ImportMeta {

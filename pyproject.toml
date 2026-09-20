@@ -38,6 +38,7 @@ include = ["plancheck*"]
 [tool.setuptools.package-data]
 plancheck = [
     "fixtures/*.json",
+    "data/*.json",
     "web/**/*",
 ]
 

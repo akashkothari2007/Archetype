@@ -29,6 +29,10 @@ export function computeLayerCounts(input: {
   return [structure, partitions, openings, fixtures, furniture, structure + partitions + openings + fixtures + furniture]
 }
 
+export function sameLayerCounts(a: number[], b: number[]) {
+  return a.length === b.length && a.every((n, i) => n === b[i])
+}
+
 export function XrayScrubber({ stop, counts, onChange }: { stop: LayerStop; counts: number[]; onChange: (stop: LayerStop) => void }) {
   const current = LAYER_STOPS[stop]
   return (

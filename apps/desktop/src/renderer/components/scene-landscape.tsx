@@ -1,9 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, Suspense } from 'react'
-import { Cloud, Clouds, ContactShadows, Environment, Sky, Stars, useGLTF, useTexture } from '@react-three/drei'
+import { ContactShadows, Environment, Sky, Stars, useGLTF, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import type { Building } from '../types'
 import { floorBounds } from './editor-geometry'
 import { SurfaceMaterial } from './scene-materials'
+import { skyCloudFields, type CloudCopy } from './scene-clouds'
+import { landscapeTreePlacements, type LandscapeTree } from './scene-trees'
 
 type Bounds = ReturnType<typeof floorBounds>
 
@@ -38,11 +41,7 @@ export function Daylight({ bounds, environment }: { bounds: Bounds; environment:
     <group userData={{ captureHide: true }}>
       {sky}
       {day < 0.14 && <Stars radius={280} depth={50} count={1200} factor={2.4} saturation={0.2} fade speed={0} />}
-      {day > 0.08 && <Suspense fallback={null}><Clouds texture="assets/landscape/cloud.png" material={THREE.MeshLambertMaterial} frustumCulled={false}>
-        <Cloud seed={2} color={look.cloud} opacity={0.24} speed={0} segments={20} volume={26} bounds={[span * 1.4, 9, span * 0.7]} position={[bounds.cx + span * 0.9, 68, bounds.cy - span * 0.4]} fade={45} />
-        <Cloud seed={7} color={look.cloud} opacity={0.2} speed={0} segments={18} volume={20} bounds={[span, 7, span * 0.55]} position={[bounds.cx - span * 1.1, 58, bounds.cy + span * 0.7]} fade={45} />
-        <Cloud seed={11} color={look.cloud} opacity={0.17} speed={0} segments={16} volume={17} bounds={[span * 0.8, 6, span * 0.45]} position={[bounds.cx + span * 0.2, 76, bounds.cy + span * 1.2]} fade={55} />
-      </Clouds></Suspense>}
+      {day > 0.08 && <Suspense fallback={null}><SkyClouds bounds={bounds} color={look.cloud} /></Suspense>}
     </group>
     <Environment key={`${environment.time}-${environment.season}-${environment.sun_azimuth}`} frames={1} resolution={256} environmentIntensity={0.48 + day * 0.36}>
       {sky}
@@ -52,6 +51,41 @@ export function Daylight({ bounds, environment }: { bounds: Bounds; environment:
     <primitive object={target} />
     <directionalLight target={target} position={[bounds.cx + Math.cos(angle) * span * 2.2, elevation * span * 2.2 + 20, bounds.cy + Math.sin(angle) * span * 2.2]} intensity={0.45 + day * 2.35} color={look.sun} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-span * 1.5} shadow-camera-right={span * 1.5} shadow-camera-top={span * 1.5} shadow-camera-bottom={-span * 1.5} shadow-camera-near={1} shadow-camera-far={span * 10} shadow-bias={-.00003} shadow-normalBias={.025} shadow-radius={3} />
     <directionalLight position={[bounds.cx - Math.cos(angle) * span, 22, bounds.cy - Math.sin(angle) * span]} intensity={0.16 + day * 0.17} color={look.fill} />
+  </>
+}
+
+function CloudBank({ url, color, copies }: { url: string; color: THREE.Color; copies: CloudCopy[] }) {
+  const { scene } = useGLTF(url, false, false)
+  const { geometry, material } = useMemo(() => {
+    const cloned = scene.clone(true)
+    cloned.updateMatrixWorld(true)
+    const pieces: THREE.BufferGeometry[] = []
+    cloned.traverse(node => {
+      if (!(node instanceof THREE.Mesh)) return
+      const piece = node.geometry.clone()
+      piece.applyMatrix4(node.matrixWorld)
+      pieces.push(piece)
+    })
+    const geometry = mergeGeometries(pieces, false)
+    pieces.forEach(piece => piece.dispose())
+    if (!geometry) throw new Error(`Cloud mesh failed to merge: ${url}`)
+    geometry.computeBoundingSphere()
+    const material = new THREE.MeshLambertMaterial({ color: '#f4f6f3', emissive: '#4a4e4c', fog: false, side: THREE.DoubleSide })
+    return { geometry, material }
+  }, [scene])
+  useLayoutEffect(() => {
+    material.color.copy(color)
+    material.emissive.copy(color).multiplyScalar(0.28)
+  }, [color, material])
+  useEffect(() => () => { geometry.dispose(); material.dispose() }, [geometry, material])
+  return <>{copies.map((copy, i) => <mesh key={i} geometry={geometry} material={material} position={[copy.x, copy.y, copy.z]} rotation={[0, copy.yaw, 0]} scale={copy.scale} />)}</>
+}
+
+function SkyClouds({ bounds, color }: { bounds: Bounds; color: THREE.Color }) {
+  const fields = useMemo(() => skyCloudFields(bounds), [bounds])
+  return <>
+    <CloudBank url="assets/landscape/clouds/cumulus-2.glb" color={color} copies={fields.main} />
+    <CloudBank url="assets/landscape/clouds/cumulus-5.glb" color={color} copies={fields.cluster} />
   </>
 }
 
@@ -153,32 +187,96 @@ function Planting({ bounds }: { bounds: Bounds }) {
   return <group>{shrubs.map((shrub, i) => <Shrub key={i} position={shrub.p} scale={shrub.scale} hue={shrub.hue} />)}</group>
 }
 
+function treeKind(name: string) {
+  if (/leaves/.test(name)) return 'leaves'
+  if (/branches/.test(name)) return 'branches'
+  return 'trunk'
+}
+
+function writeTreeField(mesh: THREE.InstancedMesh | null, trees: LandscapeTree[], height: number, part: 'trunk' | 'leaves' | 'branches') {
+  if (!mesh) return
+  const dummy = new THREE.Object3D(), color = new THREE.Color()
+  trees.forEach((tree, i) => {
+    const sy = tree.size / height
+    const canopy = part === 'trunk' ? 1 : tree.canopy
+    const canopyY = part === 'leaves' ? tree.canopyY : part === 'branches' ? (tree.canopyY + 1) / 2 : 1
+    dummy.position.set(tree.x, 0, tree.z)
+    dummy.rotation.set(tree.pitch, tree.yaw, tree.roll)
+    dummy.scale.set(sy * tree.width * canopy, sy * canopyY, sy * tree.width * canopy)
+    dummy.updateMatrix()
+    mesh.setMatrixAt(i, dummy.matrix)
+    if (part === 'leaves') { color.setRGB(tree.leaf[0], tree.leaf[1], tree.leaf[2]); mesh.setColorAt(i, color) }
+  })
+  mesh.instanceMatrix.needsUpdate = true
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+}
+
+function TreeField({ parts, trees, height, shadow }: { parts: TreeParts; trees: LandscapeTree[]; height: number; shadow: boolean }) {
+  const trunk = useRef<THREE.InstancedMesh>(null)
+  const leaves = useRef<THREE.InstancedMesh>(null)
+  const branches = useRef<THREE.InstancedMesh>(null)
+  useLayoutEffect(() => {
+    writeTreeField(trunk.current, trees, height, 'trunk')
+    writeTreeField(leaves.current, trees, height, 'leaves')
+    writeTreeField(branches.current, trees, height, 'branches')
+  }, [trees, height])
+  if (!trees.length) return null
+  return <>
+    {parts.trunk && <instancedMesh key={`trunk-${trees.length}`} ref={trunk} args={[parts.trunk.geometry, parts.trunk.material, trees.length]} castShadow={shadow} receiveShadow frustumCulled={false} />}
+    {parts.leaves && <instancedMesh key={`leaves-${trees.length}`} ref={leaves} args={[parts.leaves.geometry, parts.leaves.material, trees.length]} castShadow={shadow} receiveShadow frustumCulled={false} />}
+    {parts.branches && <instancedMesh key={`branches-${trees.length}`} ref={branches} args={[parts.branches.geometry, parts.branches.material, trees.length]} castShadow={shadow} receiveShadow frustumCulled={false} />}
+  </>
+}
+
+type TreeParts = Record<'trunk' | 'leaves' | 'branches', { geometry: THREE.BufferGeometry; material: THREE.MeshStandardMaterial }>
+
 // Actual textured 3D mesh, simplified offline; no billboards or camera-facing cards.
 function LandscapeTrees({ bounds }: { bounds: Bounds }) {
   const { scene } = useGLTF('assets/landscape/tree/tree.gltf', false, false)
   const alpha = useTexture('assets/landscape/tree-leaves-alpha.png')
-  const { model, materials, height } = useMemo(() => {
-    const model = scene.clone(true), materials: THREE.Material[] = []
+  const { parts, materials, geometries, height } = useMemo(() => {
+    const model = scene.clone(true)
+    model.updateMatrixWorld(true)
     const box = new THREE.Box3().setFromObject(model)
     const center = box.getCenter(new THREE.Vector3()), height = box.max.y - box.min.y
-    model.position.set(-center.x, -box.min.y, -center.z)
+    const bake = new THREE.Matrix4().makeTranslation(-center.x, -box.min.y, -center.z)
+    const materials: THREE.Material[] = [], geometries: THREE.BufferGeometry[] = []
+    const parts = {} as TreeParts
     model.traverse(node => {
       if (!(node instanceof THREE.Mesh)) return
       const original = node.material as THREE.MeshStandardMaterial
+      const geometry = node.geometry.clone()
+      geometry.applyMatrix4(node.matrixWorld)
+      geometry.applyMatrix4(bake)
       const material = original.clone()
       material.envMapIntensity = .7
-      if (/leaves/.test(material.name)) { alpha.flipY = false; material.alphaMap = alpha; material.alphaTest = .28; material.transparent = false; material.depthWrite = true; material.side = THREE.DoubleSide; material.roughness = 1; material.metalness = 0 }
-      node.material = material; node.castShadow = node.receiveShadow = true
+      const kind = treeKind(original.name)
+      if (kind === 'leaves') {
+        alpha.flipY = false
+        material.alphaMap = alpha
+        material.alphaTest = .28
+        material.transparent = false
+        material.depthWrite = true
+        material.side = THREE.DoubleSide
+        material.roughness = 1
+        material.metalness = 0
+        material.vertexColors = true
+        material.needsUpdate = true
+      }
       materials.push(material)
+      geometries.push(geometry)
+      parts[kind] = { geometry, material }
     })
-    return { model, materials, height }
+    return { parts, materials, geometries, height }
   }, [scene, alpha])
-  useEffect(() => () => materials.forEach(material => material.dispose()), [materials])
-  const placements = useMemo(() => {
-    const w = bounds.width / 2, h = bounds.height / 2
-    return [[-w-22, -h-4, 25], [w+27, -h-7, 29], [-w-25, h+20, 30], [w+30, h+23, 26], [-w-12,h+46,24], [w+10,h+58,31], [-w-65,h+75,32], [w+72,h+80,29]].map(([x,z,size], i) => { const clone = model.clone(true); if (i > 3) clone.traverse(node => { node.castShadow = false }); return { x, z, size: size / height, rotation: i * 2.399, clone } })
-  }, [bounds.width, bounds.height, model, height])
-  return <group position={[bounds.cx, -.6, bounds.cy]} dispose={null}>{placements.map((p, i) => <group key={i} position={[p.x, 0, p.z]} rotation={[0, p.rotation, 0]} scale={p.size}><primitive object={p.clone} /></group>)}</group>
+  useEffect(() => () => { materials.forEach(material => material.dispose()); geometries.forEach(geometry => geometry.dispose()) }, [materials, geometries])
+  const placements = useMemo(() => landscapeTreePlacements(bounds), [bounds.width, bounds.height])
+  const near = useMemo(() => placements.filter(tree => tree.shadow), [placements])
+  const far = useMemo(() => placements.filter(tree => !tree.shadow), [placements])
+  return <group position={[bounds.cx, -.6, bounds.cy]} dispose={null}>
+    <TreeField parts={parts} trees={near} height={height} shadow />
+    <TreeField parts={parts} trees={far} height={height} shadow={false} />
+  </group>
 }
 
 export function Landscape({ bounds }: { bounds: Bounds }) {
@@ -213,3 +311,7 @@ export function FloorSlab({ polygon, y = -.32, roof = false, thickness = .32, ph
   useEffect(() => () => geometry.dispose(), [geometry])
   return <mesh geometry={geometry} position={[0,y,0]} receiveShadow castShadow><SurfaceMaterial finish="stone" color={roof ? '#616568' : '#b6b2a8'} photoreal={photoreal} /></mesh>
 }
+
+useGLTF.preload('assets/landscape/clouds/cumulus-2.glb')
+useGLTF.preload('assets/landscape/clouds/cumulus-5.glb')
+useGLTF.preload('assets/landscape/tree/tree.gltf')

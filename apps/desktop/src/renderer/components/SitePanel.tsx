@@ -3,11 +3,11 @@ import { LoaderCircle, MapPin, Search } from 'lucide-react'
 import type { Building, ModelCommand } from '../types'
 import { METERS_PER_FOOT, emptySite, formatLatLon, geocode, ionToken, parseLatLon, siteFootprint, type Place, type SiteReport } from './site-geometry'
 import { buildingHeightFt } from './scene-building'
-import { requestSiteFrame, requestSitePlace, requestSiteView } from './site-intent'
+import { requestSiteFrame, requestSiteLook, requestSitePlace, requestSiteView } from './site-intent'
 
 const verdictLabel: Record<string, string> = { buildable: 'Buildable', caution: 'Check this site', blocked: 'Not buildable', unknown: 'Not measured yet' }
 
-export function SitePanel({ building, onCommand }: { building: Building; onCommand: (commands: ModelCommand[]) => void }) {
+export function SitePanel({ building }: { building: Building; onCommand: (commands: ModelCommand[]) => void }) {
   const site = building.site ?? emptySite
   const sited = site?.lat != null && site?.lon != null
   const [query, setQuery] = useState('')
@@ -16,13 +16,18 @@ export function SitePanel({ building, onCommand }: { building: Building; onComma
   const [error, setError] = useState('')
   const [report, setReport] = useState<SiteReport | null>(null)
   const [placing, setPlacing] = useState(!sited)
+  const [pending, setPending] = useState('')
   const footprint = siteFootprint(building)
   const size = { w: footprint.width * METERS_PER_FOOT, d: footprint.height * METERS_PER_FOOT, h: buildingHeightFt(building) * METERS_PER_FOOT }
 
   useEffect(() => setPlacing(!sited), [sited])
   useEffect(() => {
     const reportListener = (event: Event) => setReport((event as CustomEvent<SiteReport | null>).detail)
-    const placingListener = (event: Event) => setPlacing(!!(event as CustomEvent<boolean>).detail)
+    const placingListener = (event: Event) => {
+      const next = !!(event as CustomEvent<boolean>).detail
+      setPlacing(next)
+      if (!next) setPending('')
+    }
     window.addEventListener('archetype:site-report', reportListener)
     window.addEventListener('archetype:site-placing', placingListener)
     return () => {
@@ -31,9 +36,9 @@ export function SitePanel({ building, onCommand }: { building: Building; onComma
     }
   }, [])
 
-  const place = (lat: number, lon: number, address = '') => {
-    onCommand([{ kind: 'set_site', target_id: '', params: address ? { lat, lon, address } : { lat, lon } }])
-    requestSiteFrame()
+  const aim = (lat: number, lon: number, address = '') => {
+    setPending(address || formatLatLon({ lat, lon }))
+    requestSiteLook(lat, lon, address)
   }
 
   async function search(event: React.FormEvent) {
@@ -41,7 +46,7 @@ export function SitePanel({ building, onCommand }: { building: Building; onComma
     const text = query.trim()
     if (!text) return
     const pasted = parseLatLon(text)
-    if (pasted) { place(pasted.lat, pasted.lon, formatLatLon(pasted)); setResults([]); return }
+    if (pasted) { aim(pasted.lat, pasted.lon, formatLatLon(pasted)); setResults([]); return }
     setSearching(true); setError(''); setResults([])
     try {
       const found = await geocode(text)
@@ -55,16 +60,17 @@ export function SitePanel({ building, onCommand }: { building: Building; onComma
     <div className="editor-site-cluster">
       <form className="editor-site-search" onSubmit={search}>
         <Search size={13} />
-        <input aria-label="Search for a location" placeholder="Any address or city, or 43.4723, -80.5449" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={event => event.stopPropagation()} />
+        <input aria-label="Search for a location" placeholder="Search an address" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={event => event.stopPropagation()} />
         <button type="submit" disabled={searching || !query.trim()}>{searching ? <LoaderCircle size={13} className="editor-spin" /> : 'Find'}</button>
       </form>
       {results.length > 0 && <div className="editor-site-results">{results.map(item => (
-        <button key={`${item.lat},${item.lon}`} onClick={() => { place(item.lat, item.lon, item.name); setResults([]); setQuery(item.name) }}><MapPin size={12} />{item.name}</button>
+        <button key={`${item.lat},${item.lon}`} onClick={() => { aim(item.lat, item.lon, item.name); setResults([]); setQuery(item.name) }}><MapPin size={12} />{item.name}</button>
       ))}</div>}
       {error && <p className="editor-site-error">{error}</p>}
       {!ionToken && <p className="editor-site-error">Set VITE_CESIUM_ION_TOKEN in .env to search and to stream the 3D globe.</p>}
-      {sited ? <div className="editor-site-where"><strong>{site.address || 'Dropped pin'}</strong><span>{formatLatLon({ lat: site.lat as number, lon: site.lon as number })}</span></div>
-        : <p className="editor-site-hint">Search for a place, or click Place building and pick a point on the globe.</p>}
+      {pending && placing ? <div className="editor-site-where"><strong>Click the globe to place</strong><span>{pending}</span></div>
+        : sited ? <div className="editor-site-where"><strong>{site.address || 'Dropped pin'}</strong><span>{formatLatLon({ lat: site.lat as number, lon: site.lon as number })}</span></div>
+        : <p className="editor-site-hint">Search, then click the globe to place.</p>}
     </div>
     <div className="editor-site-cluster">
       <div className="editor-site-tools">
@@ -73,13 +79,13 @@ export function SitePanel({ building, onCommand }: { building: Building; onComma
       </div>
       {sited && <div className="editor-site-size">Footprint {size.w.toFixed(1)} × {size.d.toFixed(1)} m · {size.h.toFixed(1)} m tall, from the floor plan</div>}
     </div>
-    <div className="editor-site-cluster editor-site-cluster-verdict">
-      <div className={`editor-site-verdict ${report?.verdict || 'unknown'}`}>
-        <strong>{verdictLabel[report?.verdict || 'unknown']}</strong>
-        {report ? <><span>{report.tiltDeg.toFixed(1)}° tilt · {report.roughnessM.toFixed(2)} m roughness · {report.spreadM.toFixed(1)} m range</span><p>{report.reasons[0]}</p></>
-          : <p>{sited ? 'Open the 3D globe to measure this pad on the terrain.' : 'The globe will measure slope and roughness after the building is placed.'}</p>}
+    {report && <div className="editor-site-cluster editor-site-cluster-verdict">
+      <div className={`editor-site-verdict ${report.verdict}`}>
+        <strong>{verdictLabel[report.verdict]}</strong>
+        <span>{report.tiltDeg.toFixed(1)}° tilt · {report.roughnessM.toFixed(2)} m roughness · {report.spreadM.toFixed(1)} m range</span>
+        <p>{report.reasons[0]}</p>
       </div>
-    </div>
+    </div>}
   </div>
 }
 

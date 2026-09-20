@@ -1,7 +1,7 @@
 import {app,BrowserWindow,dialog,ipcMain,Menu,nativeTheme} from 'electron';
 import type {MenuItemConstructorOptions} from 'electron';
 import {join,basename} from 'node:path';
-import {readdir,readFile} from 'node:fs/promises';
+import {readdir,readFile,writeFile} from 'node:fs/promises';
 import {openAsBlob} from 'node:fs';
 
 const backend='http://127.0.0.1:8000/api/desktop';
@@ -34,6 +34,9 @@ function buildMenu(window:BrowserWindow){
       submenu:[
         {label:'New Project',accelerator:'CmdOrCtrl+N',click:send(window,'new-project')},
         {label:'Import Project…',accelerator:'CmdOrCtrl+O',click:send(window,'import')},
+        {type:'separator'},
+        {label:'Export Chat…',accelerator:'CmdOrCtrl+Shift+E',click:send(window,'export-chat')},
+        {label:'Export Schematic…',accelerator:'CmdOrCtrl+Shift+P',click:send(window,'export-schematic')},
         {type:'separator'},
         {label:'Close Project',click:send(window,'close-project')},
         {type:'separator'},
@@ -113,19 +116,13 @@ app.whenReady().then(()=>{
     minHeight:680,
     title:'Archetype',
     show:false,
-    backgroundColor:mac?'#00000000':CHROME,
-    transparent:mac,
+    backgroundColor:CHROME,
     autoHideMenuBar:true,
-    // Let the renderer own the full macOS title-bar surface so the window
-    // chrome and app navigation read as one continuous bar.
     titleBarStyle:'hidden',
     ...(mac?{
-      trafficLightPosition:{x:14,y:16},
-      vibrancy:'under-window' as const,
-      visualEffectState:'active' as const
+      trafficLightPosition:{x:14,y:16}
     }:{}),
     ...(win32?{
-      backgroundMaterial:'mica' as const,
       titleBarOverlay:{
         color:CHROME,
         symbolColor:CHROME_SYMBOL,
@@ -182,6 +179,21 @@ app.whenReady().then(()=>{
     const response=await fetch(backend+'/import',{method:'POST',body:form});
     if(!response.ok)throw Error(await response.text());
     return response.json();
+  });
+
+  ipcMain.removeHandler('file:save-text');
+  ipcMain.handle('file:save-text',async(_event,name:string,content:string)=>{
+    const svg=name.toLowerCase().endsWith('.svg');
+    const choice=await dialog.showSaveDialog(window,{
+      title:svg?'Export schematic':'Export chat',
+      defaultPath:name,
+      filters:svg
+        ?[{name:'SVG',extensions:['svg']},{name:'All Files',extensions:['*']}]
+        :[{name:'Markdown',extensions:['md']},{name:'All Files',extensions:['*']}]
+    });
+    if(choice.canceled||!choice.filePath)return null;
+    await writeFile(choice.filePath,content,'utf8');
+    return choice.filePath;
   });
 
   if(process.env.ELECTRON_RENDERER_URL)window.loadURL(process.env.ELECTRON_RENDERER_URL);

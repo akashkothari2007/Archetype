@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,Field
 from plancheck.core.building import Building,DesignBrief,CommandBatch,RevisionRequest,DesktopProject,BuildingPatch
 from plancheck.core.settings import get_settings
-from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json,normalize_name
+from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json
 from plancheck.services.commands import apply_commands,validate_building
 from plancheck.services.compliance import evaluate_building
 from plancheck.services.reliability import apply_reliability
@@ -80,18 +80,18 @@ def delete_project(pid:str):
 
 @router.post('/generate')
 def generate(brief:DesignBrief):
-    clash=repo().taken_by(brief.name)
-    if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
+    name=repo().unique_name(brief.name)
+    if name!=brief.name:brief=brief.model_copy(update={'name':name})
     def work(report):
         from plancheck.generation import generate_from_brief
         result=generate_from_brief(brief,report)
-        report(phase='saving',progress=.94,message='Saving your editable project')
+        report(phase='saving',progress=.94,kind='working',label='Saving',message='Saving your editable project')
         project=repo().create(brief.name,result.building,layer_rules(result.rules or []),brief)
         if result.program:
             # Keep the interpretation of the prompt auditable next to the geometry.
-            atomic_json(repo().path(project.project_id)/'program.json',{'program':result.program,'layouts':result.layouts,'notes':result.notes,'llm_calls':result.llm_calls,'recovered_from':result.recovered_from})
+            atomic_json(repo().path(project.project_id)/'program.json',{'program':result.program,'layouts':result.layouts,'notes':result.notes,'llm_calls':result.llm_calls,'recovered_from':result.recovered_from,'research':result.research})
         project=repo().commit(project.project_id,project.revision,recheck)
-        return {'project_id':project.project_id}
+        return {'project_id':project.project_id,'notes':result.notes,'research':result.research}
     return {'job_id':jobs.submit(work,'Preparing your project')}
 
 class AppearanceRequest(BaseModel):
@@ -127,7 +127,7 @@ def appearance(pid:str,body:AppearanceRequest):
         from plancheck.services.appearance_style import sample_palette
         report(phase='editing',progress=.15,message='Painting a photoreal guide with Flux')
         scene=guide_prompt(load(pid).brief, style)
-        result=edit_png(snapshot, prompt=scene)
+        result=edit_png(snapshot, prompt=scene, on_status=lambda msg: report(phase='editing',progress=.12,message=msg))
         report(phase='saving',progress=.82,message='Applying the enhanced exterior materials')
         folder=repo().path(pid)
         (folder/'appearance.png').write_bytes(result)
@@ -135,6 +135,60 @@ def appearance(pid:str,body:AppearanceRequest):
         atomic_json(folder/'appearance.json',meta)
         return {'palette':meta['palette']}
     return {'job_id':jobs.submit(work,'Painting the 3D view')}
+
+class ImagineFurnitureRequest(BaseModel):
+    image:str
+    prompt:str=''
+    floor_id:str
+    x:float
+    y:float
+    rotation_deg:float=0
+    width_ft:float=Field(default=4,gt=0,le=40)
+    depth_ft:float=Field(default=3,gt=0,le=40)
+    height_ft:float=Field(default=3,gt=0,le=20)
+
+@router.post('/projects/{pid}/imagine-furniture')
+def imagine_furniture(pid:str,body:ImagineFurnitureRequest):
+    project=load(pid)
+    if not any(floor.id==body.floor_id for floor in project.building.floors):
+        raise HTTPException(400,'That floor is not in this project')
+    settings=get_settings()
+    if not settings.image_live():
+        raise HTTPException(400,'Flux is not configured. Set PLANCHECK_IMAGE_MODEL_ID and a Hack the North API key as PLANCHECK_IMAGE_API_KEY.')
+    if not settings.splat_live():
+        raise HTTPException(400,'TripoSplat is not configured. Set PLANCHECK_SPLAT_URL and PLANCHECK_SPLAT_API_KEY.')
+    try:
+        from plancheck.services.image_edit import decode_png, prepare_furniture_guide
+        png=prepare_furniture_guide(decode_png(body.image))
+    except Exception as exc:
+        raise HTTPException(400,str(exc)) from None
+    style=(body.prompt or '').strip()
+    place={
+        'floor_id':body.floor_id,
+        'x':body.x,
+        'y':body.y,
+        'rotation_deg':body.rotation_deg,
+        'width_ft':body.width_ft,
+        'depth_ft':body.depth_ft,
+        'height_ft':body.height_ft,
+    }
+    def work(report, snapshot=png, extra=style, pose=place):
+        from plancheck.services.commands import uid
+        from plancheck.services.image_edit import furniture_prompt, edit_png
+        from plancheck.services.splat import generate_splat, splat_filename
+        object_id=uid('object')
+        report(phase='editing',progress=.12,message='Painting the furniture with Flux')
+        photo=edit_png(snapshot, prompt=furniture_prompt(extra), on_status=lambda msg: report(phase='editing',progress=.18,message=msg))
+        report(phase='splatting',progress=.52,message='Reconstructing the furniture with TripoSplat')
+        splat=generate_splat(photo, num_gaussians=65536)
+        folder=repo().path(pid)/'furniture'
+        folder.mkdir(parents=True,exist_ok=True)
+        stem=f'furniture/{object_id}'
+        (repo().path(pid)/f'{stem}.png').write_bytes(photo)
+        splat_name=splat_filename(splat, stem)
+        (repo().path(pid)/splat_name).write_bytes(splat)
+        return {'object':{'id':object_id,'asset_id':'imagine','kind':'furniture','splat':splat_name,**pose}}
+    return {'job_id':jobs.submit(work,'Imagining furniture')}
 
 @router.get('/projects/{pid}',response_model=DesktopProject)
 def project(pid:str):return load(pid)
@@ -221,17 +275,13 @@ def get_file(pid:str,relative:str):
 
 @router.post('/import-native',response_model=DesktopProject)
 def import_native(body:dict=Body(...)):
-    name=normalize_name(str(body.get('name') or 'Imported project'))
-    clash=repo().taken_by(name)
-    if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
+    name=repo().unique_name(str(body.get('name') or 'Imported project'))
     building=Building.model_validate(body['building']);validate_building(building)
     return repo().create(name,building,layer_rules(body.get('rules',[])),DesignBrief.model_validate(body['brief']) if body.get('brief') else None,source='import')
 
 @router.post('/import')
 def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported building'),roles:str=Form('{}')):
-    name=normalize_name(name)
-    clash=repo().taken_by(name)
-    if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
+    name=repo().unique_name(name)
     role_map=json.loads(roles);pid='pc-'+uuid.uuid4().hex[:12];base=repo().path(pid);documents=[]
     for f in files:
         filename=Path(f.filename or 'source').name;suffix=Path(filename).suffix.lower()

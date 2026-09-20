@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 
-import { SPLAT_UPRIGHT, robustSplatBounds, splatExtents, splatFileHint, splatPlacement, type SplatBounds } from './scene-splat-fit'
+import { SPLAT_UPRIGHT, fitObjectSplat, robustSplatBounds, splatExtents, splatFileHint, splatPlacement, type SplatBounds } from './scene-splat-fit'
 import type { SplatFileType } from '@sparkjsdev/spark'
 
 type Bounds = { cx: number; cy: number; width: number; height: number }
@@ -30,6 +30,16 @@ export function fitSplatMesh(mesh: SparkMesh, bounds: Bounds, height: number, me
   const extents = splatExtents(aabb.min, aabb.max, SPLAT_UPRIGHT)
   const place = splatPlacement(extents.size, extents.center, extents.minY, bounds, height)
   mesh.scale.set(place.scale.x, place.scale.y, place.scale.z)
+  mesh.position.set(place.x, place.y, place.z)
+  mesh.updateMatrixWorld(true)
+}
+
+export function fitObjectSplatMesh(mesh: SparkMesh, box: { width: number; height: number; depth: number }, measured?: SplatBounds | null) {
+  mesh.quaternion.set(SPLAT_UPRIGHT.x, SPLAT_UPRIGHT.y, SPLAT_UPRIGHT.z, SPLAT_UPRIGHT.w)
+  const aabb = splatAabb(mesh, measured)
+  const extents = splatExtents(aabb.min, aabb.max, SPLAT_UPRIGHT)
+  const place = fitObjectSplat(extents.size, extents.center, extents.minY, box)
+  mesh.scale.setScalar(place.scale)
   mesh.position.set(place.x, place.y, place.z)
   mesh.updateMatrixWorld(true)
 }
@@ -104,4 +114,74 @@ export function ExteriorSplat({ url, bounds, height, onReady }: { url: string; b
   }, [url, gl, invalidate])
 
   return <group ref={group} userData={{ captureHide: true }} />
+}
+
+export function ObjectSplat({ url, width, height, depth, onReady }: { url: string; width: number; height: number; depth: number; onReady?: () => void }) {
+  const gl = useThree(state => state.gl)
+  const invalidate = useThree(state => state.invalidate)
+  const group = useRef<THREE.Group>(null)
+  const meshRef = useRef<SparkMesh | null>(null)
+  const measuredRef = useRef<SplatBounds | null>(null)
+  const boxRef = useRef({ width, height, depth })
+  const onReadyRef = useRef(onReady)
+  boxRef.current = { width, height, depth }
+  onReadyRef.current = onReady
+
+  useEffect(() => {
+    const mesh = meshRef.current
+    if (!mesh) return
+    fitObjectSplatMesh(mesh, { width, height, depth }, measuredRef.current)
+    invalidate()
+  }, [width, height, depth, invalidate])
+
+  useEffect(() => {
+    const host = group.current
+    if (!host) return
+    let cancelled = false
+    let spark: SparkRendererMesh | null = null
+    let splat: SparkMesh | null = null
+
+    ;(async () => {
+      const [{ SparkRenderer, SplatMesh }, response] = await Promise.all([
+        import('@sparkjsdev/spark'),
+        fetch(url),
+      ])
+      if (cancelled) return
+      if (!response.ok) throw new Error(`Could not load the furniture splat (${response.status}).`)
+      const fileBytes = await response.arrayBuffer()
+      if (cancelled) return
+      spark = new SparkRenderer({ renderer: gl, onDirty: () => invalidate() })
+      const material = spark.material
+      if (!Array.isArray(material)) material.toneMapped = false
+      const hint = splatFileHint(url)
+      measuredRef.current = robustSplatBounds(fileBytes, hint.fileType)
+      splat = new SplatMesh({
+        fileBytes,
+        fileName: hint.fileName,
+        fileType: hint.fileType as SplatFileType,
+        onLoad: (mesh: SparkMesh) => {
+          if (cancelled) return
+          meshRef.current = mesh
+          fitObjectSplatMesh(mesh, boxRef.current, measuredRef.current)
+          invalidate()
+          onReadyRef.current?.()
+        },
+      })
+      spark.add(splat)
+      host.add(spark)
+      invalidate()
+    })().catch(() => undefined)
+
+    return () => {
+      cancelled = true
+      meshRef.current = null
+      measuredRef.current = null
+      splat?.removeFromParent()
+      splat?.dispose?.()
+      spark?.removeFromParent()
+      spark?.dispose?.()
+    }
+  }, [url, gl, invalidate])
+
+  return <group ref={group} />
 }

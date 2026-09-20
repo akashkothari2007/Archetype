@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { IDENTITY, SPLAT_UPRIGHT, robustSplatBounds, splatExtents, splatFileHint, splatPlacement } from './scene-splat-fit'
+import { IDENTITY, SPLAT_UPRIGHT, fitObjectSplat, robustSplatBounds, splatExtents, splatFileHint, splatPlacement } from './scene-splat-fit'
 
 const house = { cx: 20, cy: 12, width: 40, height: 24 }
 const zUp = { x: 1, y: 0, z: 0, w: 0 }
@@ -108,5 +108,14 @@ describe('splat placement', () => {
     const place = splatPlacement(extents.size, extents.center, extents.minY, house, 18)
     expect(extents.size.x).toBeCloseTo(1)
     expect(place.scale.x).toBeGreaterThan(40)
+  })
+})
+
+describe('object splat fit', () => {
+  it('keeps furniture proportions instead of stretching to the CAD envelope', () => {
+    const extents = splatExtents({ x: -1, y: -0.2, z: -0.5 }, { x: 1, y: 0.8, z: 0.5 }, IDENTITY)
+    const place = fitObjectSplat(extents.size, extents.center, extents.minY, { width: 4, height: 2, depth: 2 })
+    expect(place.scale).toBeCloseTo(2)
+    expect(place.y).toBeCloseTo(0.4)
   })
 })

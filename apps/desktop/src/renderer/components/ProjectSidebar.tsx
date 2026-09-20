@@ -1,7 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
-import {FileText,FolderOpen,MoreHorizontal,Plus,Search} from 'lucide-react';
+import {ChevronDown,FileText,FolderOpen,MoreHorizontal,Plus,Search} from 'lucide-react';
 import {useApp} from '../app-context';
-import {duplicateNameIds,findNameConflict,normalizeProjectName} from '../project-names';
+import {normalizeProjectName,uniqueProjectName} from '../project-names';
 import type {ProjectSummary} from '../types';
 
 export function ProjectSidebar(){
@@ -12,20 +12,28 @@ export function ProjectSidebar(){
   const [draft,setDraft]=useState('');
   const [deleting,setDeleting]=useState<ProjectSummary|null>(null);
   const [busy,setBusy]=useState(false);
+  const [createOpen,setCreateOpen]=useState(false);
   const menuRef=useRef<HTMLDivElement>(null);
+  const createRef=useRef<HTMLDivElement>(null);
   const renameRef=useRef<HTMLInputElement>(null);
-  const duplicates=duplicateNameIds(a.projects);
   const needle=query.trim().toLowerCase();
   const visible=a.projects.filter((project:ProjectSummary)=>!needle||project.name.toLowerCase().includes(needle));
 
   useEffect(()=>{
-    if(!menuId)return;
+    if(!menuId&&!createOpen)return;
     const close=(event:PointerEvent)=>{
-      if(!menuRef.current?.contains(event.target as Node))setMenuId(null);
+      const target=event.target as Node;
+      if(menuRef.current?.contains(target)||createRef.current?.contains(target))return;
+      setMenuId(null);
+      setCreateOpen(false);
+    };
+    const onKey=(event:KeyboardEvent)=>{
+      if(event.key==='Escape'){setMenuId(null);setCreateOpen(false)}
     };
     window.addEventListener('pointerdown',close);
-    return()=>window.removeEventListener('pointerdown',close);
-  },[menuId]);
+    window.addEventListener('keydown',onKey);
+    return()=>{window.removeEventListener('pointerdown',close);window.removeEventListener('keydown',onKey)};
+  },[menuId,createOpen]);
 
   useEffect(()=>{
     if(renamingId)renameRef.current?.select();
@@ -44,11 +52,9 @@ export function ProjectSidebar(){
       setRenamingId(null);
       return;
     }
-    const clash=findNameConflict(a.projects,name,project.project_id);
-    if(clash)return;
     setBusy(true);
     try{
-      await a.renameProject(project.project_id,name);
+      await a.renameProject(project.project_id,uniqueProjectName(a.projects,name,project.project_id));
       setRenamingId(null);
     }finally{
       setBusy(false);
@@ -66,10 +72,7 @@ export function ProjectSidebar(){
     }
   }
 
-  const clash=renamingId?findNameConflict(a.projects,draft,renamingId):null;
-
   return <div className="projects-pane">
-    <button className="new-project" onClick={a.newProject}><Plus size={15}/> New project</button>
     <label className="sidebar-search">
       <Search size={14}/>
       <input aria-label="Search projects" placeholder="Search" value={query} onChange={e=>setQuery(e.target.value)}/>
@@ -85,7 +88,7 @@ export function ProjectSidebar(){
                 <input
                   ref={renameRef}
                   aria-label="Project name"
-                  aria-invalid={!!clash||!normalizeProjectName(draft)}
+                  aria-invalid={!normalizeProjectName(draft)}
                   value={draft}
                   disabled={busy}
                   onChange={e=>setDraft(e.target.value)}
@@ -95,8 +98,7 @@ export function ProjectSidebar(){
                     if(e.key==='Escape'){e.preventDefault();setRenamingId(null)}
                   }}
                 />
-                {clash&&<span className="field-error">“{clash.name}” already exists</span>}
-                {!clash&&!normalizeProjectName(draft)&&<span className="field-error">Enter a name</span>}
+                {!normalizeProjectName(draft)&&<span className="field-error">Enter a name</span>}
               </div>
             : <button
                 className={'project-row'+(selected?' selected':'')}
@@ -104,13 +106,12 @@ export function ProjectSidebar(){
                 onDoubleClick={e=>{e.preventDefault();startRename(project)}}
               >
                 <span className="project-row-name">{project.name}</span>
-                {duplicates.has(project.project_id)&&<span className="duplicate-flag">Same name</span>}
               </button>}
           <button
             className="project-more"
             aria-label={`Actions for ${project.name}`}
             aria-expanded={menuId===project.project_id}
-            onClick={e=>{e.stopPropagation();setMenuId(id=>id===project.project_id?null:project.project_id)}}
+            onClick={e=>{e.stopPropagation();setCreateOpen(false);setMenuId(id=>id===project.project_id?null:project.project_id)}}
           >
             <MoreHorizontal size={15}/>
           </button>
@@ -131,7 +132,15 @@ export function ProjectSidebar(){
       {!a.projects.length&&<p className="empty-projects">Your projects live here. Generate one, or import a folder.</p>}
       {!!a.projects.length&&!visible.length&&<p className="empty-projects">No projects match “{query.trim()}”.</p>}
     </div>
-    <button className="import-side" onClick={a.importFolder}><FolderOpen size={14}/> Import a project</button>
+    <div className="create-side" ref={createRef}>
+      <button className="new-project" aria-haspopup="menu" aria-expanded={createOpen} onClick={()=>{setMenuId(null);setCreateOpen(open=>!open)}}>
+        <Plus size={15}/> New project <ChevronDown size={14}/>
+      </button>
+      {createOpen&&<div className="project-menu create-menu" role="menu">
+        <button role="menuitem" onClick={()=>{setCreateOpen(false);a.newProject()}}><Plus size={14}/> Generate</button>
+        <button role="menuitem" onClick={()=>{setCreateOpen(false);a.importFolder()}}><FolderOpen size={14}/> Import</button>
+      </div>}
+    </div>
     {deleting&&<div className="sheet-backdrop" onClick={()=>!busy&&setDeleting(null)}>
       <div className="confirm-sheet" role="alertdialog" aria-labelledby="delete-title" aria-describedby="delete-copy" onClick={e=>e.stopPropagation()}>
         <h2 id="delete-title">Delete “{deleting.name}”?</h2>

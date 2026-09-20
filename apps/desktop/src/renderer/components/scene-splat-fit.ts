@@ -117,3 +117,23 @@ export function splatPlacement(
     z: bounds.cy - center.z * scale.z,
   }
 }
+
+/** Uniformly fit an isolated furniture reconstruction into a placed object's box. */
+export function fitObjectSplat(
+  size: Size,
+  center: Size,
+  minY: number,
+  box: { width: number; height: number; depth: number },
+) {
+  const scale = Math.min(
+    box.width / Math.max(size.x, 0.01),
+    box.height / Math.max(size.y, 0.01),
+    box.depth / Math.max(size.z, 0.01),
+  )
+  return {
+    scale,
+    x: -center.x * scale,
+    y: -minY * scale,
+    z: -center.z * scale,
+  }
+}

@@ -12,6 +12,7 @@ from plancheck.core.logutil import get_logger
 from plancheck.core.settings import get_settings
 from plancheck.services.commands import CommandError, apply_commands, wall_length, wall_points
 from plancheck.services.compliance import check_building, room_area
+from plancheck.services.furniture import furniture_brief, furniture_by_id, furnish_building, is_furnish_request, target_rooms
 from plancheck.services.llm import LLMError, ORCHESTRATOR, SUBAGENT, complete, complete_json
 from plancheck.services.repairs import propose_repairs
 
@@ -36,7 +37,11 @@ FINISH_COMMANDS = {
     "apply_room_material_to_type",
 }
 ALLOWED_COMMANDS = GEOMETRY_COMMANDS | FINISH_COMMANDS
-ALLOWED_MATERIALS = {"plaster", "oak", "tile", "concrete", "sage", "terracotta", "white"}
+ALLOWED_MATERIALS = {
+    "plaster", "oak", "tile", "concrete", "sage", "terracotta", "white",
+    "clay", "slate", "walnut", "brick", "herringbone", "marble", "ceramic",
+    "granite", "cobble", "paintedbrick", "darkwood", "metal",
+}
 GEOMETRY_WORKERS = {"geometry"}
 FINISH_WORKERS = {"finish", "material", "environment", "rename"}
 APPEAR_WORKERS = {"appear", "look"}
@@ -60,7 +65,7 @@ _REPAIR_RE = re.compile(
     re.I,
 )
 _FINISH_RE = re.compile(
-    r"\b(oak|tile|plaster|sage|terracotta|concrete|material|finish|rename|"
+    r"\b(oak|walnut|tile|plaster|sage|terracotta|concrete|brick|marble|herringbone|slate|ceramic|granite|material|finish|rename|"
     r"evening|morning|lighting|sunlight|\bsun\b)\b",
     re.I,
 )
@@ -96,9 +101,9 @@ Never return a "no repairs to review" message for a design-edit request.
 Never request changes to loadbearing or locked walls; the host will block those.
 Return JSON only:
 {"intent":"repair"|"geometry"|"finish"|"appear"|"answer","message":"short user-facing text","tasks":[{"id":"t1","worker":"repair"|"geometry"|"finish"|"material"|"environment"|"rename"|"appear"|"explain","instruction":"...","target_ids":[]}],"appearance_prompt":""}
-Use geometry for spatial edits (one serial task). Use finish for catalog materials, rename, or sun/time.
+Use geometry for spatial edits (one serial task). Use finish for catalog materials, rename, sun/time, or furnishing rooms with catalog furniture.
 Use appear for photoreal exterior look only (no wall commands). Use answer to explain with no writes.
-Keep tasks small. Prefer one geometry task."""
+Keep tasks small. Prefer one geometry task. Furnish requests should be one finish task that places catalog furniture."""
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # NEW ORCHESTRATOR: For unified flow with violations context
@@ -120,7 +125,7 @@ If intent is "geometry", "finish", "appear", or "answer":
 
 Intent guide:
 - geometry: move walls, widen rooms, resize spaces, add doors/windows
-- finish: rename rooms, change materials (plaster/oak/tile/concrete), change time/sun/season
+- finish: rename rooms, change materials (plaster/oak/brick/marble/tile/concrete), change time/sun/season, or furnish rooms with catalog furniture
 - appear: photoreal exterior appearance prompt only (no wall commands)
 - answer: explain something, no changes needed
 - repair: fix compliance violations explicitly mentioned by the user
@@ -154,7 +159,7 @@ Command guide:
 - offset_partition: widen/enlarge/shrink rooms by moving a wall. Check adjacent_locked_ids first — nonempty means that vertex touches a locked wall and the command will FAIL. Pick a different wall.
 - place_opening: add a door or window. Params: wall_id, kind (door|window), offset_ft, width_ft, height_ft, sill_ft. Target a wall that is long enough.
 - update_opening / delete: modify or remove existing openings/objects.
-- place_object / update_object / duplicate: furniture and fixtures.
+- place_object / update_object / duplicate: furniture and fixtures. For furniture, use only ids from furniture_catalog, with those width/depth/height values.
 
 Rules:
 - Never move a wall where locked is true or structural is not nonstructural.
@@ -172,8 +177,12 @@ Use offset_partition. NEVER use move_wall. If the target wall has adjacent_locke
 FINISH_SYSTEM = """You are a bounded Archetype finish subagent. Return JSON only:
 {"commands":[{"kind":"...","target_id":"","params":{}}],"message":"short user-facing text","blocked":[{"reason":"..."}]}
 Allowed kinds: set_material, set_environment, rename_room, apply_room_material_to_type, update_object, place_object, duplicate.
-set_material materials: plaster, oak, tile, concrete, sage, terracotta, white.
+set_material materials: plaster, sage, clay, slate, oak, walnut, tile, concrete, brick, herringbone, marble, terracotta, ceramic, granite, cobble, paintedbrick, darkwood, metal, white.
 set_environment params: time (0-24), season (spring|summer|autumn|winter), sun_azimuth.
+Furniture: furniture_catalog lists every placeable 3D model. Use only those asset ids.
+place_object params: floor_id, asset_id, kind="furniture", x, y, rotation_deg, width_ft, depth_ft, height_ft.
+Place furniture inside the named or selected room using centroid/bbox; put backs near walls; do not overlap existing objects.
+If the view is 3d, furnish the selected room or the active floor with a complete kit for that room type.
 Do not invent entity ids. Do not describe repairs."""
 
 APPEAR_SYSTEM = """You are the Archetype appearance planner. Return JSON only:
@@ -226,6 +235,8 @@ def host_intent(message: str) -> str | None:
         return "geometry"
     if is_explicit_repair(text):
         return "repair"
+    if is_furnish_request(text):
+        return "finish"
     if _APPEAR_RE.search(text):
         return "appear"
     if _FINISH_RE.search(text):
@@ -496,6 +507,7 @@ def _scoped_brief(
         "selected": [_entity_snapshot(building, eid) for eid in selected_ids],
         "failures": _failures(building, rules),
         "approved_rules": sum(1 for rule in rules if rule.get("status") == "approved"),
+        "furniture_catalog": furniture_brief(),
     }
 
 
@@ -639,6 +651,14 @@ def _clean_commands(raw: Any, selected_ids: list[str]) -> list[dict[str, Any]]:
             if not floor or not asset or cleaned is None or "x" not in cleaned or "y" not in cleaned:
                 continue
             params = {"floor_id": floor, "asset_id": asset, "kind": str(params.get("kind") or "furniture"), **cleaned}
+            info = furniture_by_id(asset)
+            if info:
+                params.setdefault("width_ft", float(info["width"]))
+                params.setdefault("depth_ft", float(info["depth"]))
+                params.setdefault("height_ft", float(info["height"]))
+            object_id = str(item.get("params", {}).get("id") or params.get("id") or "")
+            if object_id:
+                params["id"] = object_id
         elif kind == "update_object":
             if not target and selected_ids:
                 target = selected_ids[0]
@@ -664,7 +684,7 @@ def _clean_commands(raw: Any, selected_ids: list[str]) -> list[dict[str, Any]]:
                 continue
             params = {}
         commands.append({"kind": kind, "target_id": target, "params": params})
-    return commands[:40]
+    return commands[:80]
 
 
 def _result(
@@ -1024,6 +1044,30 @@ def fallback_geometry_edit(
     )
 
 
+def fallback_furnish(
+    building: Building,
+    message: str,
+    selected_ids: list[str] | None = None,
+    floor_id: str | None = None,
+) -> dict[str, Any]:
+    selected_ids = selected_ids or []
+    floor_ids = resolve_floor_ids(building, message, floor_id, selected_ids)
+    rooms = target_rooms(building, message, selected_ids, floor_ids)
+    commands = furnish_building(building, rooms=rooms, message=message)
+    if not commands:
+        return _result(
+            "I could not find a livable room to furnish. Select a room in the 3D view, or name a living room, bedroom, kitchen, or office.",
+            intent="finish",
+        )
+    count = len(commands)
+    names = ", ".join(dict.fromkeys(room.name for room in rooms))
+    return _result(
+        f"I placed {count} catalog piece{'s' if count != 1 else ''} in {names or 'the rooms'}. Open the 3D model to walk through it.",
+        intent="finish",
+        commands=commands,
+    )
+
+
 def local_respond(
     building,
     rules,
@@ -1055,13 +1099,24 @@ def local_respond(
         }
     if is_spatial_request(message) or host_intent(message) == "geometry":
         return fallback_geometry_edit(building, rules, message, selected_ids, floor_id)
+    if is_furnish_request(message):
+        return fallback_furnish(building, message, selected_ids, floor_id)
     materials = {
         "white": "plaster",
         "oak": "oak",
+        "walnut": "walnut",
         "tile": "tile",
         "concrete": "concrete",
         "sage": "sage",
         "terracotta": "terracotta",
+        "brick": "brick",
+        "marble": "marble",
+        "herringbone": "herringbone",
+        "slate": "slate",
+        "ceramic": "ceramic",
+        "granite": "granite",
+        "cobble": "cobble",
+        "metal": "metal",
     }
     material = next((value for word, value in materials.items() if word in text), None)
     if material and selected_ids:
@@ -1085,7 +1140,7 @@ def local_respond(
             appearance_prompt=_appearance_prompt(message),
         )
     return _result(
-        "I can widen rooms or hallways, enlarge a space toward a neighbor, change a selected finish, or set lighting. Describe one of those design edits.",
+        "I can widen rooms or hallways, furnish a 3D room from the catalog, change a selected finish, or set lighting. Describe one of those design edits.",
         intent="answer",
     )
 
@@ -1190,6 +1245,9 @@ def _normalize_intent(plan: dict[str, Any], message: str) -> str:
         return "geometry"
     if forced == "repair":
         return "repair"
+    if is_furnish_request(message) and intent in {"repair", "answer", "edit", "", "appear"}:
+        log.info("chat.override intent=%s->finish furnish request", intent or "empty")
+        return "finish"
     if forced == "appear" and intent in {"answer", "edit", "repair"}:
         return "appear"
     if intent == "edit":
@@ -1229,7 +1287,7 @@ def _geometry_tasks(plan: dict[str, Any], message: str, selected_ids: list[str],
             finish = [
                 {
                     "id": "finish-1",
-                    "worker": "material" if selected_ids else "environment",
+                    "worker": "finish" if is_furnish_request(message) else ("material" if selected_ids else "environment"),
                     "instruction": message,
                     "target_ids": selected_ids,
                 }
@@ -1305,6 +1363,11 @@ def _run_edit_tasks(
         if fallback["commands"]:
             return {**fallback, "tasks": raw_results}
         blocked.extend(fallback.get("blocked") or [])
+
+    if intent == "finish" and is_furnish_request(message) and not commands:
+        fallback = fallback_furnish(building, message, selected_ids, (brief.get("active_floor_ids") or [None])[0])
+        if fallback["commands"]:
+            return {**fallback, "tasks": raw_results}
 
     candidate, error, target = _try_apply(building, rules, commands) if commands else (None, None, None)
     if commands and error:
@@ -1455,7 +1518,10 @@ def detect_intent(message: str) -> str | None:
     if bool(_APPEAR_RE.search(text)):
         return "appear"
 
-    # Finish (materials, lighting, etc)
+    if is_furnish_request(text):
+        return "finish"
+
+    # Finish (materials, lighting, furniture)
     if bool(_FINISH_RE.search(text)):
         return "finish"
 
@@ -1816,7 +1882,7 @@ def respond_unified(
     if intent is None:
         log.info("chat.unified_agent intent=none (answer mode)")
         return _result(
-            "I can widen rooms, fix compliance failures, paint materials, or restyle the exterior. What would you like?",
+            "I can widen rooms, furnish a 3D interior from the catalog, paint materials, or restyle the exterior. What would you like?",
             intent="answer",
         )
 
@@ -2015,6 +2081,9 @@ def respond_new(
 
     intent = plan.get("intent", "answer").lower()
     violations_to_repair = plan.get("violations_to_repair") or violations_to_repair
+    if is_furnish_request(prompt) and intent not in {"geometry", "repair"}:
+        intent = "finish"
+        log.info("agent.override furnish_request forcing intent=finish")
 
     log.info("agent.orchestrator_result intent=%s violations_to_repair=%d",
              intent, len(violations_to_repair or []))
@@ -2043,7 +2112,10 @@ def respond_new(
         )
 
     elif intent == "finish":
-        result = finish_subagent(prompt, _scoped_brief(building, rules, selected_ids, prompt, floor_id))
+        if is_furnish_request(prompt):
+            result = fallback_furnish(building, prompt, selected_ids, floor_id)
+        else:
+            result = finish_subagent(prompt, _scoped_brief(building, rules, selected_ids, prompt, floor_id))
         if report:
             report(phase="done", progress=1.0, message="Applied finish")
 
@@ -2496,6 +2568,7 @@ def respond(
         if report:
             report(phase="planning", progress=0.2, message="Orchestrator is assigning work")
         scoped = _scoped_brief(building, rules, selected_ids, message, floor_id)
+        scoped["view"] = context
         if isinstance(brief, dict):
             scoped = {**scoped, **{key: brief[key] for key in brief if key not in scoped or brief[key]}}
         log.info(

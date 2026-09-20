@@ -27,6 +27,10 @@ def _reason(status: int, body: str) -> str:
     except ValueError:
         pass
     detail = " ".join(detail.split())[:220]
+    if "payment method" in detail.lower():
+        return "Baseten needs a payment method before TripoSplat can start. Add a card in that workspace, activate TripoSplat, then try again."
+    if "deactivated" in detail.lower():
+        return "TripoSplat is turned off on Baseten. Activate that deployment in the workspace, then try again."
     if status in {401, 403}:
         return f"TripoSplat rejected the Baseten API key (HTTP {status}). {detail}"
     return f"TripoSplat request failed (HTTP {status}). {detail}".strip()
@@ -85,13 +89,12 @@ def _extract_file(payload: dict[str, Any]) -> bytes:
     raise SplatError("TripoSplat returned no splat file")
 
 
-def splat_filename(raw: bytes) -> str:
-    if raw[:3] == b"ply" or raw[:4].lower() == b"ply\n":
-        return "appearance.ply"
-    return "appearance.splat"
+def splat_filename(raw: bytes, stem: str = "appearance") -> str:
+    ext = "ply" if raw[:3] == b"ply" or raw[:4].lower() == b"ply\n" else "splat"
+    return f"{stem}.{ext}"
 
 
-def generate_splat(png: bytes, *, timeout: float = 900) -> bytes:
+def generate_splat(png: bytes, *, timeout: float = 900, num_gaussians: int = 131072) -> bytes:
     """Timeout is generous: a self-hosted endpoint may cold start from zero."""
     settings = get_settings()
     url = settings.splat_url.strip()
@@ -105,8 +108,8 @@ def generate_splat(png: bytes, *, timeout: float = 900) -> bytes:
     body = {
         "image": data_url,
         "image_url": data_url,
-        "num_gaussians": 131072,
+        "num_gaussians": num_gaussians,
         "output_format": "splat",
     }
-    log.info("splat.request bytes=%d", len(png))
+    log.info("splat.request bytes=%d gaussians=%d", len(png), num_gaussians)
     return _extract_file(_post(url, key, body, timeout))

@@ -9,7 +9,7 @@ import type { Building, ModelCommand } from '../types'
 import { BuildingShell, buildingHeightFt } from './scene-building'
 import { AppearanceContext, type AppearancePalette } from './appearance-context'
 import { GOOGLE_TILES_ASSET_ID, METERS_PER_FOOT, assessSite, emptySite, formatLatLon, haversineMeters, ionToken, planToLocal, samplePlan, siteCameraOffset, siteFootprint, siteSun, type Sample, type SiteReport } from './site-geometry'
-import { consumeSiteFrame, consumeSitePlace, peekSitePlace } from './site-intent'
+import { consumeSiteFrame, consumeSiteLook, consumeSitePlace, peekSiteLook, peekSitePlace, type SiteLook } from './site-intent'
 
 // Google's photorealistic tiles arrive Draco compressed; the decoder is served from public/.
 const draco = new DRACOLoader().setDecoderPath('draco/')
@@ -33,12 +33,15 @@ type Props = { building: Building; report: SiteReport | null; onReport: (report:
 export function SiteView({ building, report, onReport, onCommand, palette = null, enhanced = false }: Props) {
   const site = building.site ?? emptySite
   const [placing, setPlacing] = useState(site.lat == null || site.lon == null || peekSitePlace())
+  const [look, setLook] = useState<SiteLook | null>(peekSiteLook)
   const [recenter, setRecenter] = useState(0)
   const [selected, setSelected] = useState(false)
   useEffect(() => { if (site.lat == null || site.lon == null) setPlacing(true) }, [site.lat, site.lon])
   useEffect(() => {
     const apply = () => {
-      if (consumeSitePlace()) setPlacing(true)
+      const nextLook = consumeSiteLook()
+      if (nextLook) { setLook(nextLook); setPlacing(true); setSelected(false) }
+      if (consumeSitePlace()) { setPlacing(true); setSelected(false) }
       const frames = consumeSiteFrame()
       if (frames) setRecenter(value => value + frames)
     }
@@ -51,7 +54,9 @@ export function SiteView({ building, report, onReport, onCommand, palette = null
   if (!ionToken) return <div className="editor-scene-error"><strong>Add a Cesium ion token to see the globe.</strong><p>Put a free Community token in <code>VITE_CESIUM_ION_TOKEN</code> in your <code>.env</code> and restart the dev server. It needs the assets:read and geocode scopes.</p></div>
 
   const place = (lat: number, lon: number, address = '') => {
-    onCommand([{ kind: 'set_site', target_id: '', params: address ? { lat, lon, address } : { lat, lon } }])
+    const label = address || look?.address || site.address || formatLatLon({ lat, lon })
+    onCommand([{ kind: 'set_site', target_id: '', params: label ? { lat, lon, address: label } : { lat, lon } }])
+    setLook(null)
     setPlacing(false)
   }
 
@@ -73,7 +78,7 @@ export function SiteView({ building, report, onReport, onCommand, palette = null
       onPointerMissed={() => setSelected(false)}
     >
       <color attach="background" args={['#07090d']} />
-      <SiteScene building={building} report={report} onReport={onReport} onCommand={onCommand} placing={placing} recenter={recenter} selected={selected} onSelect={() => setSelected(true)} onPlace={(lat, lon) => place(lat, lon, site.address || formatLatLon({ lat, lon }))} />
+      <SiteScene building={building} report={report} onReport={onReport} onCommand={onCommand} placing={placing} look={look} recenter={recenter} selected={selected} onSelect={() => setSelected(true)} onPlace={(lat, lon) => place(lat, lon)} />
     </Canvas>
     {selected && <div className="editor-site-selection" role="toolbar" aria-label="Building rotation">
       <strong>Building selected</strong>
@@ -85,7 +90,7 @@ export function SiteView({ building, report, onReport, onCommand, palette = null
   </></AppearanceContext.Provider>
 }
 
-function SiteScene({ building, report, onReport, onCommand, placing, recenter, selected, onSelect, onPlace }: { building: Building; report: SiteReport | null; onReport: Props['onReport']; onCommand: Props['onCommand']; placing: boolean; recenter: number; selected: boolean; onSelect: () => void; onPlace: (lat: number, lon: number) => void }) {
+function SiteScene({ building, report, onReport, onCommand, placing, look, recenter, selected, onSelect, onPlace }: { building: Building; report: SiteReport | null; onReport: Props['onReport']; onCommand: Props['onCommand']; placing: boolean; look: SiteLook | null; recenter: number; selected: boolean; onSelect: () => void; onPlace: (lat: number, lon: number) => void }) {
   const site = building.site ?? emptySite
   const lat = site.lat, lon = site.lon
   const azimuth = site.rotation_deg * Math.PI / 180
@@ -94,6 +99,8 @@ function SiteScene({ building, report, onReport, onCommand, placing, recenter, s
   const span = Math.max(footprint.width, footprint.height, buildingHeightFt(building)) * METERS_PER_FOOT
   const height = (grade ?? 0) + site.ground_offset_ft * METERS_PER_FOOT
   const sited = lat != null && lon != null
+  const aimLat = look?.lat ?? lat
+  const aimLon = look?.lon ?? lon
   const controls = useRef<any>(null)
   return <>
     <TilesRenderer errorTarget={8} onLoadModel={event => makeTilesPhotoreal(event.scene)}>
@@ -103,17 +110,17 @@ function SiteScene({ building, report, onReport, onCommand, placing, recenter, s
       <TilesPlugin plugin={UnloadTilesPlugin} />
       <TilesPlugin plugin={TilesFadePlugin} />
       <UnlitTiles />
-      <GlobeControls ref={controls} enableDamping dampingFactor={0.12} enableFlight />
+      <GlobeControls ref={controls} enableDamping dampingFactor={0.12} enableFlight minDistance={8} />
       <SitePicker placing={placing} onPlace={onPlace} />
-      {placing && <HoverPad footprint={footprint} rotation={site.rotation_deg} />}
+      {placing && <HoverBuilding building={building} footprint={footprint} rotation={site.rotation_deg} anchor={look} />}
       {sited && <GroundProbe building={building} lat={lat} lon={lon} rotation={site.rotation_deg} onGrade={setGrade} onReport={onReport} />}
-      {sited && <EastNorthUpFrame lat={lat * Math.PI / 180} lon={lon * Math.PI / 180} height={height}>
+      {sited && !placing && <EastNorthUpFrame lat={lat * Math.PI / 180} lon={lon * Math.PI / 180} height={height}>
         <LitSiteModel>
           {sited && <SiteDaylight lat={lat} />}
           <SiteBuilding building={building} footprint={footprint} report={report} azimuth={azimuth} selected={selected} controls={controls} onSelect={onSelect} onCommand={onCommand} />
         </LitSiteModel>
       </EastNorthUpFrame>}
-      <FlyTo lat={lat} lon={lon} span={span} ground={grade} recenter={recenter} controls={controls} />
+      <FlyTo lat={aimLat} lon={aimLon} span={span} ground={look ? null : grade} recenter={recenter} controls={controls} />
       <TilesAttributionOverlay />
     </TilesRenderer>
   </>
@@ -256,15 +263,20 @@ function SitePicker({ placing, onPlace }: { placing: boolean; onPlace: (lat: num
   const tiles = useContext(TilesRendererContext) as { group: THREE.Object3D; ellipsoid: { getPositionToCartographic: (pos: THREE.Vector3, target: { lat: number; lon: number; height: number }) => void } } | null
   const camera = useThree(state => state.camera)
   const gl = useThree(state => state.gl)
-  const drag = useRef({ x: 0, y: 0, moved: false })
+  const drag = useRef({ x: 0, y: 0, moved: false, armed: false })
   const onPlaceRef = useRef(onPlace)
   onPlaceRef.current = onPlace
   useEffect(() => {
     const element = gl.domElement
-    const down = (event: PointerEvent) => { if (event.button !== 0) return; drag.current = { x: event.clientX, y: event.clientY, moved: false } }
+    const down = (event: PointerEvent) => {
+      if (event.button !== 0) return
+      drag.current = { x: event.clientX, y: event.clientY, moved: false, armed: true }
+    }
     const move = (event: PointerEvent) => { if (Math.hypot(event.clientX - drag.current.x, event.clientY - drag.current.y) > 7) drag.current.moved = true }
     const up = (event: PointerEvent) => {
-      if (!placing || !tiles?.group || drag.current.moved || event.button !== 0) return
+      const { armed, moved } = drag.current
+      drag.current.armed = false
+      if (!placing || !tiles?.group || !armed || moved || event.button !== 0) return
       const hit = pickFromTiles(tiles, camera, event.clientX, event.clientY, element)
       if (hit) onPlaceRef.current(hit.lat, hit.lon)
     }
@@ -280,11 +292,28 @@ function SitePicker({ placing, onPlace }: { placing: boolean; onPlace: (lat: num
   return null
 }
 
-function HoverPad({ footprint, rotation }: { footprint: ReturnType<typeof siteFootprint>; rotation: number }) {
+const ghostMaterial = new THREE.MeshBasicMaterial({ color: '#6ea8cc', transparent: true, opacity: 0.32, depthWrite: false, side: THREE.DoubleSide })
+
+function tintGhost(root: THREE.Object3D) {
+  root.traverse(node => {
+    node.userData.siteBuilding = true
+    if (!(node instanceof THREE.Mesh)) return
+    if (node.material !== ghostMaterial) node.material = ghostMaterial
+    node.castShadow = false
+    node.receiveShadow = false
+    if (node instanceof THREE.InstancedMesh) node.instanceColor = null
+  })
+}
+
+function HoverBuilding({ building, footprint, rotation, anchor }: { building: Building; footprint: ReturnType<typeof siteFootprint>; rotation: number; anchor: SiteLook | null }) {
   const tiles = useContext(TilesRendererContext) as { group: THREE.Object3D; ellipsoid: { getPositionToCartographic: (pos: THREE.Vector3, target: { lat: number; lon: number; height: number }) => void } } | null
   const { camera, gl } = useThree()
   const pointer = useRef({ x: 0, y: 0, inside: false })
-  const [pose, setPose] = useState<{ lat: number; lon: number; height: number } | null>(null)
+  const ghost = useRef<THREE.Group>(null)
+  const [pose, setPose] = useState<{ lat: number; lon: number; height: number } | null>(anchor ? { lat: anchor.lat, lon: anchor.lon, height: 0 } : null)
+  useEffect(() => {
+    if (anchor) setPose(current => current && current.lat === anchor.lat && current.lon === anchor.lon ? current : { lat: anchor.lat, lon: anchor.lon, height: current?.height ?? 0 })
+  }, [anchor])
   useEffect(() => {
     const element = gl.domElement
     const move = (event: PointerEvent) => {
@@ -297,18 +326,32 @@ function HoverPad({ footprint, rotation }: { footprint: ReturnType<typeof siteFo
     return () => { window.removeEventListener('pointermove', move); element.removeEventListener('pointerleave', leave) }
   }, [gl])
   useFrame(() => {
-    if (!tiles?.group || !pointer.current.inside) { if (pose) setPose(null); return }
-    const hit = pickFromTiles(tiles, camera, pointer.current.x, pointer.current.y, gl.domElement)
-    if (!hit) { if (pose) setPose(null); return }
-    if (!pose || Math.abs(pose.lat - hit.lat) > 1e-6 || Math.abs(pose.lon - hit.lon) > 1e-6) setPose(hit)
+    if (ghost.current) tintGhost(ghost.current)
+    if (!tiles?.group) return
+    if (pointer.current.inside) {
+      const hit = pickFromTiles(tiles, camera, pointer.current.x, pointer.current.y, gl.domElement)
+      if (hit && (!pose || Math.abs(pose.lat - hit.lat) > 1e-6 || Math.abs(pose.lon - hit.lon) > 1e-6)) setPose(hit)
+      return
+    }
+    if (anchor) {
+      const height = probeTerrainHeight(tiles, anchor.lat, anchor.lon) ?? pose?.height ?? 0
+      if (!pose || pose.lat !== anchor.lat || pose.lon !== anchor.lon || Math.abs(pose.height - height) > 0.4) setPose({ lat: anchor.lat, lon: anchor.lon, height })
+      return
+    }
+    if (pose) setPose(null)
   })
   if (!pose) return null
-  return <EastNorthUpFrame lat={pose.lat * Math.PI / 180} lon={pose.lon * Math.PI / 180} height={pose.height} az={rotation * Math.PI / 180}>
-    <group rotation={[Math.PI / 2, 0, 0]} scale={METERS_PER_FOOT}>
-      <mesh position={[0, .4, 0]} rotation={[-Math.PI / 2, 0, 0]} userData={{ siteBuilding: true }}>
-        <planeGeometry args={[footprint.width, footprint.height]} />
-        <meshBasicMaterial color="#7d9cb0" transparent opacity={.35} depthWrite={false} side={THREE.DoubleSide} />
-      </mesh>
+  return <EastNorthUpFrame lat={pose.lat * Math.PI / 180} lon={pose.lon * Math.PI / 180} height={pose.height + 0.45}>
+    <group ref={ghost} rotation={[0, 0, -rotation * Math.PI / 180]} userData={{ siteBuilding: true }}>
+      <group rotation={[Math.PI / 2, 0, 0]} scale={METERS_PER_FOOT}>
+        <group position={[-footprint.cx, 0, -footprint.cy]}>
+          <Suspense fallback={<mesh position={[footprint.cx, buildingHeightFt(building) / 2, footprint.cy]} userData={{ siteBuilding: true }}><boxGeometry args={[Math.max(footprint.width, 1), Math.max(buildingHeightFt(building), 1), Math.max(footprint.height, 1)]} /><meshBasicMaterial color="#6ea8cc" transparent opacity={0.32} depthWrite={false} /></mesh>}>
+            <AppearanceContext.Provider value={{ map: null, roofMap: null, matrix: null, palette: null, splatUrl: null, apply: false }}>
+              <BuildingShell building={building} onSelect={() => {}} />
+            </AppearanceContext.Provider>
+          </Suspense>
+        </group>
+      </group>
     </group>
   </EastNorthUpFrame>
 }
@@ -378,17 +421,41 @@ function GroundProbe({ building, lat, lon, rotation, onGrade, onReport }: { buil
   return null
 }
 
+function probeTerrainHeight(tiles: { group: THREE.Object3D; ellipsoid: any } | null, lat: number, lon: number) {
+  if (!tiles?.group || !tiles.ellipsoid) return null
+  const latRad = lat * Math.PI / 180, lonRad = lon * Math.PI / 180
+  enuAxes(tiles.ellipsoid, latRad, lonRad)
+  scratch.inverse.copy(tiles.group.matrixWorld).invert()
+  const raycaster = new THREE.Raycaster()
+  raycaster.far = 80000
+  scratch.camera.copy(scratch.origin).addScaledVector(scratch.up, 25000).applyMatrix4(tiles.group.matrixWorld)
+  scratch.down.copy(scratch.up).negate().transformDirection(tiles.group.matrixWorld)
+  raycaster.set(scratch.camera, scratch.down)
+  const hit = raycaster.intersectObject(tiles.group, true).find(item => {
+    let node: THREE.Object3D | null = item.object
+    while (node) { if (node.userData.siteBuilding) return false; node = node.parent }
+    return true
+  })
+  if (!hit) return null
+  scratch.local.copy(hit.point).applyMatrix4(scratch.inverse)
+  tiles.ellipsoid.getPositionToCartographic(scratch.local, scratch.carto)
+  return scratch.carto.height
+}
+
 function FlyTo({ lat, lon, span, ground, recenter, controls }: { lat: number | null; lon: number | null; span: number; ground: number | null; recenter: number; controls: { current: { resetState: () => void; pivotPoint: THREE.Vector3 } | null } }) {
-  const tiles = useContext(TilesRendererContext) as { group: THREE.Object3D; ellipsoid: { getEastNorthUpAxes?: (lat: number, lon: number, east: THREE.Vector3, north: THREE.Vector3, up: THREE.Vector3, pos?: THREE.Vector3) => void; getCartographicToNormal: (lat: number, lon: number, target: THREE.Vector3) => THREE.Vector3; getCartographicToPosition: (lat: number, lon: number, height: number, target: THREE.Vector3) => THREE.Vector3 } } | null
+  const tiles = useContext(TilesRendererContext) as { group: THREE.Object3D; ellipsoid: { getEastNorthUpAxes?: (lat: number, lon: number, east: THREE.Vector3, north: THREE.Vector3, up: THREE.Vector3, pos?: THREE.Vector3) => void; getCartographicToNormal: (lat: number, lon: number, target: THREE.Vector3) => THREE.Vector3; getCartographicToPosition: (lat: number, lon: number, height: number, target: THREE.Vector3) => THREE.Vector3; getPositionToCartographic: (pos: THREE.Vector3, target: { lat: number; lon: number; height: number }) => void } } | null
   const camera = useThree(state => state.camera)
   const last = useRef<{ lat: number; lon: number; recenter: number; ground: number | null } | null>(null)
   useFrame(() => {
-    if (!tiles?.ellipsoid || lat == null || lon == null) return
+    if (!tiles?.group || !tiles.ellipsoid || lat == null || lon == null) return
+    const probed = ground ?? probeTerrainHeight(tiles, lat, lon)
     const previous = last.current
-    const jumped = !previous || previous.recenter !== recenter || previous.ground !== ground || haversineMeters(previous, { lat, lon }) > 250
-    if (!jumped) return
-    last.current = { lat, lon, recenter, ground }
-    const { terrain, hover, lookUp } = siteCameraOffset(span, ground)
+    const moved = !previous || previous.recenter !== recenter || haversineMeters(previous, { lat, lon }) > 40
+    const gotGround = !!previous && previous.ground == null && probed != null
+    if (!moved && !gotGround) return
+    last.current = { lat, lon, recenter, ground: probed }
+    // Unknown ground stays ~12 km up so the camera is not inside the earth while tiles load.
+    const { terrain, hover, lookUp } = siteCameraOffset(span, probed)
     const latRad = lat * Math.PI / 180, lonRad = lon * Math.PI / 180
     enuAxes(tiles.ellipsoid, latRad, lonRad, terrain)
     scratch.target.copy(scratch.origin).addScaledVector(scratch.up, lookUp).applyMatrix4(tiles.group.matrixWorld)

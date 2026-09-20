@@ -20,6 +20,8 @@ def test_reason_surfaces_api_error():
     message = splat_service._reason(500, body)
     assert "Internal Server Error" in message
     assert splat_service._reason(401, json.dumps({"detail": "unauthorized"})).startswith("TripoSplat rejected")
+    assert "payment method" in splat_service._reason(400, json.dumps({"message": "You must add a payment method to deploy models."})).lower()
+    assert "turned off" in splat_service._reason(400, json.dumps({"error": "Model version 3m4v82k is deactivated. It needs to be activated before running predictions"})).lower()
 
 
 def test_generate_splat_uses_self_hosted_endpoint(monkeypatch):
@@ -62,3 +64,4 @@ def test_generate_splat_without_any_endpoint(monkeypatch):
 def test_splat_filename_tracks_format():
     assert splat_service.splat_filename(b"ply\nformat ascii 1.0\n") == "appearance.ply"
     assert splat_service.splat_filename(SPLAT_BYTES) == "appearance.splat"
+    assert splat_service.splat_filename(SPLAT_BYTES, "furniture/object-1") == "furniture/object-1.splat"

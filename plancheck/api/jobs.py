@@ -28,11 +28,16 @@ def get_job(job_id):
         _jobs[job_id]=job
         return job.model_copy(deep=True)
 
+_EVENT_EXTRA = ("kind", "detail", "sources", "rooms", "items", "label")
+
 def _update(jid,**kw):
+    extras={k:kw.pop(k) for k in _EVENT_EXTRA if k in kw}
     with _lock:
         current=_jobs[jid];kw={k:v for k,v in kw.items() if k in JobStatus.model_fields}
         current=current.model_copy(update=kw)
-        if 'message' in kw:current.events=(current.events+[{'message':current.message,'phase':current.phase,'progress':current.progress}])[-100:]
+        if 'message' in kw or extras:
+            event={'message':current.message,'phase':current.phase,'progress':current.progress,**extras}
+            current.events=(current.events+[event])[-100:]
         _jobs[jid]=current;atomic_json(_path(jid),current.model_dump())
 
 def cancel(job_id):
