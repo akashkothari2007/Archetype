@@ -7,7 +7,7 @@ from plancheck.core.schemas import Sheet,SheetGeometry,Wall,Door,Window,Fixture,
 from plancheck.core.layers import bucket_for,normalise
 from plancheck.core.settings import get_settings
 
-EXTRACTOR_VERSION='6'
+EXTRACTOR_VERSION='7'
 ROOM_TAG_REJECT=re.compile(r"""[\d\[\]'"]""")
 STACK_X_PT=12.0
 STACK_Y_PT=18.0
@@ -59,6 +59,37 @@ def _bbox_overlap(a,b)->bool:
 
 def _expand_bbox(bbox,pad):
  return [bbox[0]-pad,bbox[1]-pad,bbox[2]+pad,bbox[3]+pad]
+
+HINGE_TOL_FT=0.3
+
+def _analyze_door_swing(segments,curves,scale):
+ """Determine hinge point and arc midpoint from a door cluster's geometry.
+
+ The hinge point is the leaf endpoint that coincides (within HINGE_TOL_FT)
+ with an arc endpoint. The arc midpoint is the cubic Bezier at t=0.5 of the
+ middle curve segment — used later to determine swing side via cross product.
+
+ Returns (hinge_pt, arc_mid_pt) in sheet-space, or (None, None) if no arc.
+ """
+ if not curves or not segments:return None,None
+ # Leaf: longest straight segment in the cluster
+ leaf=max(segments,key=lambda s:math.dist(s[0],s[1]),default=None)
+ if not leaf or math.dist(leaf[0],leaf[1])<1e-3:return None,None
+ # Collect all arc endpoints
+ arc_eps=[]
+ for c in curves:arc_eps.append(c['start']);arc_eps.append(c['end'])
+ if not arc_eps:return None,None
+ tol=HINGE_TOL_FT*scale if scale else HINGE_TOL_FT
+ d_a=min(math.dist(leaf[0],ep) for ep in arc_eps)
+ d_b=min(math.dist(leaf[1],ep) for ep in arc_eps)
+ if d_a<=tol and d_a<=d_b:hinge_pt=list(leaf[0])
+ elif d_b<=tol:hinge_pt=list(leaf[1])
+ else:return None,None
+ # Arc midpoint: cubic Bezier at t=0.5 of the middle curve
+ c=curves[len(curves)//2]
+ p0,p1,p2,p3=c['start'],c['ctrl1'],c['ctrl2'],c['end']
+ arc_mid_pt=[0.125*p0[0]+0.375*p1[0]+0.375*p2[0]+0.125*p3[0],0.125*p0[1]+0.375*p1[1]+0.375*p2[1]+0.125*p3[1]]
+ return hinge_pt,arc_mid_pt
 
 def cluster_door_fragments(fragments:list[dict],scale:float,pad_ft:float=DOOR_CLUSTER_PAD_FT,cell_ft:float=DOOR_CLUSTER_CELL_FT)->tuple[list[dict],int]:
  """Union-find cluster of DOOR-layer path bboxes, then measure the leaf from the union.
@@ -114,7 +145,10 @@ def cluster_door_fragments(fragments:list[dict],scale:float,pad_ft:float=DOOR_CL
   if width_ft<DOOR_WIDTH_MIN_FT or width_ft>DOOR_WIDTH_MAX_FT:
    rejected+=1
    continue
-  doors.append({'xy':[(bbox[0]+bbox[2])/2,(bbox[1]+bbox[3])/2],'bbox':bbox,'width_pt':width_pt,'width_ft':width_ft})
+  group_segs=[seg for frag in group for seg in frag.get('segments',[])]
+  group_curves=[c for frag in group for c in frag.get('curves',[])]
+  hinge_pt,arc_mid_pt=_analyze_door_swing(group_segs,group_curves,scale)
+  doors.append({'xy':[(bbox[0]+bbox[2])/2,(bbox[1]+bbox[3])/2],'bbox':bbox,'width_pt':width_pt,'width_ft':width_ft,'hinge_pt':hinge_pt,'arc_mid_pt':arc_mid_pt})
  return doors,rejected
 
 def merge_stacked_room_tags(items:list[dict],x_tol:float=STACK_X_PT,y_gap:float=STACK_Y_PT)->list[dict]:
@@ -171,7 +205,10 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
      length=math.dist(a,b)
      if length>.05:geom.walls.append(Wall(id=f'{sheet.sheet_id}-w{i}-{j}',a=a,b=b,cls=cls,layer=layer,thickness_pt=d.get('width'),len_ft=length/scale if scale else 0))
    elif bucket=='door':
-    door_frags.append({'bbox':rr,'segments':segments})
+    curves=[]
+    for item in d['items']:
+     if item[0]=='c':curves.append({'start':xy(item[1]),'end':xy(item[4]),'ctrl1':xy(item[2]),'ctrl2':xy(item[3])})
+    door_frags.append({'bbox':rr,'segments':segments,'curves':curves})
    elif bucket=='window':
     for j,(a,b) in enumerate(segments):
      if math.dist(a,b)>1:geom.windows.append(Window(id=f'{sheet.sheet_id}-win{i}-{j}',a=a,b=b,width_ft=math.dist(a,b)/scale if scale else 0))
@@ -195,7 +232,7 @@ def extract(sheet:Sheet,path:Path,raster:Path)->SheetGeometry:
   geom.room_tags=build_room_tags(text_items,tag_boxes)
   clustered,rejected=cluster_door_fragments(door_frags,scale)
   for i,door in enumerate(clustered):
-   geom.doors.append(Door(id=f'{sheet.sheet_id}-d{i}',xy=door['xy'],bbox=door['bbox'],width_pt=door['width_pt'],width_ft=door['width_ft']))
+   geom.doors.append(Door(id=f'{sheet.sheet_id}-d{i}',xy=door['xy'],bbox=door['bbox'],width_pt=door['width_pt'],width_ft=door['width_ft'],hinge_pt=door.get('hinge_pt'),arc_mid_pt=door.get('arc_mid_pt')))
   if rejected:
    geom.warnings.append(f'Rejected {rejected} door clusters outside {DOOR_WIDTH_MIN_FT:g}–{DOOR_WIDTH_MAX_FT:g} ft')
   for name,rr in sorted(labels,key=lambda x:(-x[1][1],x[1][0])):

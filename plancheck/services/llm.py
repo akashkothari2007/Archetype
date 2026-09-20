@@ -18,7 +18,7 @@ GENERATION = "generation"
 
 # Generation replies are a whole space program. Reasoning tokens count against
 # this budget, so it has to be large enough for thinking plus the JSON.
-_MAX_TOKENS = {ORCHESTRATOR: 1800, SUBAGENT: 3200, GENERATION: 16000}
+_MAX_TOKENS = {ORCHESTRATOR: 1800, SUBAGENT: 8000, GENERATION: 16000}
 _JSON_HINTS = ("program", "layouts", "spaces", "storeys", "intent", "commands")
 _THINK_RE = re.compile(
     r"<think(ing)?>.*?</think(ing)?>|```(?:thinking|reason(?:ing)?)(.*?)```",

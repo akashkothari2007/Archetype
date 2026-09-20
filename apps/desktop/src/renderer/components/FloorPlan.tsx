@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Stage, Layer, Group, Line, Rect, Circle, Text, Shape, Image as KonvaImage } from 'react-konva'
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
-import { MousePointer2, Hand, Ruler, Plus, Minus, Maximize, PencilLine, Scissors, Link, Copy, Trash2, LockKeyhole, RotateCw, Magnet, X } from 'lucide-react'
+import { MousePointer2, Hand, Ruler, Plus, Minus, Maximize, PencilLine, Scissors, Link, Copy, Trash2, LockKeyhole, RotateCw, Magnet, X, Eye, EyeOff } from 'lucide-react'
 import { assetMime, distance, floorBounds, interiorPoint, lengthLabel, placementCommand, polygonArea, projectPoint, type Asset, type EditorProps, type Point } from './editor-geometry'
 import { base } from '../api'
 import type { Check, Floor, SheetCard } from '../types'
@@ -173,6 +173,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const [revealing, setRevealing] = useState(false)
   const [sheetGeom, setSheetGeom] = useState<SheetGeom | null>(null)
   const [raster, setRaster] = useState<HTMLImageElement | null>(null)
+  const [rasterOpacity, setRasterOpacity] = useState(0)
   const [sonarKey, setSonarKey] = useState('')
   const [sonarSettled, setSonarSettled] = useState(true)
   const [blastAt, setBlastAt] = useState(0)
@@ -505,6 +506,11 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
           <button key={stop.id} type="button" className={layerStop === stop.id ? 'active' : layerStop > stop.id ? 'passed' : ''} onClick={() => setLayerStop(stop.id)}>{stop.label}</button>
         ))}
       </div>
+      {raster && <div className="xray-raster">
+        <button type="button" title="Toggle source raster" onClick={() => setRasterOpacity(o => o > 0 ? 0 : 0.3)}>{rasterOpacity > 0 ? <Eye size={11} /> : <EyeOff size={11} />}</button>
+        <span>Raster</span>
+        <input type="range" min={0} max={0.8} step={0.05} value={rasterOpacity} aria-label="Raster opacity" onChange={e => setRasterOpacity(Number(e.target.value))} />
+      </div>}
     </div>
     {selection.length > 0 && <div className="editor-selection-tools" role="toolbar" aria-label="Selection tools">
       <span>{selection.length > 1 ? `${selection.length} selected` : selectedWall ? 'Wall' : selectedOpening?.kind || selectedObject?.asset_id.replaceAll('_', ' ') || selectedRoom?.name || 'Selection'}</span>
@@ -527,7 +533,7 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
             <Line points={room.polygon.flat()} closed fill={chosen ? '#eaf2fa' : quarantined ? '#f3f1ed' : violating ? '#f6ebe8' : '#ffffff'} opacity={furnitureVisible ? (quarantined ? .45 : .55) : quarantined ? .7 : .86} stroke={quarantined ? '#b7b0a6' : room.needs_review ? '#d3ad6a' : undefined} dash={quarantined || room.needs_review ? [4 * stroke, 4 * stroke] : undefined} strokeWidth={stroke} listening={tool === 'select'} perfectDrawEnabled={false} shadowForStrokeEnabled={false} />
           </Group>
         })}
-        {furnitureVisible && raster && world.width > 0 && <KonvaImage image={raster} x={0} y={world.height} width={world.width} height={world.height} scaleY={-1} opacity={layerStop === 5 ? 0.22 : 0.38} listening={false} />}
+        {rasterOpacity > 0 && raster && world.width > 0 && <KonvaImage image={raster} x={0} y={world.height} width={world.width} height={world.height} scaleY={-1} opacity={rasterOpacity} listening={false} />}
         {walls.map(wall => {
           const a = vertexAt(wall.start_id), b = vertexAt(wall.end_id)
           if (!a || !b) return null

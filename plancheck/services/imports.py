@@ -185,11 +185,13 @@ def attach_openings(building:Building,geom:SheetGeometry,point,source:Source,bbo
     candidates=[]
     for door in geom.doors:
         if bbox and not _in_bbox(door.xy,bbox,pad=1):continue
-        candidates.append(('door',door.id,point(door.xy),door.width_ft or 3.0))
+        d_hinge=point(door.hinge_pt) if door.hinge_pt else None
+        d_arc=point(door.arc_mid_pt) if door.arc_mid_pt else None
+        candidates.append(('door',door.id,point(door.xy),door.width_ft or 3.0,d_hinge,d_arc))
     for window in geom.windows:
         mid=((window.a[0]+window.b[0])/2,(window.a[1]+window.b[1])/2)
         if bbox and not _in_bbox(mid,bbox,pad=1):continue
-        candidates.append(('window',window.id,point(mid),window.width_ft or 3.0))
+        candidates.append(('window',window.id,point(mid),window.width_ft or 3.0,None,None))
 
     def snap_window(xy):
         best=None
@@ -223,7 +225,7 @@ def attach_openings(building:Building,geom:SheetGeometry,point,source:Source,bbo
         return h[2],h[3],h[4],h[5],h[6],None
 
     dropped=0
-    for kind,oid,xy,width in candidates:
+    for kind,oid,xy,width,d_hinge,d_arc in candidates:
         if kind=='door':
             hit=snap_door(xy)
             if not hit:
@@ -254,7 +256,30 @@ def attach_openings(building:Building,geom:SheetGeometry,point,source:Source,bbo
         interval=occupied.setdefault(wall.id,[])
         if any(min(start+width,other[1])-max(start,other[0])>1e-5 for other in interval):continue
         interval.append((start,start+width))
-        building.openings.append(Opening(id=oid,wall_id=wall.id,kind=kind,offset_ft=start,width_ft=width,height_ft=7 if kind=='door' else 4,sill_ft=0 if kind=='door' else 3,source=source))
+        # Derive hinge (left/right) and swing (in/out) from arc geometry.
+        # hinge = which end of the opening the hinge point sits on, along wall
+        #         direction from wall.start to wall.end.
+        # swing = sign of 2D cross product of wall direction with
+        #         (arc_midpoint − hinge_point). Positive → "in", negative → "out".
+        hinge_val='left';swing_val='in';has_arc=bool(d_hinge and d_arc and kind=='door')
+        if has_arc:
+            va=next(v for v in building.vertices if v.id==wall.start_id)
+            vb=next(v for v in building.vertices if v.id==wall.end_id)
+            dx,dy=vb.x-va.x,vb.y-va.y
+            wlen=math.hypot(dx,dy)
+            if wlen>1e-9:
+                ux,uy=dx/wlen,dy/wlen
+                # Project hinge onto wall to decide left/right
+                ht=(d_hinge[0]-va.x)*ux+(d_hinge[1]-va.y)*uy
+                opening_mid=start+width/2
+                if ht<opening_mid:hinge_val='left'
+                else:hinge_val='right'
+                # Cross product of wall dir with (arc_mid − hinge) for swing
+                amx,amy=d_arc[0]-d_hinge[0],d_arc[1]-d_hinge[1]
+                cross=ux*amy-uy*amx
+                swing_val='in' if cross>=0 else 'out'
+        op_source=source if has_arc else source.model_copy(update={'assumed':True})
+        building.openings.append(Opening(id=oid,wall_id=wall.id,kind=kind,offset_ft=start,width_ft=width,height_ft=7 if kind=='door' else 4,sill_ft=0 if kind=='door' else 3,hinge=hinge_val,swing=swing_val,source=op_source))
     if dropped:
         building.review.append(ReviewItem(id=f'{source.sheet_id or building.floors[0].id}-dropped-doors',kind='extraction',message=f'Dropped {dropped} door fragments outside {DOOR_MIN_FT:g}–{DOOR_MAX_FT:g} ft or without a host wall; counted as extraction_warnings, not openings.',document_id=source.document_id,sheet_id=source.sheet_id))
     if building.openings:
@@ -655,6 +680,12 @@ def build_from_sheets(project:Project,geometries:list[SheetGeometry])->Building:
             result=merge_buildings(result,retarget_storey(scratch,f'level-{level}',_floor_name(level),(level-1)*STOREY_HEIGHT_FT))
     link_rooms_to_types(result)
     assign_shared_type_refs(result)
+    # Validate: drop any openings referencing a wall that no longer exists.
+    wall_ids={w.id for w in result.walls}
+    orphaned=[o for o in result.openings if o.wall_id not in wall_ids]
+    if orphaned:
+        result.openings=[o for o in result.openings if o.wall_id in wall_ids]
+        result.review.append(ReviewItem(id='orphaned-openings',kind='geometry',message=f'{len(orphaned)} opening(s) referenced non-existent wall ids and were dropped.'))
     from plancheck.services.reliability import apply_reliability
     apply_reliability(result)
     return result
