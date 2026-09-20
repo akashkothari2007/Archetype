@@ -1,7 +1,7 @@
 """Baseten server for TripoSplat: one image in, one Gaussian splat file out.
 
-The response mirrors fal's `tripo3d/triposplat` shape so plancheck.services.splat
-can talk to either backend, except the file comes back as base64 instead of a URL.
+The response uses a `model_mesh.content` base64 blob so plancheck.services.splat
+can decode the Gaussian without a second download.
 """
 
 import base64

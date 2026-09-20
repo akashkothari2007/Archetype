@@ -983,14 +983,14 @@ def local_respond(
 
 
 def _appearance_prompt(message: str, planned: str | None = None) -> str:
-    from plancheck.services.image_edit import SCENE_PROMPT
+    from plancheck.services.image_edit import SCENE_PROMPT, guide_prompt
 
     extra = (planned or message or "").strip()
     if not extra or extra == SCENE_PROMPT:
-        return SCENE_PROMPT
+        return guide_prompt()
     if extra.startswith(SCENE_PROMPT):
         return extra
-    return f"{SCENE_PROMPT} User request: {extra}"
+    return guide_prompt(extra=extra)
 
 
 def _worker_system(worker: str) -> str:

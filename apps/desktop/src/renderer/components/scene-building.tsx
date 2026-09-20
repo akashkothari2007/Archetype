@@ -31,7 +31,7 @@ export function BuildingShell({ building, hideShell = false, selectedId = null, 
     const below = building.floors.filter(f => f.elevation_ft < floor.elevation_ft).sort((a, b) => b.elevation_ft - a.elevation_ft)[0]
     const slabThickness = below ? Math.max(.32, floor.elevation_ft - below.elevation_ft - below.height_ft) : .32
     return <group key={floor.id} position={[0, floor.elevation_ft - ground, 0]}>
-      {floorRooms.map(room => <group key={room.id}><FloorSlab polygon={room.polygon} y={-slabThickness} thickness={slabThickness} /><RoomFloor room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} /></group>)}
+      {!hideShell && floorRooms.map(room => <group key={room.id}><FloorSlab polygon={room.polygon} y={-slabThickness} thickness={slabThickness} /><RoomFloor room={room} faded={dragTarget === room.id} selected={selectedId === room.id} onSelect={onSelect} /></group>)}
       {!hideShell && <Walls3D walls={floorWalls} vertices={vertices} openings={building.openings} selectedId={selectedId} dragTarget={dragTarget} onSelect={onSelect} photoreal />}
       {!hideShell && <FloorDressing walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} foundation={floor.elevation_ft === ground} />}
       {!hideShell && floor.id === topFloor?.id && <ConceptRoof walls={floorWalls} rooms={floorRooms} vertices={vertices} height={floor.height_ft} />}

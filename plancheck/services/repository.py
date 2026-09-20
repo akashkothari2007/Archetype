@@ -1,6 +1,6 @@
 """Filesystem unit-of-work with immutable revisions and an atomic manifest pointer."""
 from __future__ import annotations
-import json, os, uuid
+import json, os, shutil, uuid
 from pathlib import Path
 from datetime import datetime,timezone
 from typing import Protocol, Callable
@@ -9,8 +9,15 @@ from plancheck.core.building import Building,DesignBrief,DesktopProject
 from plancheck.core.settings import get_settings
 
 class RevisionConflict(ValueError):pass
+NAME_LIMIT=160
 
 def now():return datetime.now(timezone.utc).isoformat()
+def normalize_name(name:str)->str:
+    cleaned=' '.join((name or '').split())
+    if not cleaned:raise ValueError('Give this project a name.')
+    if len(cleaned)>NAME_LIMIT:raise ValueError(f'Project names can be at most {NAME_LIMIT} characters.')
+    return cleaned
+def name_key(name:str)->str:return normalize_name(name).casefold()
 def atomic_json(path:Path,data):
     path.parent.mkdir(parents=True,exist_ok=True)
     tmp=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
@@ -43,6 +50,30 @@ class FileProjectRepository:
                 m=json.loads(path.read_text(encoding='utf8'));out.append({'project_id':m['project_id'],'name':m['name'],'updated_at':m.get('updated_at',m.get('created_at','')),'revision':m.get('current_revision',0),'source':m.get('source','import'),'ready':'current_revision' in m})
             except (ValueError,KeyError,OSError):continue
         return sorted(out,key=lambda p:p['updated_at'],reverse=True)
+    def taken_by(self,name:str,exclude_id:str|None=None):
+        key=name_key(name)
+        for item in self.list():
+            if exclude_id and item['project_id']==exclude_id:continue
+            try:
+                if name_key(item['name'])==key:return item
+            except ValueError:continue
+        return None
+    def rename(self,pid:str,name:str):
+        cleaned=normalize_name(name)
+        clash=self.taken_by(cleaned,exclude_id=pid)
+        if clash:raise ValueError(f'A project named “{clash["name"]}” already exists.')
+        directory=self.path(pid)
+        with FileLock(str(directory/'.write.lock')):
+            m=self.manifest(pid)
+            m['name']=cleaned
+            m['updated_at']=now()
+            if isinstance(m.get('brief'),dict):m['brief']['name']=cleaned
+            atomic_json(directory/'project.json',m)
+        return self.load(pid)
+    def delete(self,pid:str):
+        directory=self.path(pid)
+        if not (directory/'project.json').exists():raise FileNotFoundError('Project not found')
+        shutil.rmtree(directory)
     def _snapshot(self,pid,revision):return json.loads((self.path(pid)/'revisions'/str(revision)/'model.json').read_text(encoding='utf8'))
     def load(self,pid):
         m=self.manifest(pid);s=self._snapshot(pid,m['current_revision'])
@@ -59,6 +90,9 @@ class FileProjectRepository:
         atomic_json(directory/'rules.json',{'rules':snapshot.get('rules',[])})
         atomic_json(directory/'mismatches.json',{'checks':snapshot.get('checks',[]),'coverage':snapshot.get('coverage') or {},'quarantined':snapshot.get('quarantined') or []})
     def create(self,name,building:Building,rules=None,brief:DesignBrief|None=None,source='generated',project_id=None,source_files=None,sheets=None,import_meta=None):
+        name=normalize_name(name)
+        clash=self.taken_by(name)
+        if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
         pid=project_id or 'pc-'+uuid.uuid4().hex[:12];directory=self.path(pid);directory.mkdir(parents=True,exist_ok=True)
         if (directory/'project.json').exists():raise ValueError('Project already exists')
         timestamp=now();snapshot={'building':building.model_dump(mode='json'),'rules':rules or [],'checks':[]}

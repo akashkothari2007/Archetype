@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Building } from '../types'
-import { assessSite, fitPlane, parseLatLon, planToLocal, samplePlan, siteFootprint, type Sample } from './site-geometry'
+import { assessSite, fitPlane, geocodeSearchUrl, haversineMeters, parseLatLon, planToLocal, samplePlan, siteCameraOffset, siteFootprint, siteSun, siteSunFrom, siteSunLightPosition, type Sample } from './site-geometry'
 
 const model: Building = {
   schema_version: 2, units: 'feet',
@@ -102,5 +102,55 @@ describe('coordinate entry', () => {
     expect(parseLatLon('43.4723 -80.5449')).toEqual({ lat: 43.4723, lon: -80.5449 })
     expect(parseLatLon('91, 0')).toBeNull()
     expect(parseLatLon('Waterloo')).toBeNull()
+  })
+  it('encodes spaces in the geocode query and does not restrict the search to the US', () => {
+    expect(geocodeSearchUrl('Paris France')).toBe('https://api.cesium.com/v1/geocode/search?text=Paris%20France')
+    expect(geocodeSearchUrl('東京')).toContain(encodeURIComponent('東京'))
+    expect(geocodeSearchUrl('London')).not.toMatch(/country/i)
+  })
+  it('measures a city-scale jump as kilometres and a lot move as metres', () => {
+    expect(haversineMeters({ lat: 43.47, lon: -80.54 }, { lat: 40.71, lon: -74.01 })).toBeGreaterThan(500_000)
+    expect(haversineMeters({ lat: 43.4723, lon: -80.5449 }, { lat: 43.4724, lon: -80.5449 })).toBeLessThan(20)
+  })
+})
+
+describe('site sun', () => {
+  it('puts the sun in the southern sky at solar noon in the northern hemisphere', () => {
+    const sun = siteSunFrom(40, 80, 12)
+    expect(sun.north).toBeLessThan(-0.5)
+    expect(Math.abs(sun.east)).toBeLessThan(0.12)
+    expect(sun.up).toBeGreaterThan(0.6)
+  })
+  it('puts the sun in the northern sky at solar noon in the southern hemisphere', () => {
+    const sun = siteSunFrom(-40, 80, 12)
+    expect(sun.north).toBeGreaterThan(0.5)
+    expect(sun.up).toBeGreaterThan(0.6)
+  })
+  it('moves the sun west of south after noon in the northern hemisphere', () => {
+    const sun = siteSunFrom(40, 80, 15)
+    expect(sun.east).toBeLessThan(-0.2)
+    expect(sun.north).toBeLessThan(0)
+    expect(sun.up).toBeGreaterThan(0.3)
+  })
+  it('aims the building-frame light from the south-west in northern summer', () => {
+    const light = siteSunLightPosition(34.5)
+    const sun = siteSun(34.5)
+    expect(sun.up).toBeGreaterThan(0.7)
+    expect(light.x).toBeLessThan(0)
+    expect(light.z).toBeGreaterThan(0)
+    expect(light.y).toBeGreaterThan(Math.hypot(light.x, light.z) * 0.8)
+  })
+})
+
+describe('site camera offset', () => {
+  it('stays above typical inland terrain until the pad height is known', () => {
+    expect(siteCameraOffset(40, null)).toEqual({ terrain: 0, hover: 8000, lookUp: 0 })
+  })
+  it('frames the massing once the pad height is known', () => {
+    const framed = siteCameraOffset(40, 900)
+    expect(framed.terrain).toBe(900)
+    expect(framed.hover).toBe(136)
+    expect(framed.lookUp).toBeCloseTo(15.2)
+    expect(siteCameraOffset(5, 12).hover).toBe(28)
   })
 })

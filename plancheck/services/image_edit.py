@@ -17,13 +17,36 @@ from plancheck.core.settings import get_settings
 log = get_logger("plancheck.image_edit")
 
 SCENE_PROMPT = (
-    "Transform this measured building into a photograph of a finished place. "
-    "Keep the exact footprint, roof outline, window and door openings, and camera. "
-    "Do not add buildings, cars, or trees. Replace placeholder shading with crisp "
-    "realistic materials and visible construction detail: brick, mortar, flashing, "
-    "eaves, glass, wear. Full architectural scale, never a toy, miniature, or diorama. "
-    "Pure black (#000000) outside the building."
+    "Edit this isometric massing into a photograph of the same building, same camera. "
+    "Keep the exact footprint, roof outline, window and door openings, and facing. "
+    "The building must fill the frame at full architectural scale — a real house, not a toy, "
+    "miniature, tabletop model, or diorama. Do not add other buildings, cars, people, or trees. "
+    "Do not invent a landscape, lawn, or table around it. Replace placeholder shading with "
+    "crisp materials and construction detail: brick, mortar, flashing, eaves, glass, wear. "
+    "Pure black (#000000) everywhere outside the building."
 )
+
+
+def guide_prompt(brief: Any = None, extra: str = "") -> str:
+    """Flux instruction: measured massing + the project's brief + optional user style."""
+    parts = [SCENE_PROMPT]
+    use = str(getattr(brief, "building_use", "") or "").strip()
+    style = str(getattr(brief, "style", "") or "").strip()
+    floors = str(getattr(brief, "floors", "") or "").strip()
+    direction = str(getattr(brief, "prompt", "") or "").strip()
+    if use:
+        parts.append(f"This {use.lower()} should read as a finished building of that type.")
+    if floors:
+        parts.append(f"Keep {floors} storeys and this silhouette.")
+    if style:
+        parts.append(f"Finish: {style}.")
+    if direction:
+        parts.append(f"Architect's direction: {direction}")
+    extra = extra.strip()
+    if extra and extra not in SCENE_PROMPT:
+        parts.append(f"User request: {extra}")
+    parts.append("Match the isometric direction of the guide image. Do not spin or orbit the building.")
+    return " ".join(parts)
 
 
 class ImageEditError(RuntimeError):

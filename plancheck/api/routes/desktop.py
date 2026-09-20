@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,Field
 from plancheck.core.building import Building,DesignBrief,CommandBatch,RevisionRequest,DesktopProject,BuildingPatch
 from plancheck.core.settings import get_settings
-from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json
+from plancheck.services.repository import FileProjectRepository,RevisionConflict,atomic_json,normalize_name
 from plancheck.services.commands import apply_commands,validate_building
 from plancheck.services.compliance import evaluate_building
 from plancheck.services.reliability import apply_reliability
@@ -66,8 +66,22 @@ def health():
 @router.get('/projects')
 def projects():return repo().list()
 
+class ProjectRename(BaseModel):
+    name:str=Field(min_length=1,max_length=160)
+
+@router.patch('/projects/{pid}')
+def rename_project(pid:str,body:ProjectRename):
+    return repo().rename(pid,body.name)
+
+@router.delete('/projects/{pid}')
+def delete_project(pid:str):
+    repo().delete(pid)
+    return {'ok':True}
+
 @router.post('/generate')
 def generate(brief:DesignBrief):
+    clash=repo().taken_by(brief.name)
+    if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
     def work(report):
         from plancheck.generation import generate_from_brief
         result=generate_from_brief(brief,report)
@@ -85,6 +99,16 @@ class AppearanceRequest(BaseModel):
     projector:list[float]=Field(default_factory=list)
     prompt:str=''
 
+@router.get('/projects/{pid}/appearance')
+def get_appearance(pid:str):
+    folder=repo().path(pid)
+    if not (folder/'project.json').is_file():
+        raise HTTPException(404,'Project not found')
+    path=folder/'appearance.json'
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding='utf-8'))
+
 @router.post('/projects/{pid}/appearance')
 def appearance(pid:str,body:AppearanceRequest):
     load(pid)
@@ -92,7 +116,7 @@ def appearance(pid:str,body:AppearanceRequest):
     if not settings.image_live():
         raise HTTPException(400,'Flux is not configured. Set PLANCHECK_IMAGE_MODEL_ID and a Hack the North API key as PLANCHECK_IMAGE_API_KEY.')
     if not settings.splat_live():
-        raise HTTPException(400,'TripoSplat is not configured. Set PLANCHECK_SPLAT_URL + PLANCHECK_SPLAT_API_KEY for the Baseten deployment (see deploy/triposplat-baseten), or FAL_KEY to use fal.')
+        raise HTTPException(400,'TripoSplat is not configured. Set PLANCHECK_SPLAT_URL and PLANCHECK_SPLAT_API_KEY for the Baseten deployment (see deploy/triposplat-baseten).')
     try:
         from plancheck.services.image_edit import decode_png
         png=decode_png(body.image)
@@ -101,11 +125,11 @@ def appearance(pid:str,body:AppearanceRequest):
     projector=body.projector[:16] if len(body.projector)>=16 else []
     user_prompt=(body.prompt or '').strip()
     def work(report, snapshot=png, matrix=projector, style=user_prompt):
-        from plancheck.services.image_edit import SCENE_PROMPT, edit_png
+        from plancheck.services.image_edit import guide_prompt, edit_png
         from plancheck.services.appearance_style import sample_palette
         from plancheck.services.splat import generate_splat, splat_filename
         report(phase='editing',progress=.15,message='Painting a photoreal guide with Flux')
-        scene=SCENE_PROMPT if not style else f'{SCENE_PROMPT} {style}'
+        scene=guide_prompt(load(pid).brief, style)
         result=edit_png(snapshot, prompt=scene)
         folder=repo().path(pid)
         (folder/'appearance.png').write_bytes(result)
@@ -204,11 +228,17 @@ def get_file(pid:str,relative:str):
 
 @router.post('/import-native',response_model=DesktopProject)
 def import_native(body:dict=Body(...)):
+    name=normalize_name(str(body.get('name') or 'Imported project'))
+    clash=repo().taken_by(name)
+    if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
     building=Building.model_validate(body['building']);validate_building(building)
-    return repo().create(str(body.get('name','Imported project')),building,layer_rules(body.get('rules',[])),DesignBrief.model_validate(body['brief']) if body.get('brief') else None,source='import')
+    return repo().create(name,building,layer_rules(body.get('rules',[])),DesignBrief.model_validate(body['brief']) if body.get('brief') else None,source='import')
 
 @router.post('/import')
 def import_sources(files:list[UploadFile]=File(...),name:str=Form('Imported building'),roles:str=Form('{}')):
+    name=normalize_name(name)
+    clash=repo().taken_by(name)
+    if clash:raise ValueError(f'A project named “{clash["name"]}” already exists. Choose a different name.')
     role_map=json.loads(roles);pid='pc-'+uuid.uuid4().hex[:12];base=repo().path(pid);documents=[]
     for f in files:
         filename=Path(f.filename or 'source').name;suffix=Path(filename).suffix.lower()

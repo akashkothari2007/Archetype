@@ -3,13 +3,13 @@ import { Stage, Layer, Group, Line, Rect, Circle, Text, Shape, Image as KonvaIma
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
 import { MousePointer2, Hand, Ruler, Plus, Minus, Maximize, PencilLine, Scissors, Link, Copy, Trash2, LockKeyhole, RotateCw, Magnet, X } from 'lucide-react'
-import { assetMime, distance, floorBounds, interiorPoint, lengthLabel, placementCommand, polygonArea, projectPoint, type Asset, type EditorProps, type Point } from './editor-geometry'
+import { assetMime, distance, floorBounds, interiorPoint, isTypingTarget, lengthLabel, placementCommand, polygonArea, projectPoint, type Asset, type EditorProps, type Point } from './editor-geometry'
+import { computeLayerCounts, type LayerStop } from './plan-layers'
 import { base } from '../api'
 import type { Check, Floor, SheetCard } from '../types'
 import './editor-view.css'
 
 type Tool = 'select' | 'pan' | 'wall' | 'measure'
-type LayerStop = 0 | 1 | 2 | 3 | 4 | 5
 type CheckHit = Check & { type_ref?: string; instances_affected?: number; affected_space_ids?: string[] }
 type SheetGeom = {
   walls?: { a: number[]; b: number[]; cls?: string }[]
@@ -27,16 +27,9 @@ type FloorPlanProps = EditorProps & {
   projectId?: string
   onFloor?: (id: string) => void
   checkPulse?: number
+  layerStop: LayerStop
+  onLayerCounts: (counts: number[]) => void
 }
-
-const LAYER_STOPS: { id: LayerStop; label: string }[] = [
-  { id: 0, label: 'Structure' },
-  { id: 1, label: 'Partitions' },
-  { id: 2, label: 'Doors & Windows' },
-  { id: 3, label: 'Fixtures' },
-  { id: 4, label: 'Furniture' },
-  { id: 5, label: 'All' },
-]
 const revealedSheets = new Set<string>()
 const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -146,7 +139,7 @@ const PlanFx = memo(function PlanFx({
   )
 })
 
-export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, units, busy, checks = [], sheets, projectId, onFloor, checkPulse = 0 }: FloorPlanProps) {
+export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, units, busy, checks = [], sheets, projectId, onFloor, checkPulse = 0, layerStop, onLayerCounts }: FloorPlanProps) {
   const host = useRef<HTMLDivElement>(null)
   const stage = useRef<Konva.Stage>(null)
   const wallDrag = useRef<{ pointer: Point; a: Point; b: Point } | null>(null)
@@ -169,7 +162,6 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const [reason, setReason] = useState('')
   const [structural, setStructural] = useState<'nonstructural' | 'loadbearing' | 'unknown'>('nonstructural')
   const [matching, setMatching] = useState(false)
-  const [layerStop, setLayerStop] = useState<LayerStop>(5)
   const [revealing, setRevealing] = useState(false)
   const [sheetGeom, setSheetGeom] = useState<SheetGeom | null>(null)
   const [raster, setRaster] = useState<HTMLImageElement | null>(null)
@@ -221,8 +213,8 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   useEffect(() => { if (!notice) return; const t = setTimeout(() => setNotice(''), 4500); return () => clearTimeout(t) }, [notice])
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement)?.tagName)) return
-      if (!host.current?.contains(document.activeElement) && document.activeElement !== document.body) return
+      if (isTypingTarget(event.target) || isTypingTarget(document.activeElement)) return
+      if (!host.current?.contains(document.activeElement)) return
       if (event.code === 'Space') { event.preventDefault(); setSpacePanning(true); return }
       if (event.key === 'Escape') { setStart(null); setMeasurement(null); setMarquee(null); setTool('select'); setUnlock(false) }
       if (event.key.toLowerCase() === 'v') setTool('select')
@@ -384,15 +376,18 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     return { segs, labels, roomPolys }
   }, [floorWalls, building.openings, rooms, baseVertices, bounds.cx, bounds.cy, units])
   const sheetFixtures = useMemo(() => (sheetGeom?.fixtures || []).map((item, i) => ({ key: `fx${i}`, x: item.xy[0] / scale, y: item.xy[1] / scale })), [sheetGeom, scale])
-  const layerCounts = useMemo(() => {
-    const structure = (sheetGeom?.walls || []).filter(w => w.cls === 'loadbearing').length || floorWalls.filter(w => w.structural === 'loadbearing').length
-    const partitions = (sheetGeom?.walls || []).filter(w => w.cls !== 'loadbearing').length || floorWalls.filter(w => w.structural !== 'loadbearing').length
-    const openings = (sheetGeom?.doors?.length || 0) + (sheetGeom?.windows?.length || 0) || building.openings.filter(o => floorWalls.some(w => w.id === o.wall_id)).length
-    const fixtureN = (sheetGeom?.fixtures?.length || 0) + floorObjects.filter(o => o.kind === 'fixture').length
-    const furnitureN = sheetGeom?.excluded?.furniture || sheetGeom?.extraction_stats?.furniture || floorObjects.filter(o => o.kind !== 'fixture').length
-    const all = structure + partitions + openings + fixtureN + furnitureN
-    return [structure, partitions, openings, fixtureN, furnitureN, all]
-  }, [sheetGeom, floorWalls, building.openings, floorObjects])
+  const layerCounts = useMemo(() => computeLayerCounts({
+    sheetWalls: sheetGeom?.walls,
+    sheetDoors: sheetGeom?.doors?.length,
+    sheetWindows: sheetGeom?.windows?.length,
+    sheetFixtures: sheetGeom?.fixtures?.length,
+    sheetFurniture: sheetGeom?.excluded?.furniture || sheetGeom?.extraction_stats?.furniture,
+    floorWalls,
+    floorOpenings: building.openings.filter(o => floorWalls.some(w => w.id === o.wall_id)).length,
+    floorFixtures: floorObjects.filter(o => o.kind === 'fixture').length,
+    floorFurniture: floorObjects.filter(o => o.kind !== 'fixture').length,
+  }), [sheetGeom, floorWalls, building.openings, floorObjects])
+  useEffect(() => { onLayerCounts(layerCounts) }, [layerCounts, onLayerCounts])
   function markInteract() {
     interacting.current = true
     host.current?.classList.add('is-interacting')
@@ -481,8 +476,6 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
   const scaleDistance = [1, 2, 5, 10].map(v => v * magnitude).find(v => v >= approximate) || 10 * magnitude
   const stroke = 1 / view.scale
   const showModel = !revealing
-  const currentStop = LAYER_STOPS[layerStop]
-  const currentCount = layerCounts[layerStop] || 0
   const hatch = rooms.filter(r => quarantineIds.has(r.id)).map(r => ({ id: r.id, points: r.polygon.map(p => p.join(',')).join(' ') }))
   const flash = blastHere.map(r => ({ id: r.id, points: r.polygon.map(p => p.join(',')).join(' ') }))
   return <div ref={host} tabIndex={0} className={`editor-floorplan tool-${tool}${spacePanning ? ' space-panning' : ''}`} aria-label="2D floor plan editor" onDragOver={e => e.preventDefault()} onDrop={e => {
@@ -494,17 +487,6 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     <div className="editor-floating-tools" role="toolbar" aria-label="Drawing tools">
       {[['select', MousePointer2, 'Select · V'], ['pan', Hand, 'Pan · H'], ['wall', PencilLine, 'Draw wall · W'], ['measure', Ruler, 'Measure · M']].map(([id, Icon, title]) => { const I = Icon as typeof MousePointer2; return <button key={id as string} className={tool === id ? 'active' : ''} title={title as string} aria-label={title as string} onClick={() => { setTool(id as Tool); setStart(null) }}><I size={17} /></button> })}
       <span className="editor-tool-divider" /><button className={snap ? 'active' : ''} title="Snap to grid and geometry" aria-label="Toggle snapping" aria-pressed={snap} onClick={() => setSnap(!snap)}><Magnet size={17} /></button>
-    </div>
-    <div className="xray-scrubber" onPointerDown={markInteract}>
-      <div className="xray-head">
-        <span>{currentStop.label} · {currentCount.toLocaleString()} segments</span>
-      </div>
-      <input type="range" min={0} max={5} step={1} value={layerStop} aria-label="Layer x-ray" onChange={e => setLayerStop(Number(e.target.value) as LayerStop)} />
-      <div className="xray-stops">
-        {LAYER_STOPS.map(stop => (
-          <button key={stop.id} type="button" className={layerStop === stop.id ? 'active' : layerStop > stop.id ? 'passed' : ''} onClick={() => setLayerStop(stop.id)}>{stop.label}</button>
-        ))}
-      </div>
     </div>
     {selection.length > 0 && <div className="editor-selection-tools" role="toolbar" aria-label="Selection tools">
       <span>{selection.length > 1 ? `${selection.length} selected` : selectedWall ? 'Wall' : selectedOpening?.kind || selectedObject?.asset_id.replaceAll('_', ' ') || selectedRoom?.name || 'Selection'}</span>

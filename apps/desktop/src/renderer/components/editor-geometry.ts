@@ -67,6 +67,27 @@ export function interiorPoint(polygon: number[][]): Point {
   }
   return best
 }
+
+export function roomLookYaw(polygon: number[][], from: Point) {
+  const n = polygon.length
+  if (n < 2) return Math.PI
+  const cx = polygon.reduce((s, p) => s + p[0], 0) / n, cy = polygon.reduce((s, p) => s + p[1], 0) / n
+  let xx = 0, xy = 0, yy = 0
+  for (const [x, y] of polygon) { const dx = x - cx, dy = y - cy; xx += dx * dx; xy += dx * dy; yy += dy * dy }
+  const axis = .5 * Math.atan2(2 * xy, xx - yy)
+  const yawOf = (dir: number) => Math.atan2(-Math.cos(dir), -Math.sin(dir))
+  const clearance = (yaw: number) => {
+    const dx = -Math.sin(yaw), dy = -Math.cos(yaw)
+    let dist = 0
+    for (let t = .25; t <= 80; t += .25) {
+      if (!pointInPolygon({ x: from.x + dx * t, y: from.y + dy * t }, polygon)) break
+      dist = t
+    }
+    return dist
+  }
+  const a = yawOf(axis), b = yawOf(axis + Math.PI)
+  return clearance(a) >= clearance(b) ? a : b
+}
 export function wallExterior(a: Point, b: Point, rooms: { polygon: number[][] }[]) {
   const length = Math.hypot(b.x - a.x, b.y - a.y)
   if (length < 0.01 || !rooms.length) return null
@@ -118,4 +139,10 @@ export function placementCommand(asset: Asset, p: Point, building: Building, flo
     return { kind: 'place_opening', target_id: '', params: { wall_id: nearest.wall.id, kind: asset.kind, offset_ft: Math.max(0, Math.min(nearest.length - asset.width, nearest.offset - asset.width / 2)), width_ft: asset.width, height_ft: asset.height, sill_ft: asset.kind === 'window' ? 3 : 0 } }
   }
   return { kind: 'place_object', target_id: '', params: { floor_id: floorId, asset_id: asset.id, kind: asset.kind, x: p.x, y: p.y, rotation_deg: 0, width_ft: asset.width, depth_ft: asset.depth, height_ft: asset.height } }
+}
+
+export function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
 }

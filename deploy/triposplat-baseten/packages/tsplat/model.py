@@ -1715,7 +1715,7 @@ class OctreeGaussianDecoder(nn.Module):
 
     @torch.no_grad()
     def decode(self, latent: torch.Tensor, num_gaussians: int):
-        from triposplat import _build_gaussians  # local import: avoid model.py ↔ triposplat.py cycle
+        from .triposplat import _build_gaussians  # local import: avoid model.py ↔ triposplat.py cycle
         num_decoder_tokens = max(1, num_gaussians // self.gaussians_per_point)
         points_pred = OctreeProbabilityFixedlenDecoder.sample(
             self.octree, latent,

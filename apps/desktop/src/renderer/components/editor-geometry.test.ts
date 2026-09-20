@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Building } from '../types'
-import { fixtures, floorBounds, interiorPoint, lengthLabel, placementCommand, pointInPolygon, polygonArea, projectPoint } from './editor-geometry'
+import { fixtures, floorBounds, interiorPoint, lengthLabel, placementCommand, pointInPolygon, polygonArea, projectPoint, roomLookYaw } from './editor-geometry'
 
 const model: Building = {
   schema_version: 2, units: 'feet',
@@ -32,6 +32,14 @@ describe('floor geometry and asset placement', () => {
     const point = interiorPoint(polygon)
     expect(pointInPolygon(point, polygon)).toBe(true)
     expect(polygonArea(polygon)).toBe(36)
+  })
+  it('aims the walk camera down the long axis of a room', () => {
+    const wide = roomLookYaw([[0, 0], [20, 0], [20, 6], [0, 6]], { x: 10, y: 3 })
+    expect(Math.abs(Math.cos(wide))).toBeLessThan(.2)
+    expect(Math.abs(Math.sin(wide))).toBeGreaterThan(.9)
+    const deep = roomLookYaw([[0, 0], [6, 0], [6, 20], [0, 20]], { x: 3, y: 10 })
+    expect(Math.abs(Math.sin(deep))).toBeLessThan(.2)
+    expect(Math.abs(Math.cos(deep))).toBeGreaterThan(.9)
   })
   it('projects onto a rotated wall and gives the same distance from either endpoint order', () => {
     const p = { x: 4, y: 0 }, a = { x: 0, y: 0 }, b = { x: 6, y: 6 }
