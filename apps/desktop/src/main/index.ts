@@ -113,12 +113,15 @@ app.whenReady().then(()=>{
     minHeight:680,
     title:'Archetype',
     show:false,
-    backgroundColor:CHROME,
+    backgroundColor:mac?'#00000000':CHROME,
+    transparent:mac,
     autoHideMenuBar:true,
-    titleBarStyle:mac?'hiddenInset':'hidden',
+    // Let the renderer own the full macOS title-bar surface so the window
+    // chrome and app navigation read as one continuous bar.
+    titleBarStyle:'hidden',
     ...(mac?{
       trafficLightPosition:{x:14,y:16},
-      vibrancy:'sidebar' as const,
+      vibrancy:'under-window' as const,
       visualEffectState:'active' as const
     }:{}),
     ...(win32?{

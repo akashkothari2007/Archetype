@@ -239,11 +239,8 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
     return () => { live = false }
   }, [sheet?.sheet_id, sheet?.geometry_url, sheet?.raster_url, projectId])
   useEffect(() => {
-    if (!floorWalls.length) { setRevealing(false); return }
-    if (reducedMotion() || revealedSheets.has(revealKey)) { revealedSheets.add(revealKey); setRevealing(false); return }
-    setRevealing(true)
-    const done = window.setTimeout(() => { revealedSheets.add(revealKey); setRevealing(false) }, 2400)
-    return () => window.clearTimeout(done)
+    // Keep the floor plan visible immediately when entering the editor.
+    setRevealing(false)
   }, [revealKey, floorWalls.length])
   useEffect(() => {
     if (!revealing || !import.meta.env.DEV) return
@@ -553,7 +550,6 @@ export function FloorPlan({ building, floorId, onCommand, selectedId, onSelect, 
         })}
       </Layer>
     </Stage>
-    {revealing && <PlotterOverlay segs={plotter.segs} labels={plotter.labels} fixtures={sheetFixtures} rooms={plotter.roomPolys} view={view} size={size} skip={reducedMotion()} />}
     {!revealing && <PlanFx view={view} size={size} floorId={floorId} hatch={hatch} pings={pingRooms} flash={flash} fixtures={sheetFixtures} showFixtures={fixturesVisible} pinging={!!sonarKey && !sonarSettled} flashing={blastAt > 0 && blastHere.length > 0} />}
     {blastAt > 0 && blastCheck && <div className="blast-hud" role="status">
       <span className="blast-count">×{shownCount} units affected</span>

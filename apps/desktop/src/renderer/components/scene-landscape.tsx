@@ -1,5 +1,5 @@
-import { useEffect, useMemo, Suspense } from 'react'
-import { Cloud, Clouds, Environment, Sky, Stars, useGLTF, useTexture } from '@react-three/drei'
+import { useEffect, useLayoutEffect, useMemo, useRef, Suspense } from 'react'
+import { Cloud, Clouds, ContactShadows, Environment, Sky, Stars, useGLTF, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 import type { Building } from '../types'
 import { floorBounds } from './editor-geometry'
@@ -9,48 +9,148 @@ type Bounds = ReturnType<typeof floorBounds>
 
 export function Daylight({ bounds, environment }: { bounds: Bounds; environment: Building['environment'] }) {
   const day = Math.max(0, Math.sin((environment.time - 6) / 12 * Math.PI))
-  const elevation = Math.max(.05, day * (environment.season === 'winter' ? .4 : environment.season === 'summer' ? .98 : .66))
+  const elevation = Math.max(.025, day * (environment.season === 'winter' ? .42 : environment.season === 'summer' ? .92 : .68))
   const angle = environment.sun_azimuth * Math.PI / 180
   const span = Math.max(bounds.width, bounds.height, 35)
-  const sun: [number, number, number] = [Math.cos(angle), elevation, Math.sin(angle)]
+  const sun: [number, number, number] = [Math.cos(angle) * 100, elevation * 100, Math.sin(angle) * 100]
   const target = useMemo(() => { const node = new THREE.Object3D(); node.position.set(bounds.cx, 4, bounds.cy); return node }, [bounds.cx, bounds.cy])
   const look = useMemo(() => {
-    const t = Math.pow(day, 0.72)
+    const t = Math.pow(day, 0.62)
+    const golden = 1 - Math.min(1, day * 2.25)
     return {
-      sun: new THREE.Color().lerpColors(new THREE.Color('#ff6a28'), new THREE.Color('#ffd0a0'), t),
-      fill: new THREE.Color().lerpColors(new THREE.Color('#ffb07a'), new THREE.Color('#ffd8bc'), t),
-      fog: new THREE.Color().lerpColors(new THREE.Color('#e8b48a'), new THREE.Color('#edd9c2'), t),
-      hemiSky: new THREE.Color().lerpColors(new THREE.Color('#f2be9c'), new THREE.Color('#f3deca'), t),
-      hemiGround: new THREE.Color('#8a705c'),
-      turbidity: THREE.MathUtils.lerp(9.4, 4.6, t),
-      rayleigh: THREE.MathUtils.lerp(0.42, 0.82, t),
-      mieCoefficient: THREE.MathUtils.lerp(0.016, 0.006, t),
-      mieDirectionalG: THREE.MathUtils.lerp(0.94, 0.8, t),
-      cloud: new THREE.Color().lerpColors(new THREE.Color('#ffd2b0'), new THREE.Color('#fff4e8'), t),
+      sun: new THREE.Color().lerpColors(new THREE.Color('#ff8a4c'), new THREE.Color('#fff3df'), t),
+      fill: new THREE.Color().lerpColors(new THREE.Color('#637ea5'), new THREE.Color('#b9d2ea'), t),
+      fog: new THREE.Color().lerpColors(new THREE.Color('#9a8491'), new THREE.Color('#cbd9df'), t),
+      hemiSky: new THREE.Color().lerpColors(new THREE.Color('#667a9b'), new THREE.Color('#b8d8ed'), t),
+      hemiGround: new THREE.Color().lerpColors(new THREE.Color('#51463f'), new THREE.Color('#726e59'), t),
+      turbidity: THREE.MathUtils.lerp(9.2, 3.8, t),
+      rayleigh: THREE.MathUtils.lerp(0.35, 1.15, t),
+      mieCoefficient: THREE.MathUtils.lerp(0.018, 0.0045, t),
+      mieDirectionalG: THREE.MathUtils.lerp(0.93, 0.78, t),
+      cloud: new THREE.Color().lerpColors(new THREE.Color('#efb08d'), new THREE.Color('#f7f8f4'), t),
+      golden,
     }
   }, [day])
   const sky = <Sky distance={450000} sunPosition={sun} turbidity={look.turbidity} rayleigh={look.rayleigh} mieCoefficient={look.mieCoefficient} mieDirectionalG={look.mieDirectionalG} />
   return <>
     <color attach="background" args={[look.fog]} />
-    <fog attach="fog" args={[look.fog, Math.max(span * 3.5, 140), Math.max(span * 14, 980)]} />
+    <fog attach="fog" args={[look.fog, Math.max(span * 4.5, 180), Math.max(span * 18, 1200)]} />
     <group userData={{ captureHide: true }}>
       {sky}
       {day < 0.14 && <Stars radius={280} depth={50} count={1200} factor={2.4} saturation={0.2} fade speed={0} />}
-      {day > 0.08 && <Suspense fallback={null}><Clouds texture="assets/landscape/cloud.png" material={THREE.MeshBasicMaterial} frustumCulled={false}>
-        <Cloud seed={2} color={look.cloud} opacity={0.38} speed={0} segments={22} volume={28} bounds={[span * 1.4, 10, span * 0.7]} position={[bounds.cx + span * 0.9, 62, bounds.cy - span * 0.4]} fade={40} />
-        <Cloud seed={7} color={look.cloud} opacity={0.3} speed={0} segments={20} volume={22} bounds={[span, 8, span * 0.55]} position={[bounds.cx - span * 1.1, 54, bounds.cy + span * 0.7]} fade={40} />
-        <Cloud seed={11} color={look.cloud} opacity={0.26} speed={0} segments={18} volume={18} bounds={[span * 0.8, 7, span * 0.45]} position={[bounds.cx + span * 0.2, 70, bounds.cy + span * 1.2]} fade={50} />
+      {day > 0.08 && <Suspense fallback={null}><Clouds texture="assets/landscape/cloud.png" material={THREE.MeshLambertMaterial} frustumCulled={false}>
+        <Cloud seed={2} color={look.cloud} opacity={0.24} speed={0} segments={20} volume={26} bounds={[span * 1.4, 9, span * 0.7]} position={[bounds.cx + span * 0.9, 68, bounds.cy - span * 0.4]} fade={45} />
+        <Cloud seed={7} color={look.cloud} opacity={0.2} speed={0} segments={18} volume={20} bounds={[span, 7, span * 0.55]} position={[bounds.cx - span * 1.1, 58, bounds.cy + span * 0.7]} fade={45} />
+        <Cloud seed={11} color={look.cloud} opacity={0.17} speed={0} segments={16} volume={17} bounds={[span * 0.8, 6, span * 0.45]} position={[bounds.cx + span * 0.2, 76, bounds.cy + span * 1.2]} fade={55} />
       </Clouds></Suspense>}
     </group>
-    <Environment key={`${environment.time}-${environment.season}-${environment.sun_azimuth}`} frames={1} resolution={256} environmentIntensity={0.42 + day * 0.28}>
+    <Environment key={`${environment.time}-${environment.season}-${environment.sun_azimuth}`} frames={1} resolution={256} environmentIntensity={0.48 + day * 0.36}>
       {sky}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -12, 0]}><planeGeometry args={[8000, 8000]} /><meshBasicMaterial color="#7a6a58" /></mesh>
     </Environment>
-    <hemisphereLight args={[look.hemiSky, look.hemiGround, 0.38 + day * 0.22]} />
+    <hemisphereLight args={[look.hemiSky, look.hemiGround, 0.42 + day * 0.26]} />
     <primitive object={target} />
-    <directionalLight target={target} position={[bounds.cx + sun[0] * span * 1.8, sun[1] * span * 1.8 + 18, bounds.cy + sun[2] * span * 1.8]} intensity={0.55 + day * 2.15} color={look.sun} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-span * 1.5} shadow-camera-right={span * 1.5} shadow-camera-top={span * 1.5} shadow-camera-bottom={-span * 1.5} shadow-camera-near={1} shadow-camera-far={span * 10} shadow-bias={-.00004} shadow-normalBias={.035} shadow-radius={2} />
-    <directionalLight position={[bounds.cx - sun[0] * span, 18, bounds.cy - sun[2] * span]} intensity={0.18 + day * 0.12} color={look.fill} />
+    <directionalLight target={target} position={[bounds.cx + Math.cos(angle) * span * 2.2, elevation * span * 2.2 + 20, bounds.cy + Math.sin(angle) * span * 2.2]} intensity={0.45 + day * 2.35} color={look.sun} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-left={-span * 1.5} shadow-camera-right={span * 1.5} shadow-camera-top={span * 1.5} shadow-camera-bottom={-span * 1.5} shadow-camera-near={1} shadow-camera-far={span * 10} shadow-bias={-.00003} shadow-normalBias={.025} shadow-radius={3} />
+    <directionalLight position={[bounds.cx - Math.cos(angle) * span, 22, bounds.cy - Math.sin(angle) * span]} intensity={0.16 + day * 0.17} color={look.fill} />
   </>
+}
+
+function seeded(index: number, salt = 0) {
+  const value = Math.sin(index * 127.1 + salt * 311.7) * 43758.5453
+  return value - Math.floor(value)
+}
+
+function terrainHeight(x: number, z: number, bounds: Bounds) {
+  const dx = Math.max(0, Math.abs(x - bounds.cx) - bounds.width * .65)
+  const dz = Math.max(0, Math.abs(z - bounds.cy) - bounds.height * .65)
+  const fade = THREE.MathUtils.smoothstep(Math.hypot(dx, dz), 4, 80)
+  return fade * (Math.sin(x * .025) * 1.25 + Math.cos(z * .021) * 1.05 + Math.sin((x + z) * .011) * .7)
+}
+
+function TerrainGround({ bounds, size }: { bounds: Bounds; size: number }) {
+  const geometry = useMemo(() => {
+    const geometry = new THREE.PlaneGeometry(size, size, 72, 72)
+    const position = geometry.attributes.position
+    for (let i = 0; i < position.count; i++) {
+      const x = position.getX(i) + bounds.cx
+      const z = -position.getY(i) + bounds.cy
+      position.setZ(i, terrainHeight(x, z, bounds))
+    }
+    geometry.computeVertexNormals()
+    return geometry
+  }, [bounds, size])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  return <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]} position={[bounds.cx, -.68, bounds.cy]} receiveShadow><SurfaceMaterial finish="grass" color="#aebc91" matchStyle={false} /></mesh>
+}
+
+function GrassTufts({ bounds, roadZ }: { bounds: Bounds; roadZ: number }) {
+  const mesh = useRef<THREE.InstancedMesh>(null)
+  const count = 1150
+  const geometry = useMemo(() => {
+    const positions: number[] = []
+    const makeBlade = (angle: number, lean: number) => {
+      const width = .055, height = .72
+      const right = new THREE.Vector3(Math.cos(angle) * width, 0, Math.sin(angle) * width)
+      const tip = new THREE.Vector3(Math.sin(angle) * lean, height, -Math.cos(angle) * lean)
+      positions.push(-right.x, 0, -right.z, right.x, 0, right.z, tip.x, tip.y, tip.z)
+    }
+    makeBlade(0, .08); makeBlade(Math.PI / 3, -.04); makeBlade(Math.PI * 2 / 3, .05)
+    const blade = new THREE.BufferGeometry()
+    blade.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    blade.computeVertexNormals()
+    return blade
+  }, [])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  useLayoutEffect(() => {
+    if (!mesh.current) return
+    const dummy = new THREE.Object3D(), color = new THREE.Color()
+    const radiusX = Math.max(54, bounds.width * 1.55), radiusZ = Math.max(48, bounds.height * 1.65)
+    let written = 0, attempt = 0
+    while (written < count && attempt < count * 8) {
+      const x = bounds.cx + (seeded(attempt, 1) * 2 - 1) * radiusX
+      const z = bounds.cy + (seeded(attempt, 2) * 2 - 1) * radiusZ
+      attempt++
+      const onBuilding = x > bounds.minX - 4 && x < bounds.maxX + 4 && z > bounds.minY - 4 && z < bounds.maxY + 4
+      const onRoad = Math.abs(z - roadZ) < 13.8
+      const onWalk = x > bounds.minX && x < bounds.minX + 10.5 && z > bounds.minY - 21 && z < bounds.minY + 1
+      if (onBuilding || onRoad || onWalk) continue
+      const scale = .55 + seeded(attempt, 3) * .9
+      dummy.position.set(x, -.6 + terrainHeight(x, z, bounds), z)
+      dummy.rotation.set(0, seeded(attempt, 4) * Math.PI, (seeded(attempt, 5) - .5) * .13)
+      dummy.scale.set(scale, scale, scale)
+      dummy.updateMatrix()
+      mesh.current.setMatrixAt(written, dummy.matrix)
+      color.setHSL(.23 + seeded(attempt, 6) * .055, .3 + seeded(attempt, 7) * .2, .27 + seeded(attempt, 8) * .18)
+      mesh.current.setColorAt(written, color)
+      written++
+    }
+    mesh.current.instanceMatrix.needsUpdate = true
+    if (mesh.current.instanceColor) mesh.current.instanceColor.needsUpdate = true
+  }, [bounds, roadZ])
+  return <instancedMesh ref={mesh} args={[geometry, undefined, count]} castShadow receiveShadow frustumCulled={false}>
+    <meshStandardMaterial color="#78905b" roughness={.96} metalness={0} side={THREE.DoubleSide} vertexColors />
+  </instancedMesh>
+}
+
+function Shrub({ position, scale = 1, hue = 0 }: { position: [number, number, number]; scale?: number; hue?: number }) {
+  const leaves = ['#52683e', '#62784a', '#758958', '#465d39']
+  return <group position={position} scale={scale}>
+    <mesh position={[0, .14, 0]} castShadow><cylinderGeometry args={[.08, .13, .5, 7]} /><meshStandardMaterial color="#584532" roughness={1} /></mesh>
+    {[[0,.65,0, .72],[-.45,.52,.08,.52],[.42,.48,.03,.58],[-.16,.78,-.34,.48],[.2,.82,.3,.5]].map(([x,y,z,s], i) => <mesh key={i} position={[x,y,z]} scale={[s * 1.15,s,s]} castShadow receiveShadow><dodecahedronGeometry args={[1, 1]} /><meshStandardMaterial color={leaves[(i + hue) % leaves.length]} roughness={1} /></mesh>)}
+  </group>
+}
+
+function Planting({ bounds }: { bounds: Bounds }) {
+  const shrubs = useMemo(() => {
+    const result: { p: [number, number, number]; scale: number; hue: number }[] = []
+    const sides = [bounds.minY - 4.8, bounds.maxY + 4.8]
+    for (let side = 0; side < sides.length; side++) for (let i = 0; i < 9; i++) {
+      const t = (i + .45 + seeded(i, side + 10) * .2) / 9
+      result.push({ p: [THREE.MathUtils.lerp(bounds.minX + 2, bounds.maxX - 2, t), -.52, sides[side] + (seeded(i, side + 20) - .5) * 1.4], scale: .55 + seeded(i, side + 30) * .35, hue: i + side })
+    }
+    return result
+  }, [bounds])
+  return <group>{shrubs.map((shrub, i) => <Shrub key={i} position={shrub.p} scale={shrub.scale} hue={shrub.hue} />)}</group>
 }
 
 // Actual textured 3D mesh, simplified offline; no billboards or camera-facing cards.
@@ -85,12 +185,21 @@ export function Landscape({ bounds }: { bounds: Bounds }) {
   const size = Math.max(2000, Math.max(bounds.width, bounds.height) * 30)
   const roadZ = bounds.minY - 34
   return <group userData={{ captureHide: true }}>
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[bounds.cx, -.65, bounds.cy]} receiveShadow><planeGeometry args={[size, size]} /><SurfaceMaterial finish="grass" color="#d6dcc7" matchStyle={false} /></mesh>
-    {/* A modest access street and paving give the aerial camera familiar scale. */}
-    <mesh position={[bounds.cx, -.6, roadZ]} receiveShadow><boxGeometry args={[size, .08, 19]} /><SurfaceMaterial finish="stone" color="#535758" matchStyle={false} /></mesh>
-    {[-12.5, 12.5].map(offset => <mesh key={offset} position={[bounds.cx, -.43, roadZ + offset]} receiveShadow><boxGeometry args={[size, .3, 5]} /><SurfaceMaterial finish="stone" color="#c4c0b5" matchStyle={false} /></mesh>)}
-    <mesh position={[bounds.minX + 5, -.38, bounds.minY - 10]} receiveShadow><boxGeometry args={[10, .38, 20]} /><SurfaceMaterial finish="stone" color="#bdb9aa" matchStyle={false} /></mesh>
+    <TerrainGround bounds={bounds} size={size} />
+    <GrassTufts bounds={bounds} roadZ={roadZ} />
+    {/* Layered road, curbs, apron and planting give the model a believable scale and threshold. */}
+    <mesh position={[bounds.cx, -.54, roadZ]} receiveShadow><boxGeometry args={[size, .16, 19]} /><meshStandardMaterial color="#45494a" roughness={.96} metalness={0} /></mesh>
+    {[-9.65, 9.65].map(offset => <group key={offset}>
+      <mesh position={[bounds.cx, -.37, roadZ + offset]} receiveShadow castShadow><boxGeometry args={[size, .34, .55]} /><meshStandardMaterial color="#a5a297" roughness={.9} /></mesh>
+      <mesh position={[bounds.cx, -.5, roadZ + offset * 1.09]} receiveShadow><boxGeometry args={[size, .1, 1.3]} /><meshStandardMaterial color="#777a73" roughness={.96} /></mesh>
+    </group>)}
+    <mesh position={[bounds.cx, -.43, roadZ]} receiveShadow><boxGeometry args={[size, .025, .11]} /><meshStandardMaterial color="#d9d0b4" roughness={.78} /></mesh>
+    {Array.from({ length: 18 }, (_, i) => <mesh key={`dash-${i}`} position={[bounds.cx - 180 + i * 22, -.4, roadZ]} receiveShadow><boxGeometry args={[10, .03, .22]} /><meshStandardMaterial color="#ddd6bc" roughness={.76} /></mesh>)}
+    <mesh position={[bounds.minX + 5, -.34, bounds.minY - 10]} receiveShadow castShadow><boxGeometry args={[10, .42, 20]} /><SurfaceMaterial finish="stone" color="#b5b0a3" matchStyle={false} /></mesh>
+    <mesh position={[bounds.minX + 5, -.1, bounds.minY - 4]} receiveShadow><boxGeometry args={[7.2, .08, 8]} /><SurfaceMaterial finish="stone" color="#c7c0ae" matchStyle={false} /></mesh>
+    <Planting bounds={bounds} />
     <LandscapeTrees bounds={bounds} />
+    <ContactShadows position={[bounds.cx, -.31, bounds.cy]} scale={Math.max(bounds.width, bounds.height) * 2.1} opacity={.32} blur={2.3} far={Math.max(45, Math.max(bounds.width, bounds.height))} resolution={512} frames={1} color="#293028" />
   </group>
 }
 

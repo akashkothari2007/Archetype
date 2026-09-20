@@ -65,6 +65,8 @@ html.desktop .app{background:transparent}
 html.desktop .titlebar{background:linear-gradient(180deg,rgba(250,251,246,.82),rgba(243,244,238,.7))}
 html.desktop .home-shell>aside,html.desktop .dv-groupview:has(.projects-pane),html.desktop .dv-groupview:has(.logs-pane){background:#f0f1eb}
 :root[data-platform="darwin"] .titlebar{padding-left:78px}
+:root[data-platform="darwin"] .titlebar{height:60px}
+:root[data-platform="darwin"] .app{margin-top:0;height:100dvh}
 :root[data-platform="win32"] .titlebar,:root[data-platform="linux"] .titlebar{height:env(titlebar-area-height,48px);width:env(titlebar-area-width,100%);margin-left:env(titlebar-area-x,0px);padding-left:10px;padding-right:6px}
 :root[data-platform="win32"] .app-logo,:root[data-platform="linux"] .app-logo{margin-left:-2px}
 
@@ -161,6 +163,7 @@ h1{font-size:40px;line-height:1.08;letter-spacing:-1.6px;font-weight:600;margin:
   --dv-inactivegroup-hiddenpanel-tab-color:#929b86;
   font-family:inherit;
 }
+.dockview-theme-light .dv-default-tab-action{display:none!important}
 .agent-pane{background:#fff}
 .agent-tabs{border-bottom:1px solid var(--separator);height:38px;gap:18px;padding:0 16px}
 .agent-tabs button{font-size:13px;color:var(--tertiary);padding:0 0 10px;font-weight:510}
@@ -240,4 +243,3 @@ html.desktop .home-shell>aside,html.desktop .dv-groupview:has(.projects-pane),ht
 .log-row.error,.log-row.error .log-kind{color:#c0392b}
 .log-row.pending .log-kind,.log-row.debug .log-kind{color:#8c9387}
 .log-row.info .log-kind{color:#5b7c9a}
-

@@ -115,8 +115,6 @@ def appearance(pid:str,body:AppearanceRequest):
     settings=get_settings()
     if not settings.image_live():
         raise HTTPException(400,'Flux is not configured. Set PLANCHECK_IMAGE_MODEL_ID and a Hack the North API key as PLANCHECK_IMAGE_API_KEY.')
-    if not settings.splat_live():
-        raise HTTPException(400,'TripoSplat is not configured. Set PLANCHECK_SPLAT_URL and PLANCHECK_SPLAT_API_KEY for the Baseten deployment (see deploy/triposplat-baseten).')
     try:
         from plancheck.services.image_edit import decode_png
         png=decode_png(body.image)
@@ -127,21 +125,15 @@ def appearance(pid:str,body:AppearanceRequest):
     def work(report, snapshot=png, matrix=projector, style=user_prompt):
         from plancheck.services.image_edit import guide_prompt, edit_png
         from plancheck.services.appearance_style import sample_palette
-        from plancheck.services.splat import generate_splat, splat_filename
         report(phase='editing',progress=.15,message='Painting a photoreal guide with Flux')
         scene=guide_prompt(load(pid).brief, style)
         result=edit_png(snapshot, prompt=scene)
+        report(phase='saving',progress=.82,message='Applying the enhanced exterior materials')
         folder=repo().path(pid)
         (folder/'appearance.png').write_bytes(result)
-        meta={'projector':matrix,'scope':'exterior','palette':sample_palette(result)}
-        report(phase='splatting',progress=.45,message='Building a TripoSplat Gaussian from the exterior')
-        splat=generate_splat(result)
-        name=splat_filename(splat)
-        (folder/name).write_bytes(splat)
-        meta['splat']=name
+        meta={'projector':matrix,'scope':'exterior','prompt':style,'palette':sample_palette(result)}
         atomic_json(folder/'appearance.json',meta)
-        report(phase='saving',progress=.95,message='Applying the Gaussian splat to the exterior')
-        return {'url':f'/projects/{pid}/files/{name}','splat':name}
+        return {'palette':meta['palette']}
     return {'job_id':jobs.submit(work,'Painting the 3D view')}
 
 @router.get('/projects/{pid}',response_model=DesktopProject)

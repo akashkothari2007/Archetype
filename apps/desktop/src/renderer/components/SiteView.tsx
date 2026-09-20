@@ -1,11 +1,13 @@
 import { Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { TransformControls } from '@react-three/drei'
 import { EastNorthUpFrame, GlobeControls, TilesAttributionOverlay, TilesPlugin, TilesRenderer, TilesRendererContext } from '3d-tiles-renderer/r3f'
 import { CesiumIonAuthPlugin, GLTFExtensionsPlugin, TileCompressionPlugin, TilesFadePlugin, UnloadTilesPlugin } from '3d-tiles-renderer/plugins'
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js'
 import * as THREE from 'three'
 import type { Building, ModelCommand } from '../types'
 import { BuildingShell, buildingHeightFt } from './scene-building'
+import { AppearanceContext, type AppearancePalette } from './appearance-context'
 import { GOOGLE_TILES_ASSET_ID, METERS_PER_FOOT, assessSite, emptySite, formatLatLon, haversineMeters, ionToken, planToLocal, samplePlan, siteCameraOffset, siteFootprint, siteSun, type Sample, type SiteReport } from './site-geometry'
 import { consumeSiteFrame, consumeSitePlace, peekSitePlace } from './site-intent'
 
@@ -26,12 +28,13 @@ const scratch = {
   carto: { lat: 0, lon: 0, height: 0 },
 }
 
-type Props = { building: Building; report: SiteReport | null; onReport: (report: SiteReport | null) => void; onCommand: (commands: ModelCommand[]) => void }
+type Props = { building: Building; report: SiteReport | null; onReport: (report: SiteReport | null) => void; onCommand: (commands: ModelCommand[]) => void; palette?: AppearancePalette | null; enhanced?: boolean }
 
-export function SiteView({ building, report, onReport, onCommand }: Props) {
+export function SiteView({ building, report, onReport, onCommand, palette = null, enhanced = false }: Props) {
   const site = building.site ?? emptySite
   const [placing, setPlacing] = useState(site.lat == null || site.lon == null || peekSitePlace())
   const [recenter, setRecenter] = useState(0)
+  const [selected, setSelected] = useState(false)
   useEffect(() => { if (site.lat == null || site.lon == null) setPlacing(true) }, [site.lat, site.lon])
   useEffect(() => {
     const apply = () => {
@@ -52,19 +55,37 @@ export function SiteView({ building, report, onReport, onCommand }: Props) {
     setPlacing(false)
   }
 
-  return <Canvas
-    className={placing ? 'site-placing' : undefined}
-    dpr={[1, 1.5]}
-    frameloop="always"
-    camera={{ position: [1.8e7, -8e6, 8e6], fov: 45, near: 1, far: 1e8 }}
-    gl={{ antialias: true, logarithmicDepthBuffer: true, toneMapping: THREE.NoToneMapping }}
-  >
-    <color attach="background" args={['#07090d']} />
-    <SiteScene building={building} report={report} onReport={onReport} placing={placing} recenter={recenter} onPlace={(lat, lon) => place(lat, lon, site.address || formatLatLon({ lat, lon }))} />
-  </Canvas>
+  const rotate = (delta: number) => {
+    const rotation_deg = normalizeDegrees(site.rotation_deg + delta)
+    onCommand([{ kind: 'set_site', target_id: '', params: { rotation_deg } }])
+  }
+
+  // The generated Gaussian is a single-view reconstruction and breaks into
+  // translucent layers from overhead. On site, project its generated material
+  // direction onto the measured shell so every orbit remains solid and accurate.
+  return <AppearanceContext.Provider value={{ map: null, roofMap: null, matrix: null, palette, splatUrl: null, apply: enhanced && !!palette }}><>
+    <Canvas
+      className={placing ? 'site-placing' : undefined}
+      dpr={[1, 1.5]}
+      frameloop="always"
+      camera={{ position: [1.8e7, -8e6, 8e6], fov: 45, near: 1, far: 1e8 }}
+      gl={{ antialias: true, logarithmicDepthBuffer: true, toneMapping: THREE.NoToneMapping }}
+      onPointerMissed={() => setSelected(false)}
+    >
+      <color attach="background" args={['#07090d']} />
+      <SiteScene building={building} report={report} onReport={onReport} onCommand={onCommand} placing={placing} recenter={recenter} selected={selected} onSelect={() => setSelected(true)} onPlace={(lat, lon) => place(lat, lon, site.address || formatLatLon({ lat, lon }))} />
+    </Canvas>
+    {selected && <div className="editor-site-selection" role="toolbar" aria-label="Building rotation">
+      <strong>Building selected</strong>
+      <span>{Math.round(normalizeDegrees(site.rotation_deg))}°</span>
+      <button type="button" aria-label="Rotate building left 5 degrees" onClick={() => rotate(-5)}>−5°</button>
+      <button type="button" aria-label="Rotate building right 5 degrees" onClick={() => rotate(5)}>+5°</button>
+      <button type="button" aria-label="Clear building selection" onClick={() => setSelected(false)}>×</button>
+    </div>}
+  </></AppearanceContext.Provider>
 }
 
-function SiteScene({ building, report, onReport, placing, recenter, onPlace }: { building: Building; report: SiteReport | null; onReport: Props['onReport']; placing: boolean; recenter: number; onPlace: (lat: number, lon: number) => void }) {
+function SiteScene({ building, report, onReport, onCommand, placing, recenter, selected, onSelect, onPlace }: { building: Building; report: SiteReport | null; onReport: Props['onReport']; onCommand: Props['onCommand']; placing: boolean; recenter: number; selected: boolean; onSelect: () => void; onPlace: (lat: number, lon: number) => void }) {
   const site = building.site ?? emptySite
   const lat = site.lat, lon = site.lon
   const azimuth = site.rotation_deg * Math.PI / 180
@@ -86,15 +107,10 @@ function SiteScene({ building, report, onReport, placing, recenter, onPlace }: {
       <SitePicker placing={placing} onPlace={onPlace} />
       {placing && <HoverPad footprint={footprint} rotation={site.rotation_deg} />}
       {sited && <GroundProbe building={building} lat={lat} lon={lon} rotation={site.rotation_deg} onGrade={setGrade} onReport={onReport} />}
-      {sited && <EastNorthUpFrame lat={lat * Math.PI / 180} lon={lon * Math.PI / 180} height={height} az={azimuth}>
+      {sited && <EastNorthUpFrame lat={lat * Math.PI / 180} lon={lon * Math.PI / 180} height={height}>
         <LitSiteModel>
           {sited && <SiteDaylight lat={lat} />}
-          <group userData={{ siteBuilding: true }} rotation={[Math.PI / 2, 0, 0]} scale={METERS_PER_FOOT}>
-            <SitePad footprint={footprint} report={report} />
-            <group position={[-footprint.cx, 0, -footprint.cy]}>
-              <Suspense fallback={null}><BuildingShell building={building} onSelect={() => undefined} /></Suspense>
-            </group>
-          </group>
+          <SiteBuilding building={building} footprint={footprint} report={report} azimuth={azimuth} selected={selected} controls={controls} onSelect={onSelect} onCommand={onCommand} />
         </LitSiteModel>
       </EastNorthUpFrame>}
       <FlyTo lat={lat} lon={lon} span={span} ground={grade} recenter={recenter} controls={controls} />
@@ -142,11 +158,44 @@ function SiteDaylight({ lat }: { lat: number }) {
   }, [target])
   return <group>
     <primitive object={target} />
-    <ambientLight intensity={0.42} color="#e7e3db" />
-    <hemisphereLight args={['#d7e5f0', '#8a8378', 1.28]} rotation={[Math.PI / 2, 0, 0]} />
-    <directionalLight ref={key} position={[sun.east * reach, sun.north * reach, sun.up * reach]} intensity={2.85} color="#fff6ea" />
-    <directionalLight ref={fill} position={[-sun.east * reach * 0.55, -sun.north * reach * 0.55, sun.up * reach * 0.22]} intensity={0.72} color="#c5d4e4" />
+    <ambientLight intensity={0.82} color="#f4f1eb" />
+    <hemisphereLight args={['#e8f1f7', '#aaa497', 1.65]} rotation={[Math.PI / 2, 0, 0]} />
+    <directionalLight ref={key} position={[sun.east * reach, sun.north * reach, sun.up * reach]} intensity={3.45} color="#fff9ef" />
+    <directionalLight ref={fill} position={[-sun.east * reach * 0.55, -sun.north * reach * 0.55, sun.up * reach * 0.22]} intensity={1.05} color="#dce8f2" />
   </group>
+}
+
+function normalizeDegrees(value: number) {
+  return (value % 360 + 360) % 360
+}
+
+function SiteBuilding({ building, footprint, report, azimuth, selected, controls, onSelect, onCommand }: { building: Building; footprint: ReturnType<typeof siteFootprint>; report: SiteReport | null; azimuth: number; selected: boolean; controls: React.RefObject<any>; onSelect: () => void; onCommand: Props['onCommand'] }) {
+  const ref = useRef<THREE.Group>(null)
+  const height = buildingHeightFt(building)
+  useLayoutEffect(() => {
+    if (ref.current) ref.current.rotation.z = -azimuth
+  }, [azimuth])
+  const content = <group ref={ref} rotation={[0, 0, -azimuth]} userData={{ siteBuilding: true }}>
+    <group rotation={[Math.PI / 2, 0, 0]} scale={METERS_PER_FOOT}>
+      <SitePad footprint={footprint} report={report} />
+      <group position={[-footprint.cx, 0, -footprint.cy]}>
+        <Suspense fallback={null}><BuildingShell building={building} onSelect={onSelect} /></Suspense>
+      </group>
+      <mesh position={[0, height / 2, 0]} onClick={event => { event.stopPropagation(); onSelect() }} userData={{ siteBuilding: true }}>
+        <boxGeometry args={[Math.max(footprint.width, 1), Math.max(height, 1), Math.max(footprint.height, 1)]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false} />
+      </mesh>
+    </group>
+  </group>
+  if (!selected) return content
+  return <TransformControls mode="rotate" space="local" showX={false} showY={false} showZ size={0.78} rotationSnap={Math.PI / 36} onMouseDown={() => { if (controls.current) controls.current.enabled = false }} onMouseUp={() => {
+    if (controls.current) controls.current.enabled = true
+    const node = ref.current
+    if (!node) return
+    const rotation = normalizeDegrees(-node.rotation.z * 180 / Math.PI)
+    if (Math.abs(rotation - normalizeDegrees(building.site?.rotation_deg ?? 0)) < .01) return
+    onCommand([{ kind: 'set_site', target_id: '', params: { rotation_deg: rotation } }])
+  }}>{content}</TransformControls>
 }
 
 function LitSiteModel({ children }: { children: ReactNode }) {

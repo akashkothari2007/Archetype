@@ -151,7 +151,7 @@ def _post(url: str, key: str, body: dict[str, Any], timeout: float) -> dict[str,
     return payload
 
 
-def edit_png(png: bytes, *, prompt: str = SCENE_PROMPT, timeout: float = 300) -> bytes:
+def edit_png(png: bytes, *, prompt: str = SCENE_PROMPT, timeout: float = 120) -> bytes:
     settings = get_settings()
     key = settings.resolved_image_api_key()
     model_id = settings.image_model_id.strip()

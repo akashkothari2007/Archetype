@@ -113,39 +113,37 @@ def test_appearance_requires_flux_config(monkeypatch):
     assert response.status_code == 400
 
 
-def test_appearance_requires_triposplat_key(monkeypatch):
+def test_appearance_does_not_require_triposplat_key(monkeypatch):
     monkeypatch.setenv("PLANCHECK_IMAGE_MODEL_ID", "q40o4ekw")
     monkeypatch.setenv("PLANCHECK_IMAGE_API_KEY", "test-key")
     monkeypatch.setenv("PLANCHECK_SPLAT_API_KEY", "")
     monkeypatch.setenv("PLANCHECK_SPLAT_URL", "")
     reset_settings()
+    monkeypatch.setattr("plancheck.api.routes.desktop.jobs.submit", lambda *_args, **_kwargs: "appearance-job")
     repo = FileProjectRepository()
     project = repo.create("Look", demo_home(), demo_rules())
     response = TestClient(app).post(
         f"/api/desktop/projects/{project.project_id}/appearance",
         json={"image": "data:image/png;base64," + base64.b64encode(TINY_PNG).decode()},
     )
-    assert response.status_code == 400
-    assert "PLANCHECK_SPLAT_URL" in response.json()["detail"]
+    assert response.status_code == 200
 
 
 def test_appearance_job_writes_png(monkeypatch, tmp_path):
     monkeypatch.setenv("PLANCHECK_IMAGE_MODEL_ID", "q4o04ekw")
     monkeypatch.setenv("PLANCHECK_IMAGE_API_KEY", "test-key")
     monkeypatch.setenv("PLANCHECK_DATA_DIR", str(tmp_path / "projects"))
-    monkeypatch.setenv("PLANCHECK_SPLAT_URL", "https://model-abc.api.baseten.co/environments/production/predict")
-    monkeypatch.setenv("PLANCHECK_SPLAT_API_KEY", "test-splat")
     reset_settings()
     repo = FileProjectRepository()
     project = repo.create("Look", demo_home(), demo_rules())
     monkeypatch.setattr("plancheck.services.image_edit.edit_png", lambda png, **kw: TINY_PNG)
-    monkeypatch.setattr("plancheck.services.splat.generate_splat", lambda png, **kw: b"ply\nformat ascii 1.0\nend_header\n")
     client = TestClient(app)
     started = client.post(
         f"/api/desktop/projects/{project.project_id}/appearance",
         json={
             "image": "data:image/png;base64," + base64.b64encode(TINY_PNG).decode(),
             "projector": [1] * 16,
+            "prompt": "warm hand-made brick",
         },
     )
     assert started.status_code == 200, started.text
@@ -160,12 +158,11 @@ def test_appearance_job_writes_png(monkeypatch, tmp_path):
     assert saved.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     meta = json.loads((tmp_path / "projects" / project.project_id / "appearance.json").read_text(encoding="utf-8"))
     assert meta["scope"] == "exterior"
+    assert meta["prompt"] == "warm hand-made brick"
     assert "primary" in meta["palette"]
-    assert meta["splat"] == "appearance.ply"
-    assert (tmp_path / "projects" / project.project_id / "appearance.ply").is_file()
     fetched = client.get(f"/api/desktop/projects/{project.project_id}/appearance")
     assert fetched.status_code == 200
-    assert fetched.json()["splat"] == "appearance.ply"
+    assert "palette" in fetched.json()
 
 
 def test_edit_png_sends_input_image_not_nested_extra_body(monkeypatch):
